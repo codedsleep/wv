@@ -134,7 +134,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - `BackendEvent::PaneDied(PaneId)`, `::SpawnFailed(PaneId, String)`
   - `#[async_trait] trait PaneBackend: Send` with methods per PROMPT.md
   - **Accept:** trait compiles; doc comments explain ID-space ownership
-- [ ] **1.3 `NativeBackend` skeleton** — *Codex* — `src/backend/native.rs`
+- [x] **1.3 `NativeBackend` skeleton** — *Codex* — `src/backend/native.rs`
   - Holds `HashMap<PaneId, MasterPty>`, `mpsc::Sender<(PaneId, Bytes)>`, `mpsc::Sender<BackendEvent>`
   - `spawn()` creates PTY via `portable_pty::native_pty_system()`, spawns child, kicks off a blocking-thread reader that pumps reads into the output channel
   - `write()`, `resize()`, `kill()` operate on the held `MasterPty`
