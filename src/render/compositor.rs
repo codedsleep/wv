@@ -3,6 +3,7 @@
 use crossterm::style::Color;
 
 use crate::anim::timeline::Timeline;
+use crate::config::ThemeConfig;
 use crate::layout::tree::Node;
 use crate::render::{chrome, subcell};
 use crate::term::pane::Pane;
@@ -16,9 +17,10 @@ pub fn compose(
     root: Option<&Node>,
     panes: &[Pane],
     focused: Option<PaneId>,
-    focused_border_color: crossterm::style::Color,
+    theme: ThemeConfig,
     timeline: &Timeline,
     back: &mut Surface,
+    pane_titles: bool,
 ) {
     let Some(root) = root else {
         back.clear();
@@ -26,7 +28,7 @@ pub fn compose(
     };
 
     compose_node(root, panes, back);
-    chrome::draw_borders(back, root, focused, focused_border_color, timeline);
+    chrome::draw_borders(back, root, panes, focused, theme, timeline, pane_titles);
 }
 
 fn compose_node(node: &Node, panes: &[Pane], back: &mut Surface) {
@@ -105,11 +107,20 @@ mod tests {
     use super::{compose, inset_rect};
     use crate::anim::timeline::Timeline;
     use crate::backend::PaneId;
+    use crate::config::ThemeConfig;
     use crate::layout::geometry::{FRect, Rect, Split};
     use crate::layout::tree::Node;
     use crate::render::chrome;
     use crate::term::pane::Pane;
     use crate::term::surface::Surface;
+
+    const TEST_THEME: ThemeConfig = ThemeConfig {
+        border_focused: crossterm::style::Color::Cyan,
+        border_unfocused: crossterm::style::Color::DarkGrey,
+        status_fg: crossterm::style::Color::White,
+        status_bg: crossterm::style::Color::DarkBlue,
+        accent: crossterm::style::Color::Red,
+    };
 
     #[test]
     fn compose_blits_first_pane_fullscreen() {
@@ -136,9 +147,10 @@ mod tests {
             Some(&root),
             &[pane],
             Some(PaneId(1)),
-            crossterm::style::Color::Cyan,
+            TEST_THEME,
             &Timeline::new(),
             &mut surface,
+            true,
         );
 
         assert_eq!(surface.get(0, 0).expect("cell exists").ch, '┌');
@@ -199,9 +211,10 @@ mod tests {
             Some(&root),
             &[top, bottom],
             Some(PaneId(1)),
-            crossterm::style::Color::Cyan,
+            TEST_THEME,
             &Timeline::new(),
             &mut surface,
+            true,
         );
 
         assert_eq!(surface.get(0, 0).expect("cell exists").ch, '┌');
@@ -233,17 +246,19 @@ mod tests {
             }),
             &[pane],
             Some(PaneId(1)),
-            crossterm::style::Color::Cyan,
+            TEST_THEME,
             &Timeline::new(),
             &mut surface,
+            true,
         );
         compose(
             None,
             &[],
             None,
-            crossterm::style::Color::Cyan,
+            TEST_THEME,
             &Timeline::new(),
             &mut surface,
+            true,
         );
 
         assert_eq!(surface.get(0, 0).expect("cell exists").ch, ' ');
@@ -305,17 +320,12 @@ mod tests {
             Some(&tree),
             &panes,
             Some(PaneId(1)),
-            crossterm::style::Color::Cyan,
+            TEST_THEME,
             &Timeline::new(),
             &mut new_surface,
+            true,
         );
-        compose_legacy_target_rects(
-            &tree,
-            &panes,
-            Some(PaneId(1)),
-            crossterm::style::Color::Cyan,
-            &mut old_surface,
-        );
+        compose_legacy_target_rects(&tree, &panes, Some(PaneId(1)), TEST_THEME, &mut old_surface);
 
         assert_eq!(new_surface.cells, old_surface.cells);
     }
@@ -324,11 +334,11 @@ mod tests {
         root: &Node,
         panes: &[Pane],
         focused: Option<PaneId>,
-        focused_border_color: crossterm::style::Color,
+        theme: ThemeConfig,
         back: &mut Surface,
     ) {
         compose_legacy_node(root, panes, back);
-        chrome::draw_borders(back, root, focused, focused_border_color, &Timeline::new());
+        chrome::draw_borders(back, root, panes, focused, theme, &Timeline::new(), true);
     }
 
     fn compose_legacy_node(node: &Node, panes: &[Pane], back: &mut Surface) {

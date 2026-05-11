@@ -19,7 +19,7 @@ use crate::backend::native::NativeBackend;
 use crate::backend::tmux::TmuxBackend;
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::Command;
-use crate::config::Config;
+use crate::config::{Config, ThemeConfig};
 use crate::input;
 use crate::input::keymap::Keymap;
 use crate::layout::geometry::{Direction, FRect, Rect, Split};
@@ -38,6 +38,17 @@ const OUTPUT_CHANNEL_CAPACITY: usize = 256;
 const EVENT_CHANNEL_CAPACITY: usize = 64;
 
 type BoxedBackend = Box<dyn PaneBackend>;
+
+#[cfg(test)]
+const fn test_theme() -> ThemeConfig {
+    ThemeConfig {
+        border_focused: crossterm::style::Color::Cyan,
+        border_unfocused: crossterm::style::Color::DarkGrey,
+        status_fg: crossterm::style::Color::White,
+        status_bg: crossterm::style::Color::DarkBlue,
+        accent: crossterm::style::Color::Red,
+    }
+}
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum ResizeMode {
@@ -89,8 +100,9 @@ pub struct App {
     diff: DiffRenderer,
     timeline: Timeline,
     keymap: Keymap,
-    focused_border_color: crossterm::style::Color,
+    theme: ThemeConfig,
     status_bar: bool,
+    pane_titles: bool,
     tick_interval: Duration,
     debug: DebugMode,
     last_tick_dt: Duration,
@@ -261,6 +273,7 @@ impl App {
         let config = Config::load();
         let tick_interval = frame_interval(config.ui.target_fps);
         let status_bar = config.ui.status_bar;
+        let pane_titles = config.ui.pane_titles;
         let root_rect = Rect {
             x: 0,
             y: 0,
@@ -294,8 +307,9 @@ impl App {
             diff: DiffRenderer::new(),
             timeline: Timeline::new(),
             keymap: config.keymap,
-            focused_border_color: config.ui.border_color,
+            theme: config.theme,
             status_bar,
+            pane_titles,
             tick_interval,
             debug: DebugMode::from_enabled(debug),
             last_tick_dt: Duration::ZERO,
@@ -510,8 +524,8 @@ impl App {
             return;
         }
 
-        let focused_color = self.focused_border_color;
-        let unfocused_color = chrome::UNFOCUSED_BORDER;
+        let focused_color = self.theme.border_focused;
+        let unfocused_color = self.theme.border_unfocused;
         let previous_from =
             self.timeline
                 .pane_border_color(previous, self.focused, focused_color, unfocused_color);
@@ -697,9 +711,10 @@ impl App {
             self.root.as_ref(),
             &self.panes,
             self.focused,
-            self.focused_border_color,
+            self.theme,
             &self.timeline,
             &mut self.back,
+            self.pane_titles,
         );
         if self.status_bar {
             chrome::draw_status_bar(
@@ -707,6 +722,7 @@ impl App {
                 "NORMAL",
                 chrome::leaf_count(self.root.as_ref()),
                 chrono::Local::now(),
+                self.theme,
             );
         }
         self.last_dirty_cells = self.estimated_dirty_cells();
@@ -905,8 +921,9 @@ impl App {
             diff: DiffRenderer::new(),
             timeline: Timeline::new(),
             keymap: Keymap::default(),
-            focused_border_color: crossterm::style::Color::Cyan,
+            theme: test_theme(),
             status_bar: true,
+            pane_titles: true,
             tick_interval: frame_interval(crate::config::DEFAULT_TARGET_FPS),
             debug: DebugMode::Off,
             last_tick_dt: Duration::ZERO,
@@ -1261,7 +1278,6 @@ mod tests {
     use crate::command::Command;
     use crate::layout::geometry::{FRect, Split};
     use crate::layout::tree::Node;
-    use crate::render::chrome;
     use tokio::time::Duration;
 
     struct MockBackend {
@@ -1410,8 +1426,8 @@ mod tests {
             app.timeline.pane_border_color(
                 PaneId(2),
                 app.focused,
-                app.focused_border_color,
-                chrome::UNFOCUSED_BORDER,
+                app.theme.border_focused,
+                app.theme.border_unfocused,
             ),
             Color::Cyan
         );
@@ -1419,10 +1435,10 @@ mod tests {
             app.timeline.pane_border_color(
                 PaneId(1),
                 app.focused,
-                app.focused_border_color,
-                chrome::UNFOCUSED_BORDER,
+                app.theme.border_focused,
+                app.theme.border_unfocused,
             ),
-            chrome::UNFOCUSED_BORDER
+            Color::DarkGrey
         );
 
         app.advance_animations(FOCUS_BORDER_TWEEN_DURATION)
@@ -1433,8 +1449,8 @@ mod tests {
             app.timeline.pane_border_color(
                 PaneId(1),
                 app.focused,
-                app.focused_border_color,
-                chrome::UNFOCUSED_BORDER,
+                app.theme.border_focused,
+                app.theme.border_unfocused,
             ),
             Color::Cyan
         );
@@ -1442,10 +1458,10 @@ mod tests {
             app.timeline.pane_border_color(
                 PaneId(2),
                 app.focused,
-                app.focused_border_color,
-                chrome::UNFOCUSED_BORDER,
+                app.theme.border_focused,
+                app.theme.border_unfocused,
             ),
-            chrome::UNFOCUSED_BORDER
+            Color::DarkGrey
         );
     }
 

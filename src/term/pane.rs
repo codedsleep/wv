@@ -30,6 +30,15 @@ impl Pane {
         self.parser.screen()
     }
 
+    pub fn title(&self) -> Option<&str> {
+        let title = self.screen().title();
+        if title.is_empty() {
+            None
+        } else {
+            Some(title)
+        }
+    }
+
     pub fn cells_into(&self, surface: &mut Surface, dst_x: u16, dst_y: u16) {
         let (rows, cols) = self.screen().size();
 
@@ -127,5 +136,16 @@ mod tests {
             assert_eq!(cell.ch, ch);
             assert_eq!(cell.fg, Color::AnsiValue(1));
         }
+    }
+
+    #[test]
+    fn title_returns_osc_title_when_set() {
+        let mut pane = Pane::new(PaneId(1), 80, 24);
+
+        assert_eq!(pane.title(), None);
+
+        pane.process(b"\x1b]2;hello\x07");
+
+        assert_eq!(pane.title(), Some("hello"));
     }
 }

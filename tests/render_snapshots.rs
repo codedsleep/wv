@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use crossterm::style::Color;
 use weave::anim::timeline::Timeline;
 use weave::backend::PaneId;
+use weave::config::ThemeConfig;
 use weave::layout::geometry::{FRect, Rect, Split};
 use weave::layout::tree::Node;
 use weave::render::compositor::compose;
@@ -15,6 +16,14 @@ const WIDTH: u16 = 80;
 const HEIGHT: u16 = 24;
 static ANSI_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+const TEST_THEME: ThemeConfig = ThemeConfig {
+    border_focused: Color::Cyan,
+    border_unfocused: Color::DarkGrey,
+    status_fg: Color::White,
+    status_bg: Color::DarkBlue,
+    accent: Color::Red,
+};
+
 #[test]
 fn single_fullscreen_pane() {
     let rect = screen_rect();
@@ -22,6 +31,15 @@ fn single_fullscreen_pane() {
     let panes = vec![pane(PaneId(1), rect, "alpha fullscreen")];
 
     insta::assert_snapshot!("single_fullscreen_pane", render_ansi(&root, &panes));
+}
+
+#[test]
+fn single_pane_with_title() {
+    let rect = screen_rect();
+    let root = leaf(PaneId(1), rect);
+    let panes = vec![pane(PaneId(1), rect, "\x1b]2;build logs\x07alpha")];
+
+    insta::assert_snapshot!("single_pane_with_title", render_ansi(&root, &panes));
 }
 
 #[test]
@@ -124,9 +142,10 @@ fn render_ansi(root: &Node, panes: &[Pane]) -> String {
         Some(root),
         panes,
         Some(PaneId(1)),
-        Color::Cyan,
+        TEST_THEME,
         &Timeline::new(),
         &mut back,
+        true,
     );
     renderer
         .flush(&front, &back, &mut bytes)

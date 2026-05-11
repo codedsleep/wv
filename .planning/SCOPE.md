@@ -385,11 +385,11 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 
 **Goal:** v0.1.0 ship: themes, titles, debug, prebuilt binaries, contributor docs.
 
-- [ ] **5.1 Configurable themes** — *Codex* — `src/config.rs`, `src/render/chrome.rs`
+- [x] **5.1 Configurable themes** — *Codex* — `src/config.rs`, `src/render/chrome.rs`
   - `[theme] border_focused = "#7dcfff"`, `border_unfocused = "#3b4252"`, `status_fg = "#eceff4"`, `status_bg = "#2e3440"`, `accent = "#bf616a"`
   - Ship 2 built-ins: `nord`, `tokyonight` selectable via `[theme] preset = "nord"`
   - **Accept:** swap themes via config without restart? (defer hot-reload; restart is fine)
-- [ ] **5.2 Pane titles via OSC 0/2** — *Codex* — `src/term/pane.rs`
+- [x] **5.2 Pane titles via OSC 0/2** — *Codex* — `src/term/pane.rs`
   - vt100 surfaces `title()` from OSC 0/2 sequences; render in border-top center when present and `[ui] pane_titles = true`
   - **Accept:** `printf '\e]2;hello\a'` updates the border title
 - [ ] **5.3 Truecolor detection + 256-color fallback** — *Codex* — `src/render/diff.rs`
@@ -409,23 +409,18 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Jobs: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo bench --no-run`
   - Ubuntu runners only (Linux-only project)
   - **Accept:** CI green on a sample PR
-  - [ ] **5.7 CONTRIBUTING.md** — *CLAUDE*
-  - How to build, run, test, file issues
-  - Architecture overview (link to PROMPT.md)
-  - Note: tmux protocol parser has proptests; add new edge cases via the property strategies
-  - **Accept:** doc reads cleanly
-- [ ] **5.8 README final pass** — *Claude*
+- [ ] **5.7 README final pass** — *Claude*
   - Animated demo (asciinema preferred for terminal-native rendering)
   - Install instructions: prebuilt binary (preferred), `cargo install --git ...`, build from source
   - Feature list, non-goals, FAQ (why not a tmux fork?)
   - **Accept:** README is the kind you'd star
-- [ ] **5.9 LICENSE** — *Claude* — `LICENSE-MIT`, `LICENSE-APACHE`
+- [x] **5.8 LICENSE** — *Claude* — `LICENSE-MIT`, `LICENSE-APACHE`
   - Dual MIT/Apache-2.0 (Rust standard)
   - **Accept:** files exist, Cargo.toml `license = "MIT OR Apache-2.0"` matches
-- [ ] **5.10 Issue templates** — *Claude* — `.github/ISSUE_TEMPLATE/`
+- [x] **5.9 Issue templates** — *Claude* — `.github/ISSUE_TEMPLATE/`
   - bug.yml, feature.yml, terminal-compat.yml
   - **Accept:** templates render in the GitHub UI
-- [ ] **5.11 v0.1.0 release** — *Kimi*
+- [ ] **5.10 v0.1.0 release** — *kimi*
   - `git tag v0.1.0`, push tag, watch cargo-dist build, edit GitHub Release notes
   - **Accept:** release page is live with binaries for download
 
