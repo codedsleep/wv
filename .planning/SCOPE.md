@@ -225,13 +225,13 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Schema: `[keymap.prefix] key = "Ctrl+Space"`, `[keymap.bindings] s = "split-h"` etc., `[ui] border_color = "cyan"`, `[ui] status_bar = true`
   - Missing file → defaults; parse errors → log warn + fall back to defaults (don't crash)
   - **Accept:** unit tests cover default, override, and malformed cases
-- [ ] **2.9 Open-question defaults locked in** — *Claude* — record decisions in PROMPT.md or here
+- [x] **2.9 Open-question defaults locked in** — *Claude* — record decisions in PROMPT.md or here
   - Status bar = minimal (mode + clock); rich behind future config
   - Prefix = `Ctrl+Space`
   - `wv ls`/`wv attach` aliases — defer to Phase 4
   - Scrollback — punt to v1
   - **Accept:** decisions captured in this file under §Locked decisions
-- [ ] **2.10 Update README** — *Claude* — `README.md`
+- [x] **2.10 Update README** — *Claude* — `README.md`
   - "status: phase 2 — splits work"
   - List default keybinds
   - Show example config
