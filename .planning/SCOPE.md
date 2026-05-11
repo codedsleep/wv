@@ -220,7 +220,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Default prefix: `Ctrl+Space`
   - Default bindings (in Prefix mode): `s`→SplitH, `v`→SplitV, `h/j/k/l`→FocusLeft/Down/Up/Right, `x`→Close, `q`→Quit, `Esc`→back to Normal
   - **Accept:** all default bindings work
-- [ ] **2.8 Config loading** — *Codex* — `src/config.rs`
+- [x] **2.8 Config loading** — *Codex* — `src/config.rs`
   - Path: `~/.config/weave/config.toml` (or `$XDG_CONFIG_HOME/weave/config.toml`)
   - Schema: `[keymap.prefix] key = "Ctrl+Space"`, `[keymap.bindings] s = "split-h"` etc., `[ui] border_color = "cyan"`, `[ui] status_bar = true`
   - Missing file → defaults; parse errors → log warn + fall back to defaults (don't crash)

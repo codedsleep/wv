@@ -21,12 +21,23 @@ impl Mode {
     }
 }
 
+#[derive(Clone)]
 pub struct Keymap {
     prefix: KeyEvent,
     bindings: HashMap<KeyEvent, Command>,
 }
 
 impl Keymap {
+    pub fn set_prefix(&mut self, prefix: KeyEvent) {
+        self.prefix = normalize_key(&prefix).unwrap_or(prefix);
+    }
+
+    pub fn set_binding(&mut self, key: KeyEvent, command: Command) {
+        if let Some(key) = normalize_key(&key) {
+            self.bindings.insert(key, command);
+        }
+    }
+
     pub fn command_for(&self, event: &KeyEvent) -> Option<Command> {
         self.bindings.get(&normalize_key(event)?).copied()
     }

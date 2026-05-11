@@ -13,19 +13,24 @@ const UNFOCUSED_BORDER: Color = Color::DarkGrey;
 const STATUS_FG: Color = Color::White;
 const STATUS_BG: Color = Color::DarkBlue;
 
-pub fn draw_borders(surface: &mut Surface, tree: &Node, focused: Option<PaneId>) {
+pub fn draw_borders(
+    surface: &mut Surface,
+    tree: &Node,
+    focused: Option<PaneId>,
+    focused_color: Color,
+) {
     match tree {
         Node::Leaf { pane, rect } => {
             let color = if Some(*pane) == focused {
-                FOCUSED_BORDER
+                focused_color
             } else {
                 UNFOCUSED_BORDER
             };
             draw_rect_border(surface, *rect, color);
         }
         Node::Internal { a, b, .. } => {
-            draw_borders(surface, a, focused);
-            draw_borders(surface, b, focused);
+            draw_borders(surface, a, focused, focused_color);
+            draw_borders(surface, b, focused, focused_color);
         }
     }
 }
@@ -142,7 +147,7 @@ mod tests {
             },
         };
 
-        draw_borders(&mut surface, &tree, Some(PaneId(1)));
+        draw_borders(&mut surface, &tree, Some(PaneId(1)), Color::Cyan);
 
         let focused_corner = surface.get(0, 0).expect("cell exists");
         let unfocused_corner = surface.get(0, 2).expect("cell exists");

@@ -13,6 +13,7 @@ use tokio::time::{self, Duration};
 use crate::backend::native::NativeBackend;
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::Command;
+use crate::config::Config;
 use crate::input;
 use crate::input::keymap::{Keymap, Mode};
 use crate::layout::geometry::{Direction, Rect, Split};
@@ -36,6 +37,8 @@ pub struct App<B = NativeBackend> {
     diff: DiffRenderer,
     keymap: Keymap,
     mode: Mode,
+    focused_border_color: crossterm::style::Color,
+    status_bar: bool,
     dirty: bool,
     quit: bool,
 }
@@ -43,6 +46,7 @@ pub struct App<B = NativeBackend> {
 impl App<NativeBackend> {
     pub fn new(width: u16, height: u16) -> Self {
         let (backend, output_rx, event_rx) = NativeBackend::new();
+        let config = Config::load();
 
         Self {
             front: Surface::new(width, height),
@@ -56,8 +60,10 @@ impl App<NativeBackend> {
             stdout: io::stdout(),
             queue_buf: Vec::new(),
             diff: DiffRenderer::new(),
-            keymap: Keymap::default(),
+            keymap: config.keymap,
             mode: Mode::Normal,
+            focused_border_color: config.ui.border_color,
+            status_bar: config.ui.status_bar,
             dirty: true,
             quit: false,
         }
@@ -323,14 +329,17 @@ where
             self.root.as_ref(),
             &self.panes,
             self.focused,
+            self.focused_border_color,
             &mut self.back,
         );
-        chrome::draw_status_bar(
-            &mut self.back,
-            self.mode.label(),
-            chrome::leaf_count(self.root.as_ref()),
-            chrono::Local::now(),
-        );
+        if self.status_bar {
+            chrome::draw_status_bar(
+                &mut self.back,
+                self.mode.label(),
+                chrome::leaf_count(self.root.as_ref()),
+                chrono::Local::now(),
+            );
+        }
         self.diff.flush(&self.front, &self.back, &mut self.stdout)?;
         self.stdout.flush()?;
         std::mem::swap(&mut self.front, &mut self.back);
@@ -340,12 +349,16 @@ where
         Ok(())
     }
 
-    const fn root_rect(&self) -> Rect {
+    fn root_rect(&self) -> Rect {
         Rect {
             x: 0,
             y: 0,
             w: self.back.width,
-            h: self.back.height.saturating_sub(1),
+            h: if self.status_bar {
+                self.back.height.saturating_sub(1)
+            } else {
+                self.back.height
+            },
         }
     }
 
@@ -396,6 +409,8 @@ where
             diff: DiffRenderer::new(),
             keymap: Keymap::default(),
             mode: Mode::Normal,
+            focused_border_color: crossterm::style::Color::Cyan,
+            status_bar: true,
             dirty: true,
             quit: false,
         }

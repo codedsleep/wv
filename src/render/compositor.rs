@@ -6,14 +6,20 @@ use crate::term::pane::Pane;
 use crate::term::surface::Surface;
 use crate::{backend::PaneId, layout::geometry::Rect};
 
-pub fn compose(root: Option<&Node>, panes: &[Pane], focused: Option<PaneId>, back: &mut Surface) {
+pub fn compose(
+    root: Option<&Node>,
+    panes: &[Pane],
+    focused: Option<PaneId>,
+    focused_border_color: crossterm::style::Color,
+    back: &mut Surface,
+) {
     let Some(root) = root else {
         back.clear();
         return;
     };
 
     compose_node(root, panes, back);
-    chrome::draw_borders(back, root, focused);
+    chrome::draw_borders(back, root, focused, focused_border_color);
 }
 
 fn compose_node(node: &Node, panes: &[Pane], back: &mut Surface) {
@@ -68,7 +74,13 @@ mod tests {
         };
 
         pane.process(b"hi");
-        compose(Some(&root), &[pane], Some(PaneId(1)), &mut surface);
+        compose(
+            Some(&root),
+            &[pane],
+            Some(PaneId(1)),
+            crossterm::style::Color::Cyan,
+            &mut surface,
+        );
 
         assert_eq!(surface.get(0, 0).expect("cell exists").ch, '┌');
         assert_eq!(surface.get(1, 1).expect("cell exists").ch, 'h');
@@ -111,7 +123,13 @@ mod tests {
 
         top.process(b"A");
         bottom.process(b"B");
-        compose(Some(&root), &[top, bottom], Some(PaneId(1)), &mut surface);
+        compose(
+            Some(&root),
+            &[top, bottom],
+            Some(PaneId(1)),
+            crossterm::style::Color::Cyan,
+            &mut surface,
+        );
 
         assert_eq!(surface.get(0, 0).expect("cell exists").ch, '┌');
         assert_eq!(surface.get(1, 1).expect("cell exists").ch, 'A');
@@ -136,9 +154,10 @@ mod tests {
             }),
             &[pane],
             Some(PaneId(1)),
+            crossterm::style::Color::Cyan,
             &mut surface,
         );
-        compose(None, &[], None, &mut surface);
+        compose(None, &[], None, crossterm::style::Color::Cyan, &mut surface);
 
         assert_eq!(surface.get(0, 0).expect("cell exists").ch, ' ');
     }
