@@ -377,7 +377,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 
 **Phase 4 acceptance:** `wv --backend tmux` runs everything Phase 3 did, plus survives detach/reattach with state intact. Parser is proptest-clean. Tag `phase-4` exists.
 
-- [ ] **4.99 commit & tag** — *Kimi* — per-task commits, then `git tag phase-4`
+- [x] **4.99 commit & tag** — *Kimi* — per-task commits, then `git tag phase-4`
 
 ---
 
