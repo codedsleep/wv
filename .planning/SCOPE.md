@@ -183,7 +183,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 
 **Goal:** recursive splits, focus navigation, chrome, config-driven keymap.
 
-- [ ] **2.1 Geometry primitives** — *Codex* — `src/layout/geometry.rs`
+- [x] **2.1 Geometry primitives** — *Codex* — `src/layout/geometry.rs`
   - `struct Rect { x: u16, y: u16, w: u16, h: u16 }`
   - `enum Direction { Left, Right, Up, Down }`
   - `enum Split { Horizontal, Vertical }`
