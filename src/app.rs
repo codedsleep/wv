@@ -1,5 +1,6 @@
 //! `App`: event loop + state owner.
 
+use std::collections::HashSet;
 use std::io::{self, Write};
 
 use anyhow::Context;
@@ -28,6 +29,8 @@ use crate::term::surface::Surface;
 const FOCUS_BORDER_TWEEN_DURATION: Duration = Duration::from_millis(120);
 const OPEN_NEW_PANE_DURATION: Duration = Duration::from_millis(220);
 const OPEN_SIBLING_DURATION: Duration = Duration::from_millis(180);
+// Close tweens use ease-out-cubic so panes decelerate into the collapsed line.
+const CLOSE_PANE_DURATION: Duration = Duration::from_millis(180);
 
 pub struct App<B = NativeBackend> {
     front: Surface,
@@ -35,6 +38,7 @@ pub struct App<B = NativeBackend> {
     panes: Vec<Pane>,
     root: Option<Node>,
     focused: Option<PaneId>,
+    closing: HashSet<PaneId>,
     backend: B,
     output_rx: mpsc::Receiver<(PaneId, Bytes)>,
     event_rx: mpsc::Receiver<BackendEvent>,
@@ -63,6 +67,7 @@ impl App<NativeBackend> {
             panes: Vec::new(),
             root: None,
             focused: None,
+            closing: HashSet::new(),
             backend,
             output_rx,
             event_rx,
@@ -111,7 +116,7 @@ where
                     let now = time::Instant::now();
                     let dt = now.duration_since(last_tick);
                     last_tick = now;
-                    self.tick(dt)?;
+                    self.tick(dt).await?;
                 }
                 Some((id, bytes)) = self.output_rx.recv() => {
                     if let Some(pane) = self.pane_mut(id) {
@@ -283,32 +288,66 @@ where
         let Some(focused) = self.focused else {
             return Ok(());
         };
+        if self.closing.contains(&focused) {
+            return Ok(());
+        }
 
-        self.backend.kill(focused).await?;
-        self.remove_pane(focused);
-
-        let Some(root) = self.root.as_mut() else {
+        let Some(root) = self.root.as_ref() else {
             self.focused = None;
             self.quit = true;
             self.dirty = true;
             return Ok(());
         };
 
-        if root.close(focused) {
-            self.focused = self.root.as_ref().and_then(first_leaf_pane);
-            if self.focused.is_some() {
-                self.recompute_layout();
-            } else {
-                self.root = None;
-                self.quit = true;
-            }
-        } else {
+        let Some(close_plan) = close_plan(root, focused) else {
+            self.backend.kill(focused).await?;
+            self.remove_pane(focused);
             self.root = None;
             self.focused = None;
             self.quit = true;
+            self.dirty = true;
+            return Ok(());
+        };
+
+        let Some(closing_current) = self.leaf_rect_current(focused) else {
+            return Ok(());
+        };
+        let mut post_close_root = root.clone();
+        if !post_close_root.close(focused) {
+            return Ok(());
+        }
+        post_close_root.compute_layout(self.root_rect());
+
+        let mut remaining_targets = Vec::new();
+        collect_leaf_targets(&post_close_root, &mut remaining_targets);
+        for (pane, target) in remaining_targets {
+            if pane == focused {
+                continue;
+            }
+            if let Some(from) = self.leaf_rect_current(pane) {
+                self.timeline.tween_leaf_rect(
+                    pane,
+                    from,
+                    FRect::from(target),
+                    CLOSE_PANE_DURATION,
+                    Easing::EaseOutCubic,
+                );
+            }
         }
 
+        let collapsed =
+            collapsed_close_rect(close_plan.split, close_plan.closing_is_a, closing_current);
+        self.timeline.tween_leaf_rect(
+            focused,
+            closing_current,
+            collapsed,
+            CLOSE_PANE_DURATION,
+            Easing::EaseOutCubic,
+        );
+        self.closing.insert(focused);
+        self.focused = first_leaf_pane(&post_close_root);
         self.dirty = true;
+
         Ok(())
     }
 
@@ -409,8 +448,8 @@ where
         self.dirty = true;
     }
 
-    fn tick(&mut self, dt: Duration) -> io::Result<()> {
-        self.advance_animations(dt);
+    async fn tick(&mut self, dt: Duration) -> anyhow::Result<()> {
+        self.advance_animations(dt).await?;
 
         if !self.dirty {
             return Ok(());
@@ -442,12 +481,50 @@ where
         Ok(())
     }
 
-    fn advance_animations(&mut self, dt: Duration) {
+    async fn advance_animations(&mut self, dt: Duration) -> anyhow::Result<()> {
         let advance = self.timeline.advance(dt, self.root.as_mut());
 
-        if !advance.changed_panes.is_empty() {
+        if !advance.changed_panes.is_empty() || !advance.completed_leaf_rects.is_empty() {
             self.dirty = true;
         }
+
+        let mut completed_closings = advance.completed_leaf_rects;
+        for pane in &self.closing {
+            if !self.timeline.has_leaf_rect_tween(*pane) {
+                completed_closings.push(*pane);
+            }
+        }
+        self.finish_completed_closings(&completed_closings).await?;
+
+        Ok(())
+    }
+
+    async fn finish_completed_closings(&mut self, completed: &[PaneId]) -> anyhow::Result<()> {
+        for pane in completed {
+            if !self.closing.remove(pane) {
+                continue;
+            }
+
+            self.backend.kill(*pane).await?;
+            self.remove_pane(*pane);
+
+            if let Some(root) = self.root.as_mut() {
+                if root.close(*pane) {
+                    self.recompute_layout();
+                    if self.focused.is_none() || self.focused == Some(*pane) {
+                        self.focused = self.root.as_ref().and_then(first_leaf_pane);
+                    }
+                } else {
+                    self.root = None;
+                    self.focused = None;
+                    self.quit = true;
+                }
+            }
+
+            self.dirty = true;
+        }
+
+        Ok(())
     }
 
     fn root_rect(&self) -> Rect {
@@ -473,6 +550,13 @@ where
     fn leaf_rect_target(&self, pane: PaneId) -> Option<Rect> {
         match self.root.as_ref()?.find_leaf(pane)? {
             Node::Leaf { rect_target, .. } => Some(*rect_target),
+            Node::Internal { .. } => None,
+        }
+    }
+
+    fn leaf_rect_current(&self, pane: PaneId) -> Option<FRect> {
+        match self.root.as_ref()?.find_leaf(pane)? {
+            Node::Leaf { rect_current, .. } => Some(*rect_current),
             Node::Internal { .. } => None,
         }
     }
@@ -520,6 +604,7 @@ where
                 rect_target: root_rect,
             }),
             focused: Some(pane_id),
+            closing: HashSet::new(),
             backend,
             output_rx,
             event_rx,
@@ -554,6 +639,43 @@ fn first_leaf_pane(node: &Node) -> Option<PaneId> {
     }
 }
 
+#[derive(Copy, Clone)]
+struct ClosePlan {
+    split: Split,
+    closing_is_a: bool,
+}
+
+fn close_plan(node: &Node, pane: PaneId) -> Option<ClosePlan> {
+    match node {
+        Node::Leaf { .. } => None,
+        Node::Internal { split, a, b, .. } if node_is_leaf_for(a, pane) => Some(ClosePlan {
+            split: *split,
+            closing_is_a: true,
+        }),
+        Node::Internal { split, a, b, .. } if node_is_leaf_for(b, pane) => Some(ClosePlan {
+            split: *split,
+            closing_is_a: false,
+        }),
+        Node::Internal { a, b, .. } => close_plan(a, pane).or_else(|| close_plan(b, pane)),
+    }
+}
+
+fn node_is_leaf_for(node: &Node, pane: PaneId) -> bool {
+    matches!(node, Node::Leaf { pane: leaf_pane, .. } if *leaf_pane == pane)
+}
+
+fn collect_leaf_targets(node: &Node, targets: &mut Vec<(PaneId, Rect)>) {
+    match node {
+        Node::Leaf {
+            pane, rect_target, ..
+        } => targets.push((*pane, *rect_target)),
+        Node::Internal { a, b, .. } => {
+            collect_leaf_targets(a, targets);
+            collect_leaf_targets(b, targets);
+        }
+    }
+}
+
 fn frame_interval(target_fps: u16) -> Duration {
     Duration::from_nanos(1_000_000_000 / u64::from(target_fps))
 }
@@ -575,12 +697,32 @@ fn collapsed_open_rect(split: Split, old_parent_rect: Rect, new_target: Rect) ->
     }
 }
 
+fn collapsed_close_rect(split: Split, closing_is_a: bool, current: FRect) -> FRect {
+    match (split, closing_is_a) {
+        (Split::Vertical, true) => FRect { w: 0.0, ..current },
+        (Split::Vertical, false) => FRect {
+            x: current.x + current.w,
+            w: 0.0,
+            ..current
+        },
+        (Split::Horizontal, true) => FRect { h: 0.0, ..current },
+        (Split::Horizontal, false) => FRect {
+            y: current.y + current.h,
+            h: 0.0,
+            ..current
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use anyhow::Error;
     use crossterm::style::Color;
 
-    use super::{frame_interval, App, FOCUS_BORDER_TWEEN_DURATION, OPEN_NEW_PANE_DURATION};
+    use super::{
+        frame_interval, App, CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION,
+        OPEN_NEW_PANE_DURATION,
+    };
     use crate::anim::tween::Easing;
     use crate::backend::{PaneBackend, PaneCommand, PaneId};
     use crate::command::Command;
@@ -687,7 +829,9 @@ mod tests {
             Easing::Linear,
         );
 
-        app.advance_animations(Duration::from_millis(50));
+        app.advance_animations(Duration::from_millis(50))
+            .await
+            .expect("animations advance");
 
         assert!(app.dirty);
         match app.root.expect("root exists") {
@@ -735,7 +879,9 @@ mod tests {
             chrome::UNFOCUSED_BORDER
         );
 
-        app.advance_animations(FOCUS_BORDER_TWEEN_DURATION);
+        app.advance_animations(FOCUS_BORDER_TWEEN_DURATION)
+            .await
+            .expect("animations advance");
 
         assert_eq!(
             app.timeline.pane_border_color(
@@ -790,7 +936,9 @@ mod tests {
             Node::Internal { .. } => panic!("expected new leaf"),
         }
 
-        app.advance_animations(OPEN_NEW_PANE_DURATION);
+        app.advance_animations(OPEN_NEW_PANE_DURATION)
+            .await
+            .expect("animations advance");
 
         match app
             .root
@@ -806,6 +954,45 @@ mod tests {
             } => assert_eq!(*rect_current, FRect::from(*rect_target)),
             Node::Internal { .. } => panic!("expected new leaf"),
         }
+    }
+
+    #[tokio::test]
+    async fn close_keeps_pane_mid_tween_and_removes_after_completion() {
+        let mut app = App::with_backend_for_test(
+            MockBackend {
+                next_id: PaneId(2),
+                resized: Vec::new(),
+            },
+            80,
+            24,
+            PaneId(1),
+        );
+        app.execute(Command::SplitH).await.expect("split succeeds");
+        app.advance_animations(OPEN_NEW_PANE_DURATION)
+            .await
+            .expect("open animation completes");
+
+        app.execute(Command::Close).await.expect("close starts");
+
+        assert!(app
+            .root
+            .as_ref()
+            .expect("root exists")
+            .find_leaf(PaneId(2))
+            .is_some());
+        assert!(app.panes.iter().any(|pane| pane.id() == PaneId(2)));
+
+        app.advance_animations(CLOSE_PANE_DURATION)
+            .await
+            .expect("close animation completes");
+
+        assert!(app
+            .root
+            .as_ref()
+            .expect("root exists")
+            .find_leaf(PaneId(2))
+            .is_none());
+        assert!(!app.panes.iter().any(|pane| pane.id() == PaneId(2)));
     }
 
     #[test]

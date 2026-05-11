@@ -24,6 +24,7 @@ pub struct Timeline {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TimelineAdvance {
     pub changed_panes: Vec<PaneId>,
+    pub completed_leaf_rects: Vec<PaneId>,
     pub border_color_changed: bool,
 }
 
@@ -38,6 +39,10 @@ impl Timeline {
 
     pub fn is_idle(&self) -> bool {
         self.active_count() == 0
+    }
+
+    pub fn has_leaf_rect_tween(&self, pane: PaneId) -> bool {
+        self.leaf_rects.contains_key(&pane)
     }
 
     pub fn tween_leaf_rect(
@@ -137,6 +142,7 @@ impl Timeline {
             }
             if !running {
                 finished.push(pane);
+                advance.completed_leaf_rects.push(pane);
             }
         }
 

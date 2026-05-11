@@ -278,7 +278,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 - [x] **3.6 Border color tween on focus** — *Codex* — `src/render/chrome.rs`, `src/anim/timeline.rs`
   - On focus change, start a 120ms ease-out-cubic Color tween from old → new border color
   - **Accept:** focus change animates color
-- [ ] **3.7 Open animation** — *Codex* — `src/app.rs`
+- [x] **3.7 Open animation** — *Codex* — `src/app.rs`
   - On `SplitH/V`: new pane's `rect_current` starts at the split line (zero width/height), tweens to `rect_target` over 220ms ease-out-back
   - Sibling shrinks from old rect to new rect over 180ms ease-out-cubic
   - **Accept:** visual smoke check
