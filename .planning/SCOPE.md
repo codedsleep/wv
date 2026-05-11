@@ -294,7 +294,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Top-right corner: `fps:160 frame:5.8ms tweens:3 dirty:1240`
   - Behind `wv --debug` flag
   - **Accept:** overlay renders without affecting normal output
-- [ ] **3.11 Criterion benches** — *Codex* — `benches/diff.rs`, `benches/compose.rs`
+- [x] **3.11 Criterion benches** — *Codex* — `benches/diff.rs`, `benches/compose.rs`
   - `diff`: bench front-vs-back diff on 200x60 surfaces with 0% / 1% / 50% / 100% changed cells
   - `compose`: bench compose pass with 1, 4, 16 panes
   - **Accept:** `cargo bench` runs; numbers logged for baseline
