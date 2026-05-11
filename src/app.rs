@@ -10,6 +10,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
+use crate::anim::timeline::Timeline;
 use crate::backend::native::NativeBackend;
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::Command;
@@ -35,10 +36,12 @@ pub struct App<B = NativeBackend> {
     stdout: io::Stdout,
     queue_buf: Vec<u8>,
     diff: DiffRenderer,
+    timeline: Timeline,
     keymap: Keymap,
     mode: Mode,
     focused_border_color: crossterm::style::Color,
     status_bar: bool,
+    tick_interval: Duration,
     dirty: bool,
     quit: bool,
 }
@@ -47,6 +50,7 @@ impl App<NativeBackend> {
     pub fn new(width: u16, height: u16) -> Self {
         let (backend, output_rx, event_rx) = NativeBackend::new();
         let config = Config::load();
+        let tick_interval = frame_interval(config.ui.target_fps);
 
         Self {
             front: Surface::new(width, height),
@@ -60,10 +64,12 @@ impl App<NativeBackend> {
             stdout: io::stdout(),
             queue_buf: Vec::new(),
             diff: DiffRenderer::new(),
+            timeline: Timeline::new(),
             keymap: config.keymap,
             mode: Mode::Normal,
             focused_border_color: config.ui.border_color,
             status_bar: config.ui.status_bar,
+            tick_interval,
             dirty: true,
             quit: false,
         }
@@ -87,7 +93,8 @@ where
         self.focused = Some(pane_id);
         self.recompute_layout();
 
-        let mut ticks = time::interval(Duration::from_millis(16));
+        let mut ticks = time::interval(self.tick_interval);
+        let mut last_tick = time::Instant::now();
         let mut events = EventStream::new();
         let mut sigint = signal(SignalKind::interrupt())?;
         let mut sigterm = signal(SignalKind::terminate())?;
@@ -96,7 +103,10 @@ where
         while !self.quit {
             tokio::select! {
                 _ = ticks.tick() => {
-                    self.tick()?;
+                    let now = time::Instant::now();
+                    let dt = now.duration_since(last_tick);
+                    last_tick = now;
+                    self.tick(dt)?;
                 }
                 Some((id, bytes)) = self.output_rx.recv() => {
                     if let Some(pane) = self.pane_mut(id) {
@@ -320,7 +330,9 @@ where
         self.dirty = true;
     }
 
-    fn tick(&mut self) -> io::Result<()> {
+    fn tick(&mut self, dt: Duration) -> io::Result<()> {
+        self.advance_animations(dt);
+
         if !self.dirty {
             return Ok(());
         }
@@ -348,6 +360,16 @@ where
         self.dirty = false;
 
         Ok(())
+    }
+
+    fn advance_animations(&mut self, dt: Duration) {
+        let advance = self
+            .timeline
+            .advance(dt, self.root.as_mut(), &mut self.focused_border_color);
+
+        if advance.border_color_changed || !advance.changed_panes.is_empty() {
+            self.dirty = true;
+        }
     }
 
     fn root_rect(&self) -> Rect {
@@ -409,10 +431,12 @@ where
             stdout: io::stdout(),
             queue_buf: Vec::new(),
             diff: DiffRenderer::new(),
+            timeline: Timeline::new(),
             keymap: Keymap::default(),
             mode: Mode::Normal,
             focused_border_color: crossterm::style::Color::Cyan,
             status_bar: true,
+            tick_interval: frame_interval(crate::config::DEFAULT_TARGET_FPS),
             dirty: true,
             quit: false,
         }
@@ -435,15 +459,21 @@ fn first_leaf_pane(node: &Node) -> Option<PaneId> {
     }
 }
 
+fn frame_interval(target_fps: u16) -> Duration {
+    Duration::from_nanos(1_000_000_000 / u64::from(target_fps))
+}
+
 #[cfg(test)]
 mod tests {
     use anyhow::Error;
 
-    use super::App;
+    use super::{frame_interval, App};
+    use crate::anim::tween::Easing;
     use crate::backend::{PaneBackend, PaneCommand, PaneId};
     use crate::command::Command;
-    use crate::layout::geometry::Split;
+    use crate::layout::geometry::{FRect, Split};
     use crate::layout::tree::Node;
+    use tokio::time::Duration;
 
     struct MockBackend {
         next_id: PaneId,
@@ -511,5 +541,52 @@ mod tests {
         assert_eq!(app.focused, Some(PaneId(2)));
         assert!(app.panes.iter().any(|pane| pane.id() == PaneId(2)));
         assert_eq!(app.backend.resized, vec![PaneId(2)]);
+    }
+
+    #[tokio::test]
+    async fn advance_animations_updates_leaf_current_rect_and_marks_dirty() {
+        let mut app = App::with_backend_for_test(
+            MockBackend {
+                next_id: PaneId(2),
+                resized: Vec::new(),
+            },
+            80,
+            24,
+            PaneId(1),
+        );
+        app.dirty = false;
+        app.timeline.tween_leaf_rect(
+            PaneId(1),
+            FRect {
+                x: 0.0,
+                y: 0.0,
+                w: 80.0,
+                h: 24.0,
+            },
+            FRect {
+                x: 10.0,
+                y: 0.0,
+                w: 70.0,
+                h: 24.0,
+            },
+            Duration::from_millis(100),
+            Easing::Linear,
+        );
+
+        app.advance_animations(Duration::from_millis(50));
+
+        assert!(app.dirty);
+        match app.root.expect("root exists") {
+            Node::Leaf { rect_current, .. } => {
+                assert_eq!(rect_current.x, 5.0);
+                assert_eq!(rect_current.w, 75.0);
+            }
+            Node::Internal { .. } => panic!("expected leaf root"),
+        }
+    }
+
+    #[test]
+    fn frame_interval_uses_configured_fps() {
+        assert_eq!(frame_interval(160), Duration::from_nanos(6_250_000));
     }
 }

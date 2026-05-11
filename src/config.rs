@@ -11,6 +11,10 @@ use serde::Deserialize;
 use crate::command::Command;
 use crate::input::keymap::Keymap;
 
+pub const DEFAULT_TARGET_FPS: u16 = 160;
+pub const MIN_TARGET_FPS: u16 = 30;
+pub const MAX_TARGET_FPS: u16 = 240;
+
 #[derive(Clone)]
 pub struct Config {
     pub keymap: Keymap,
@@ -21,6 +25,7 @@ pub struct Config {
 pub struct UiConfig {
     pub border_color: Color,
     pub status_bar: bool,
+    pub target_fps: u16,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -79,6 +84,9 @@ impl Config {
         if let Some(status_bar) = raw.ui.status_bar {
             config.ui.status_bar = status_bar;
         }
+        if let Some(target_fps) = raw.ui.target_fps {
+            config.ui.target_fps = normalize_target_fps(target_fps);
+        }
 
         Ok(config)
     }
@@ -91,6 +99,7 @@ impl Default for Config {
             ui: UiConfig {
                 border_color: Color::Cyan,
                 status_bar: true,
+                target_fps: DEFAULT_TARGET_FPS,
             },
         }
     }
@@ -169,6 +178,16 @@ fn parse_color_or_default(value: &str) -> Color {
     }
 }
 
+fn normalize_target_fps(value: u16) -> u16 {
+    let clamped = value.clamp(MIN_TARGET_FPS, MAX_TARGET_FPS);
+    if clamped != value {
+        tracing::warn!(
+            "target_fps {value} outside supported range {MIN_TARGET_FPS}..={MAX_TARGET_FPS}, using {clamped}"
+        );
+    }
+    clamped
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct RawConfig {
@@ -188,6 +207,7 @@ struct RawKeymap {
 struct RawUi {
     border_color: Option<String>,
     status_bar: Option<bool>,
+    target_fps: Option<u16>,
 }
 
 #[cfg(test)]
@@ -216,6 +236,7 @@ mod tests {
         );
         assert_eq!(config.ui.border_color, Color::Cyan);
         assert!(config.ui.status_bar);
+        assert_eq!(config.ui.target_fps, 160);
     }
 
     #[test]
@@ -231,6 +252,7 @@ mod tests {
             [ui]
             border_color = "magenta"
             status_bar = false
+            target_fps = 120
             "#,
         )
         .expect("sample config parses");
@@ -245,6 +267,7 @@ mod tests {
         );
         assert_eq!(config.ui.border_color, Color::Magenta);
         assert!(!config.ui.status_bar);
+        assert_eq!(config.ui.target_fps, 120);
     }
 
     #[test]
@@ -274,5 +297,26 @@ mod tests {
             KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)
         );
         assert!(parse_key("garbage").is_err());
+    }
+
+    #[test]
+    fn target_fps_clamps_to_supported_range() {
+        let low = Config::from_toml_str(
+            r#"
+            [ui]
+            target_fps = 1
+            "#,
+        )
+        .expect("low fps config parses");
+        let high = Config::from_toml_str(
+            r#"
+            [ui]
+            target_fps = 999
+            "#,
+        )
+        .expect("high fps config parses");
+
+        assert_eq!(low.ui.target_fps, 30);
+        assert_eq!(high.ui.target_fps, 240);
     }
 }

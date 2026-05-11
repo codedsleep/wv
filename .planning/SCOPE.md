@@ -246,7 +246,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 
 **Goal:** all topology changes animate at 60–160 FPS with sub-cell precision. **Repo flips public** at the end of this phase.
 
-- [ ] **3.1 Tween + Easing** — *Codex* — `src/anim/tween.rs`
+- [x] **3.1 Tween + Easing** — *Codex* — `src/anim/tween.rs`
   - `struct Tween<T: Lerp> { from: T, to: T, elapsed: Duration, duration: Duration, easing: Easing }`
   - `enum Easing { Linear, EaseOutCubic, EaseInOutCubic, EaseOutBack, EaseOutExpo }` with `apply(t: f32) -> f32`
   - **Port Hyprland's bezier curves directly** — match the motion feel
@@ -256,7 +256,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Re-target rule: if a new `to` is set mid-tween, `from = current_value`, `elapsed = 0`, keep easing
   - Unit tests: linear at midpoint, ease-out-cubic monotone, FRect lerp components, color lerp in RGB space
   - **Accept:** tests pass
-- [ ] **3.2 `FRect` + node refactor** — *Codex* — `src/layout/geometry.rs`, `src/layout/tree.rs`
+- [x] **3.2 `FRect` + node refactor** — *Codex* — `src/layout/geometry.rs`, `src/layout/tree.rs`
   - `struct FRect { x: f32, y: f32, w: f32, h: f32 }` with `to_rect()` (rounding) and `from(Rect)`
   - Refactor `Node`: leaves carry `rect_current: FRect, rect_target: Rect`; internals carry `ratio: f32, ratio_target: f32`
   - `compute_layout` updates `_target` only; never `_current`
