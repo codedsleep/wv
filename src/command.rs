@@ -11,6 +11,7 @@ pub enum Command {
     FocusUp,
     FocusDown,
     Close,
+    Detach,
     Quit,
 }
 
@@ -25,6 +26,7 @@ impl Command {
             b"focus-up" => Some(Self::FocusUp),
             b"focus-down" => Some(Self::FocusDown),
             b"close" => Some(Self::Close),
+            b"detach" => Some(Self::Detach),
             b"quit" => Some(Self::Quit),
             _ => None,
         }
@@ -44,6 +46,7 @@ mod tests {
         assert_eq!(Command::from_str("focus-up"), Some(Command::FocusUp));
         assert_eq!(Command::from_str("focus-down"), Some(Command::FocusDown));
         assert_eq!(Command::from_str("close"), Some(Command::Close));
+        assert_eq!(Command::from_str("detach"), Some(Command::Detach));
         assert_eq!(Command::from_str("quit"), Some(Command::Quit));
         assert_eq!(Command::from_str("split_h"), None);
     }

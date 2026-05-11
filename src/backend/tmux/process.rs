@@ -86,12 +86,13 @@ pub struct TmuxBackend {
     event_tx: EventSender,
     response_rx: ResponseReceiver,
     next_id: u64,
+    detached: bool,
 }
 
 impl TmuxBackend {
     pub async fn new(output_tx: OutputSender, event_tx: EventSender) -> anyhow::Result<Self> {
         let session_name = new_session_name();
-        let mut child = Command::new("tmux")
+        let child = Command::new("tmux")
             .args(["-C", "new-session", "-s", &session_name])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -99,6 +100,73 @@ impl TmuxBackend {
             .spawn()
             .with_context(|| "failed to spawn tmux -C")?;
 
+        let mut backend = Self::from_child(session_name, child, output_tx, event_tx)?;
+        backend.configure_session().await?;
+
+        let tmux_id = backend
+            .list_session_panes()
+            .await?
+            .into_iter()
+            .next()
+            .with_context(|| format!("tmux session `{}` has no panes", backend.session_name))?;
+        let pane_id = backend.allocate_id();
+        backend.register_mapping(pane_id, tmux_id).await;
+
+        Ok(backend)
+    }
+
+    pub async fn attach(
+        session_name: String,
+        output_tx: OutputSender,
+        event_tx: EventSender,
+    ) -> anyhow::Result<Self> {
+        let child = Command::new("tmux")
+            .args(["-CC", "attach", "-t", &session_name])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to spawn tmux -CC attach -t {session_name}"))?;
+
+        let mut backend = Self::from_child(session_name, child, output_tx, event_tx)?;
+        backend.configure_session().await?;
+
+        let tmux_ids = backend.list_session_panes().await?;
+        if tmux_ids.is_empty() {
+            bail!(
+                "tmux session `{}` has no panes to attach",
+                backend.session_name
+            );
+        }
+
+        for tmux_id in tmux_ids {
+            let pane_id = backend.allocate_id();
+            backend.register_mapping(pane_id, tmux_id).await;
+        }
+
+        Ok(backend)
+    }
+
+    pub fn session_name(&self) -> &str {
+        &self.session_name
+    }
+
+    pub fn pane_ids(&self) -> Vec<PaneId> {
+        let mut pane_ids = {
+            let maps = lock_maps(&self.maps);
+            maps.pane_to_tmux.keys().copied().collect::<Vec<_>>()
+        };
+        pane_ids.sort_by_key(|pane| pane.0);
+        pane_ids
+    }
+
+    fn from_child(
+        session_name: String,
+        child: Child,
+        output_tx: OutputSender,
+        event_tx: EventSender,
+    ) -> anyhow::Result<Self> {
+        let mut child = child;
         let stdin = child
             .stdin
             .take()
@@ -121,7 +189,7 @@ impl TmuxBackend {
             response_tx,
         );
 
-        let mut backend = Self {
+        Ok(Self {
             session_name,
             child,
             stdin: Some(stdin),
@@ -130,28 +198,40 @@ impl TmuxBackend {
             event_tx,
             response_rx,
             next_id: 1,
-        };
+            detached: false,
+        })
+    }
 
-        backend.write_command("set -g status off")?;
-        backend.write_command("set -g pane-border-status off")?;
-        backend.write_command(&format!(
-            "set-hook -g pane-exited {}",
-            quote_tmux_arg("display-message \"weave-pane-exited #{hook_pane}\"")
-        ))?;
-        backend.write_command(&format!(
-            "display-message -p {}",
+    async fn configure_session(&mut self) -> Result<(), Error> {
+        let response = self.send_command("set -g status off").await?;
+        ensure_success(&response)?;
+        let response = self.send_command("set -g pane-border-status off").await?;
+        ensure_success(&response)?;
+        let response = self
+            .send_command(&format!(
+                "set-hook -g pane-exited {}",
+                quote_tmux_arg("display-message \"weave-pane-exited #{hook_pane}\"")
+            ))
+            .await?;
+        ensure_success(&response)
+    }
+
+    async fn list_session_panes(&mut self) -> Result<Vec<TmuxPaneId>, Error> {
+        self.write_command(&format!(
+            "list-panes -t {} -F {}",
+            quote_tmux_arg(&format!("{}:", self.session_name)),
             quote_tmux_arg("#{pane_id}")
         ))?;
 
-        let tmux_id = backend.wait_for_pane_id_response().await?;
-        let pane_id = backend.allocate_id();
-        backend.register_mapping(pane_id, tmux_id).await;
-
-        Ok(backend)
-    }
-
-    pub fn session_name(&self) -> &str {
-        &self.session_name
+        loop {
+            let response = self.next_response().await?;
+            let pane_ids = response_pane_ids(&response);
+            if !pane_ids.is_empty() {
+                ensure_success(&response)?;
+                return Ok(pane_ids);
+            }
+            ensure_success(&response)?;
+        }
     }
 
     fn allocate_id(&mut self) -> PaneId {
@@ -181,16 +261,6 @@ impl TmuxBackend {
             .await
             .with_context(|| "timed out waiting for tmux command response")?
             .with_context(|| "tmux command response channel closed")
-    }
-
-    async fn wait_for_pane_id_response(&mut self) -> Result<TmuxPaneId, Error> {
-        loop {
-            let response = self.next_response().await?;
-            if let Some(tmux_id) = response_pane_id(&response) {
-                ensure_success(&response)?;
-                return Ok(tmux_id);
-            }
-        }
     }
 
     async fn register_mapping(&self, pane_id: PaneId, tmux_id: TmuxPaneId) {
@@ -259,25 +329,33 @@ impl PaneBackend for TmuxBackend {
         let response = self.send_command(&command).await?;
         ensure_success(&response)
     }
+
+    async fn detach(&mut self) -> Result<(), Error> {
+        self.write_command("detach-client")?;
+        self.detached = true;
+        Ok(())
+    }
 }
 
 impl Drop for TmuxBackend {
     fn drop(&mut self) {
-        if let Some(stdin) = self.stdin.as_mut() {
-            let _ = writeln!(
-                stdin,
-                "kill-session -t {}",
-                quote_tmux_arg(&self.session_name)
-            );
-            let _ = stdin.flush();
-        }
+        if !self.detached {
+            if let Some(stdin) = self.stdin.as_mut() {
+                let _ = writeln!(
+                    stdin,
+                    "kill-session -t {}",
+                    quote_tmux_arg(&self.session_name)
+                );
+                let _ = stdin.flush();
+            }
 
-        let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &self.session_name])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", &self.session_name])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
 
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -423,10 +501,15 @@ fn response_message(response: &CommandResponse) -> String {
 }
 
 fn response_pane_id(response: &CommandResponse) -> Option<TmuxPaneId> {
+    response_pane_ids(response).into_iter().next()
+}
+
+fn response_pane_ids(response: &CommandResponse) -> Vec<TmuxPaneId> {
     response
         .lines
         .iter()
-        .find_map(|line| parse_tmux_pane_id(line))
+        .filter_map(|line| parse_tmux_pane_id(line))
+        .collect()
 }
 
 fn parse_tmux_pane_id(line: &str) -> Option<TmuxPaneId> {

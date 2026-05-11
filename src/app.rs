@@ -64,6 +64,13 @@ impl DebugMode {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ExitState {
+    Running,
+    Quit,
+    Detached,
+}
+
 pub struct App {
     front: Surface,
     back: Surface,
@@ -72,6 +79,7 @@ pub struct App {
     focused: Option<PaneId>,
     closing: HashSet<PaneId>,
     resize_mode: ResizeMode,
+    backend_kind: BackendKind,
     backend: BoxedBackend,
     output_rx: mpsc::Receiver<(PaneId, Bytes)>,
     event_rx: mpsc::Receiver<BackendEvent>,
@@ -87,7 +95,7 @@ pub struct App {
     last_tick_dt: Duration,
     last_dirty_cells: usize,
     dirty: bool,
-    quit: bool,
+    exit: ExitState,
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -111,6 +119,24 @@ impl BackendKind {
 pub struct Args {
     pub debug: bool,
     pub backend: BackendKind,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AttachArgs {
+    pub session_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LaunchArgs {
+    Run(Args),
+    Attach(AttachArgs),
+}
+
+struct BackendParts {
+    kind: BackendKind,
+    backend: BoxedBackend,
+    output_rx: mpsc::Receiver<(PaneId, Bytes)>,
+    event_rx: mpsc::Receiver<BackendEvent>,
 }
 
 impl Args {
@@ -138,6 +164,10 @@ impl Args {
                 parsed.backend = BackendKind::from_cli_value(value.as_ref())?;
             } else if let Some(value) = arg.strip_prefix("--backend=") {
                 parsed.backend = BackendKind::from_cli_value(value)?;
+            } else if arg == "attach" {
+                bail!(
+                    "`attach` reconnects to tmux sessions only; use `wv attach [name]`, not `--backend native attach`"
+                );
             } else {
                 bail!("unknown argument `{arg}`");
             }
@@ -147,51 +177,139 @@ impl Args {
     }
 }
 
+impl AttachArgs {
+    fn parse<I, S>(args: I) -> anyhow::Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut session_name = None;
+
+        for arg in args {
+            let arg = arg.as_ref();
+            if arg.starts_with('-') {
+                bail!("`wv attach` does not accept `{arg}`; use `wv attach [name]`");
+            }
+            if session_name.replace(arg.to_owned()).is_some() {
+                bail!("`wv attach` accepts at most one session name");
+            }
+        }
+
+        Ok(Self { session_name })
+    }
+}
+
+impl LaunchArgs {
+    pub fn parse_env() -> anyhow::Result<Self> {
+        Self::parse(std::env::args().skip(1))
+    }
+
+    fn parse<I, S>(args: I) -> anyhow::Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let args = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_owned())
+            .collect::<Vec<_>>();
+
+        if args.first().map(String::as_str) == Some("attach") {
+            return Ok(Self::Attach(AttachArgs::parse(args.iter().skip(1))?));
+        }
+
+        Ok(Self::Run(Args::parse(args)?))
+    }
+}
+
 impl App {
     pub async fn new(width: u16, height: u16, args: Args) -> anyhow::Result<Self> {
-        let (backend, output_rx, event_rx) = build_backend(args.backend).await?;
+        let backend_parts = build_backend(args.backend).await?;
+        Ok(Self::from_backend(
+            width,
+            height,
+            args.debug,
+            backend_parts,
+            Vec::new(),
+        ))
+    }
+
+    pub async fn attach(width: u16, height: u16, args: AttachArgs) -> anyhow::Result<Self> {
+        let (backend_parts, pane_ids) = build_attach_backend(args.session_name).await?;
+        let mut app = Self::from_backend(width, height, false, backend_parts, pane_ids.clone());
+
+        app.resize_attached_panes(&pane_ids).await?;
+        Ok(app)
+    }
+
+    fn from_backend(
+        width: u16,
+        height: u16,
+        debug: bool,
+        backend_parts: BackendParts,
+        initial_panes: Vec<PaneId>,
+    ) -> Self {
         let config = Config::load();
         let tick_interval = frame_interval(config.ui.target_fps);
+        let status_bar = config.ui.status_bar;
+        let root_rect = Rect {
+            x: 0,
+            y: 0,
+            w: width,
+            h: if status_bar {
+                height.saturating_sub(1)
+            } else {
+                height
+            },
+        };
+        let root = flat_horizontal_root(&initial_panes, root_rect);
+        let focused = initial_panes.first().copied();
 
-        Ok(Self {
+        Self {
             front: Surface::new(width, height),
             back: Surface::new(width, height),
-            panes: Vec::new(),
-            root: None,
-            focused: None,
+            panes: initial_panes
+                .into_iter()
+                .map(|pane| Pane::new(pane, width, height))
+                .collect(),
+            root,
+            focused,
             closing: HashSet::new(),
             resize_mode: ResizeMode::Normal,
-            backend,
-            output_rx,
-            event_rx,
+            backend_kind: backend_parts.kind,
+            backend: backend_parts.backend,
+            output_rx: backend_parts.output_rx,
+            event_rx: backend_parts.event_rx,
             stdout: io::stdout(),
             queue_buf: Vec::new(),
             diff: DiffRenderer::new(),
             timeline: Timeline::new(),
             keymap: config.keymap,
             focused_border_color: config.ui.border_color,
-            status_bar: config.ui.status_bar,
+            status_bar,
             tick_interval,
-            debug: DebugMode::from_enabled(args.debug),
+            debug: DebugMode::from_enabled(debug),
             last_tick_dt: Duration::ZERO,
             last_dirty_cells: 0,
             dirty: true,
-            quit: false,
-        })
+            exit: ExitState::Running,
+        }
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
-        let pane_id = self
-            .spawn_shell_pane(true)
-            .await
-            .context("failed to spawn shell pane")?;
-        self.root = Some(Node::Leaf {
-            pane: pane_id,
-            rect_current: FRect::from(self.root_rect()),
-            rect_target: self.root_rect(),
-        });
-        self.focused = Some(pane_id);
-        self.recompute_layout();
+        if self.root.is_none() {
+            let pane_id = self
+                .spawn_shell_pane(true)
+                .await
+                .context("failed to spawn shell pane")?;
+            self.root = Some(Node::Leaf {
+                pane: pane_id,
+                rect_current: FRect::from(self.root_rect()),
+                rect_target: self.root_rect(),
+            });
+            self.focused = Some(pane_id);
+            self.recompute_layout();
+        }
 
         let mut ticks = time::interval(self.tick_interval);
         let mut last_tick = time::Instant::now();
@@ -200,7 +318,7 @@ impl App {
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigwinch = signal(SignalKind::window_change())?;
 
-        while !self.quit {
+        while self.exit == ExitState::Running {
             tokio::select! {
                 _ = ticks.tick() => {
                     let now = time::Instant::now();
@@ -234,8 +352,10 @@ impl App {
             }
         }
 
-        for pane_id in self.pane_ids() {
-            let _ = self.backend.kill(pane_id).await;
+        if self.exit != ExitState::Detached {
+            for pane_id in self.pane_ids() {
+                let _ = self.backend.kill(pane_id).await;
+            }
         }
 
         Ok(())
@@ -250,7 +370,8 @@ impl App {
             Command::FocusUp => self.focus(Direction::Up),
             Command::FocusDown => self.focus(Direction::Down),
             Command::Close => self.close_focused().await?,
-            Command::Quit => self.quit = true,
+            Command::Detach => self.detach().await?,
+            Command::Quit => self.exit = ExitState::Quit,
         }
 
         Ok(())
@@ -269,6 +390,36 @@ impl App {
             .push(Pane::new(pane_id, self.back.width, self.back.height));
 
         Ok(pane_id)
+    }
+
+    async fn detach(&mut self) -> anyhow::Result<()> {
+        match self.backend_kind {
+            BackendKind::Native => {
+                tracing::warn!("detach only supported on --backend tmux; quitting");
+                self.exit = ExitState::Quit;
+            }
+            BackendKind::Tmux => {
+                self.backend.detach().await?;
+                self.exit = ExitState::Detached;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn resize_attached_panes(&mut self, pane_ids: &[PaneId]) -> anyhow::Result<()> {
+        self.resize_mode = ResizeMode::HostResize;
+        for pane_id in pane_ids {
+            let Some(rect) = self.leaf_rect_target(*pane_id) else {
+                continue;
+            };
+            if let Some(pane) = self.pane_mut(*pane_id) {
+                pane.resize(rect.w, rect.h);
+            }
+            self.resize_pane(*pane_id, rect.w, rect.h).await?;
+        }
+        self.resize_mode = ResizeMode::Normal;
+        Ok(())
     }
 
     async fn split_focused(&mut self, split: Split) -> anyhow::Result<()> {
@@ -385,7 +536,7 @@ impl App {
 
         let Some(root) = self.root.as_ref() else {
             self.focused = None;
-            self.quit = true;
+            self.exit = ExitState::Quit;
             self.dirty = true;
             return Ok(());
         };
@@ -395,7 +546,7 @@ impl App {
             self.remove_pane(focused);
             self.root = None;
             self.focused = None;
-            self.quit = true;
+            self.exit = ExitState::Quit;
             self.dirty = true;
             return Ok(());
         };
@@ -454,14 +605,14 @@ impl App {
                     } else if self.focused == Some(id) {
                         self.root = None;
                         self.focused = None;
-                        self.quit = true;
+                        self.exit = ExitState::Quit;
                     }
                 }
                 self.dirty = true;
             }
             BackendEvent::SpawnFailed(id, message) => {
                 tracing::error!("pane spawn failed: {id:?}: {message}");
-                self.quit = true;
+                self.exit = ExitState::Quit;
             }
         }
     }
@@ -633,7 +784,7 @@ impl App {
                 } else {
                     self.root = None;
                     self.focused = None;
-                    self.quit = true;
+                    self.exit = ExitState::Quit;
                 }
             }
 
@@ -736,6 +887,7 @@ impl App {
             focused: Some(pane_id),
             closing: HashSet::new(),
             resize_mode: ResizeMode::Normal,
+            backend_kind: BackendKind::Native,
             backend,
             output_rx,
             event_rx,
@@ -751,22 +903,16 @@ impl App {
             last_tick_dt: Duration::ZERO,
             last_dirty_cells: 0,
             dirty: true,
-            quit: false,
+            exit: ExitState::Running,
         }
     }
 }
 
-async fn build_backend(
-    backend: BackendKind,
-) -> anyhow::Result<(
-    BoxedBackend,
-    mpsc::Receiver<(PaneId, Bytes)>,
-    mpsc::Receiver<BackendEvent>,
-)> {
+async fn build_backend(backend: BackendKind) -> anyhow::Result<BackendParts> {
     let (output_tx, output_rx) = mpsc::channel(OUTPUT_CHANNEL_CAPACITY);
     let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
 
-    let backend: BoxedBackend = match backend {
+    let boxed_backend: BoxedBackend = match backend {
         BackendKind::Native => Box::new(NativeBackend::with_senders(output_tx, event_tx)),
         BackendKind::Tmux => {
             ensure_tmux_available()?;
@@ -774,7 +920,34 @@ async fn build_backend(
         }
     };
 
-    Ok((backend, output_rx, event_rx))
+    Ok(BackendParts {
+        kind: backend,
+        backend: boxed_backend,
+        output_rx,
+        event_rx,
+    })
+}
+
+async fn build_attach_backend(
+    requested_session: Option<String>,
+) -> anyhow::Result<(BackendParts, Vec<PaneId>)> {
+    ensure_tmux_available()?;
+
+    let session_name = resolve_attach_session(requested_session.as_deref())?;
+    let (output_tx, output_rx) = mpsc::channel(OUTPUT_CHANNEL_CAPACITY);
+    let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+    let backend = TmuxBackend::attach(session_name, output_tx, event_tx).await?;
+    let pane_ids = backend.pane_ids();
+
+    Ok((
+        BackendParts {
+            kind: BackendKind::Tmux,
+            backend: Box::new(backend),
+            output_rx,
+            event_rx,
+        },
+        pane_ids,
+    ))
 }
 
 fn ensure_tmux_available() -> anyhow::Result<()> {
@@ -796,6 +969,78 @@ fn ensure_tmux_available() -> anyhow::Result<()> {
     }
 }
 
+fn resolve_attach_session(requested: Option<&str>) -> anyhow::Result<String> {
+    if let Some(session_name) = requested {
+        if tmux_session_exists(session_name)? {
+            return Ok(session_name.to_owned());
+        }
+
+        bail!(
+            "tmux session `{session_name}` does not exist; start one with `wv --backend tmux` or choose a name from `tmux list-sessions`"
+        );
+    }
+
+    let Some(session) = list_weave_tmux_sessions()?
+        .into_iter()
+        .max_by_key(|session| session.activity)
+    else {
+        bail!("no weave tmux sessions found; start one with `wv --backend tmux`");
+    };
+
+    Ok(session.name)
+}
+
+fn tmux_session_exists(session_name: &str) -> anyhow::Result<bool> {
+    let status = ProcessCommand::new("tmux")
+        .args(["has-session", "-t", session_name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("failed to check tmux session")?;
+
+    Ok(status.success())
+}
+
+#[derive(Debug)]
+struct TmuxSession {
+    name: String,
+    activity: u64,
+}
+
+fn list_weave_tmux_sessions() -> anyhow::Result<Vec<TmuxSession>> {
+    let output = ProcessCommand::new("tmux")
+        .args([
+            "list-sessions",
+            "-F",
+            "#{session_name}\t#{session_activity}",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .context("failed to list tmux sessions")?;
+
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_weave_tmux_session)
+        .collect())
+}
+
+fn parse_weave_tmux_session(line: &str) -> Option<TmuxSession> {
+    let (name, activity) = line.split_once('\t')?;
+    if !name.starts_with("weave-") {
+        return None;
+    }
+
+    Some(TmuxSession {
+        name: name.to_owned(),
+        activity: activity.parse().unwrap_or_default(),
+    })
+}
+
 fn default_pane_command() -> PaneCommand {
     PaneCommand {
         program: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned()),
@@ -803,6 +1048,34 @@ fn default_pane_command() -> PaneCommand {
         env: Vec::new(),
         cwd: std::env::current_dir().ok(),
     }
+}
+
+fn flat_horizontal_root(panes: &[PaneId], rect: Rect) -> Option<Node> {
+    let (&first, remaining_panes) = panes.split_first()?;
+
+    if remaining_panes.is_empty() {
+        return Some(Node::Leaf {
+            pane: first,
+            rect_current: FRect::from(rect),
+            rect_target: rect,
+        });
+    }
+
+    let pane_count = u16::try_from(panes.len()).unwrap_or(u16::MAX);
+    let ratio = 1.0 / f32::from(pane_count);
+    let (first_rect, rest_rect) = rect.split(Split::Horizontal, ratio);
+    Some(Node::Internal {
+        split: Split::Horizontal,
+        ratio,
+        ratio_target: ratio,
+        a: Box::new(Node::Leaf {
+            pane: first,
+            rect_current: FRect::from(first_rect),
+            rect_target: first_rect,
+        }),
+        b: Box::new(flat_horizontal_root(remaining_panes, rest_rect)?),
+        rect,
+    })
 }
 
 fn first_leaf_pane(node: &Node) -> Option<PaneId> {
@@ -894,8 +1167,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        frame_interval, App, Args, BackendKind, CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION,
-        OPEN_NEW_PANE_DURATION,
+        frame_interval, App, Args, AttachArgs, BackendKind, ExitState, LaunchArgs,
+        CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION, OPEN_NEW_PANE_DURATION,
     };
     use crate::anim::tween::Easing;
     use crate::backend::{PaneBackend, PaneCommand, PaneId};
@@ -1175,6 +1448,16 @@ mod tests {
         assert!(!app.panes.iter().any(|pane| pane.id() == PaneId(2)));
     }
 
+    #[tokio::test]
+    async fn detach_on_native_quits_without_marking_detached() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(Command::Detach).await.expect("detach succeeds");
+
+        assert_eq!(app.exit, ExitState::Quit);
+    }
+
     #[test]
     fn frame_interval_uses_configured_fps() {
         assert_eq!(frame_interval(160), Duration::from_nanos(6_250_000));
@@ -1211,5 +1494,24 @@ mod tests {
     #[test]
     fn args_reject_invalid_backend() {
         assert!(Args::parse(["--backend", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn launch_args_parse_attach_subcommand() {
+        assert_eq!(
+            LaunchArgs::parse(["attach", "weave-test"]).expect("launch args parse"),
+            LaunchArgs::Attach(AttachArgs {
+                session_name: Some("weave-test".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn launch_args_reject_native_attach() {
+        let error = LaunchArgs::parse(["--backend", "native", "attach"])
+            .expect_err("native attach should fail")
+            .to_string();
+
+        assert!(error.contains("wv attach [name]"));
     }
 }

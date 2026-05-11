@@ -362,7 +362,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - `wv --backend native|tmux` (default `native`)
   - `App` becomes generic over `Box<dyn PaneBackend>`
   - **Accept:** both backends launch and pass the same Phase 1–3 smoke tests
-- [ ] **4.5 Detach/attach** — *Codex* — `src/app.rs`, `src/input/keymap.rs`
+- [x] **4.5 Detach/attach** — *Codex* — `src/app.rs`, `src/input/keymap.rs`
   - Default Prefix binding `d` → detach (clean exit, leave tmux session running)
   - `wv attach` subcommand → reattach to the most recent weave session
   - **Accept:** detach, run shell tasks, `wv attach`, panes still alive with state intact

@@ -50,4 +50,8 @@ pub trait PaneBackend: Send {
     async fn resize(&mut self, id: PaneId, cols: u16, rows: u16) -> Result<(), anyhow::Error>;
 
     async fn kill(&mut self, id: PaneId) -> Result<(), anyhow::Error>;
+
+    async fn detach(&mut self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
 }

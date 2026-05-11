@@ -31,6 +31,7 @@ impl Default for Keymap {
         bindings.insert(alt_char('k'), Command::FocusUp);
         bindings.insert(alt_char('l'), Command::FocusRight);
         bindings.insert(alt_char('q'), Command::Close);
+        bindings.insert(alt_char('d'), Command::Detach);
         bindings.insert(alt_char('v'), Command::SplitV);
         // Some terminals fold Shift into the uppercase char and drop the SHIFT
         // modifier; kitty-style protocols keep it. Register both so Alt+Shift+Q
@@ -113,6 +114,16 @@ mod tests {
         assert_eq!(
             keymap.command_for(&alt(KeyCode::Char('q'))),
             Some(Command::Close)
+        );
+    }
+
+    #[test]
+    fn default_alt_d_detaches() {
+        let keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.command_for(&alt(KeyCode::Char('d'))),
+            Some(Command::Detach)
         );
     }
 
