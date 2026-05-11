@@ -199,7 +199,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - `focus_neighbor(focused: PaneId, dir: Direction) -> Option<PaneId>` (geometric neighbor — pick the leaf whose rect shares the boundary)
   - Unit tests for split, close, focus_neighbor on hand-built trees
   - **Accept:** tests cover split/close/focus permutations
-- [ ] **2.3 `Command` enum + dispatch** — *Codex* — `src/command.rs`, `src/app.rs`
+- [x] **2.3 `Command` enum + dispatch** — *Codex* — `src/command.rs`, `src/app.rs`
   - `enum Command { SplitH, SplitV, FocusLeft/Right/Up/Down, Close, Quit }`
   - `App::execute(cmd)` mutates tree, spawns/kills via backend, recomputes layout, marks dirty
   - **Accept:** programmatic test: build app, execute SplitH, assert two leaves
