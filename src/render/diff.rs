@@ -20,22 +20,54 @@ struct Style {
 }
 
 impl Style {
-    const fn from_cell(cell: Cell) -> Self {
+    fn from_cell(cell: Cell, color_mode: ColorMode) -> Self {
         Self {
-            fg: cell.fg,
-            bg: cell.bg,
+            fg: color_mode.render_color(cell.fg),
+            bg: color_mode.render_color(cell.bg),
             attrs: cell.attrs,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    Truecolor,
+    Quantized,
+}
+
+impl ColorMode {
+    pub fn from_env() -> Self {
+        match std::env::var("COLORTERM") {
+            Ok(value) if value == "truecolor" || value == "24bit" => Self::Truecolor,
+            _ => Self::Quantized,
+        }
+    }
+
+    fn render_color(self, color: Color) -> Color {
+        match (self, color) {
+            (Self::Quantized, Color::Rgb { r, g, b }) => {
+                Color::AnsiValue(quantize_rgb_to_xterm256(r, g, b))
+            }
+            _ => color,
         }
     }
 }
 
 pub struct DiffRenderer {
     queue: Vec<u8>,
+    color_mode: ColorMode,
 }
 
 impl DiffRenderer {
-    pub const fn new() -> Self {
-        Self { queue: Vec::new() }
+    pub fn new() -> Self {
+        Self::with_color_mode(ColorMode::from_env())
+    }
+
+    pub const fn with_color_mode(color_mode: ColorMode) -> Self {
+        Self {
+            queue: Vec::new(),
+            color_mode,
+        }
     }
 
     /// Write terminal updates needed to transform `front` into `back`.
@@ -76,13 +108,13 @@ impl DiffRenderer {
             queue!(self.queue, MoveTo(x, y))?;
 
             while index < len && front.cells[index] != back.cells[index] {
-                let style = Style::from_cell(back.cells[index]);
+                let style = Style::from_cell(back.cells[index], self.color_mode);
                 emit_style(&mut self.queue, &mut current_style, style)?;
 
                 let mut run = String::new();
                 while index < len
                     && front.cells[index] != back.cells[index]
-                    && Style::from_cell(back.cells[index]) == style
+                    && Style::from_cell(back.cells[index], self.color_mode) == style
                 {
                     run.push(back.cells[index].ch);
                     index += 1;
@@ -100,6 +132,67 @@ impl Default for DiffRenderer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub fn quantize_rgb_to_xterm256(r: u8, g: u8, b: u8) -> u8 {
+    let mut best_index = 16;
+    let mut best_distance = u32::MAX;
+
+    for index in 16..=231 {
+        let palette = xterm256_color(index);
+        let distance = color_distance_squared((r, g, b), palette);
+        if distance < best_distance {
+            best_index = index;
+            best_distance = distance;
+        }
+    }
+
+    for index in 232..=255 {
+        let palette = xterm256_color(index);
+        let distance = color_distance_squared((r, g, b), palette);
+        if distance < best_distance {
+            best_index = index;
+            best_distance = distance;
+        }
+    }
+
+    best_index
+}
+
+fn xterm256_color(index: u8) -> (u8, u8, u8) {
+    if index >= 232 {
+        let gray = 8 + ((index - 232) * 10);
+        return (gray, gray, gray);
+    }
+
+    let cube_index = index - 16;
+    (
+        xterm_cube_channel(cube_index / 36),
+        xterm_cube_channel((cube_index / 6) % 6),
+        xterm_cube_channel(cube_index % 6),
+    )
+}
+
+const fn xterm_cube_channel(index: u8) -> u8 {
+    match index {
+        0 => 0,
+        1 => 95,
+        2 => 135,
+        3 => 175,
+        4 => 215,
+        _ => 255,
+    }
+}
+
+fn color_distance_squared(a: (u8, u8, u8), b: (u8, u8, u8)) -> u32 {
+    channel_distance_squared(a.0, b.0)
+        + channel_distance_squared(a.1, b.1)
+        + channel_distance_squared(a.2, b.2)
+}
+
+fn channel_distance_squared(a: u8, b: u8) -> u32 {
+    let distance = a.abs_diff(b);
+    u32::from(distance) * u32::from(distance)
 }
 
 fn emit_style(
@@ -158,7 +251,7 @@ fn to_crossterm_attrs(attrs: CellAttrs) -> Attributes {
 mod tests {
     use crossterm::style::Color;
 
-    use super::DiffRenderer;
+    use super::{quantize_rgb_to_xterm256, ColorMode, DiffRenderer};
     use crate::term::cell::{Cell, CellAttrs};
     use crate::term::surface::Surface;
 
@@ -183,5 +276,63 @@ mod tests {
 
         assert!(out.starts_with(b"\x1b[1;1H"));
         assert!(out.windows(b"hello".len()).any(|window| window == b"hello"));
+    }
+
+    #[test]
+    fn quantizes_rgb_to_nearest_xterm256_color() {
+        assert_eq!(quantize_rgb_to_xterm256(0, 0, 0), 16);
+        assert_eq!(quantize_rgb_to_xterm256(255, 255, 255), 231);
+        assert_eq!(quantize_rgb_to_xterm256(255, 0, 0), 196);
+        assert_eq!(quantize_rgb_to_xterm256(0, 0, 255), 21);
+        assert_eq!(quantize_rgb_to_xterm256(128, 128, 128), 244);
+    }
+
+    #[test]
+    fn quantized_flush_emits_no_truecolor_escape_sequences() {
+        let front = Surface::new(2, 1);
+        let mut back = Surface::new(2, 1);
+        back.set(
+            0,
+            0,
+            Cell::new(
+                'a',
+                Color::Rgb { r: 1, g: 2, b: 3 },
+                Color::Rgb {
+                    r: 200,
+                    g: 210,
+                    b: 220,
+                },
+                CellAttrs::empty(),
+            ),
+        );
+        back.set(
+            1,
+            0,
+            Cell::new(
+                'b',
+                Color::Rgb { r: 255, g: 0, b: 0 },
+                Color::Reset,
+                CellAttrs::empty(),
+            ),
+        );
+
+        let mut truecolor_out = Vec::new();
+        DiffRenderer::with_color_mode(ColorMode::Truecolor)
+            .flush(&front, &back, &mut truecolor_out)
+            .expect("truecolor flush should succeed");
+
+        let mut quantized_out = Vec::new();
+        DiffRenderer::with_color_mode(ColorMode::Quantized)
+            .flush(&front, &back, &mut quantized_out)
+            .expect("quantized flush should succeed");
+
+        assert!(!contains_bytes(&quantized_out, b"38;2;"));
+        assert!(!contains_bytes(&quantized_out, b"48;2;"));
+    }
+
+    fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
     }
 }

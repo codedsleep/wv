@@ -392,7 +392,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 - [x] **5.2 Pane titles via OSC 0/2** — *Codex* — `src/term/pane.rs`
   - vt100 surfaces `title()` from OSC 0/2 sequences; render in border-top center when present and `[ui] pane_titles = true`
   - **Accept:** `printf '\e]2;hello\a'` updates the border title
-- [ ] **5.3 Truecolor detection + 256-color fallback** — *Codex* — `src/render/diff.rs`
+- [x] **5.3 Truecolor detection + 256-color fallback** — *Codex* — `src/render/diff.rs`
   - Detect: `COLORTERM=truecolor` or `=24bit` → truecolor; else nearest-256
   - All theme colors quantize gracefully
   - **Accept:** runs cleanly in a 256-color-only terminal (test under `TERM=xterm-256color COLORTERM=`)
