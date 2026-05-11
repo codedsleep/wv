@@ -10,7 +10,7 @@ name = "wv"
 path = "src/main.rs"
 
 [dependencies]
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
 tokio = { version = "1", features = ["rt", "macros", "io-util", "time", "sync", "signal"] }
 portable-pty = "0.8"
 vt100 = "0.15"

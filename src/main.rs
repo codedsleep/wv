@@ -62,9 +62,9 @@ async fn main() -> anyhow::Result<()> {
     install_panic_hook();
     let _guard = term::TerminalGuard::new()?;
     tracing::info!("weave starting");
-    println!("weave starting");
     tracing::info!("entered alt screen");
-    crate::app::App::new().run().await?;
+    let (width, height) = crossterm::terminal::size()?;
+    crate::app::App::new(width, height).run().await?;
 
     Ok(())
 }

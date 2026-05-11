@@ -156,7 +156,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - **Reuse a `Vec<u8>` queue buffer across calls** — accept `&mut Vec<u8>` or own one in a renderer struct
   - Unit test: front=blank, back=`"hi"`, assert output contains the right escape sequence prefix
   - **Accept:** test passes; manual run shows correct output
-- [ ] **1.7 Event loop wiring** — *Codex* — `src/app.rs`
+- [x] **1.7 Event loop wiring** — *Codex* — `src/app.rs`
   - `App` owns: `Surface front/back`, one `Pane`, `NativeBackend`, `stdout: io::Stdout`, queue buffer
   - `tokio::select!` over: tick interval (16ms for now — 6.25ms targeted in Phase 3), input events, backend output, backend events
   - Tick handler: compose → diff → swap buffers
