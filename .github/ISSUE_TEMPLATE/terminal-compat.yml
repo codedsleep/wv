@@ -1,0 +1,70 @@
+name: Terminal compatibility
+description: Report rendering glitches, color issues, or input quirks on a specific terminal emulator.
+title: "[term] "
+labels: ["terminal-compat"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        weave targets kitty, wezterm, foot, ghostty, and alacritty on Linux.
+        Reports from other terminals are welcome but won't necessarily be fixed.
+
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal emulator + version
+      placeholder: "wezterm 20240203-110809"
+    validations:
+      required: true
+
+  - type: input
+    id: term-env
+    attributes:
+      label: $TERM
+      placeholder: "wezterm"
+    validations:
+      required: true
+
+  - type: input
+    id: colorterm-env
+    attributes:
+      label: $COLORTERM
+      placeholder: "truecolor"
+
+  - type: textarea
+    id: symptom
+    attributes:
+      label: What renders wrong?
+      description: Be specific — wrong colors, missing glyphs, smeared sub-cell edges, lagging input, scrollback issues, …
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot or asciinema cast
+      description: A picture is worth a thousand bug reports. asciinema casts preferred for animation issues.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: weave version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: backend
+    attributes:
+      label: Backend
+      placeholder: "native"
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround (if any)
+      description: e.g. disabling truecolor with COLORTERM=, switching backend, etc.

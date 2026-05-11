@@ -1,0 +1,84 @@
+name: Bug report
+description: Something in weave is broken or behaving unexpectedly.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. The more concrete the repro, the faster the fix.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear, concise description of the bug. Include screenshots, asciinema casts, or logs from `~/.local/state/weave/weave.log` if relevant.
+      placeholder: |
+        After splitting a pane while `htop` was running, the right pane stopped redrawing until I resized the window.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal sequence that triggers the issue.
+      placeholder: |
+        1. `wv`
+        2. Run `htop`
+        3. Prefix → `s` to split horizontally
+        4. Watch the right pane
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: weave version
+      description: Output of `wv --version` (or commit SHA if built from source).
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: backend
+    attributes:
+      label: Backend
+      description: native or tmux
+      placeholder: "native"
+    validations:
+      required: true
+
+  - type: input
+    id: terminal
+    attributes:
+      label: Host terminal
+      description: kitty, wezterm, foot, ghostty, alacritty, …
+      placeholder: "kitty 0.37"
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: |
+        Run and paste:
+        - `uname -a`
+        - `echo $TERM $COLORTERM`
+        - `tmux -V` (if using the tmux backend)
+        - rustc version if built from source
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log excerpts
+      description: From `~/.local/state/weave/weave.log`. Re-run with `WEAVE_LOG=debug` if helpful.
+      render: shell
