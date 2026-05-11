@@ -140,7 +140,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - `write()`, `resize()`, `kill()` operate on the held `MasterPty`
   - On EOF or child exit: emit `PaneDied`, drop PTY
   - **Accept:** unit-style integration test in `tests/pty_smoke.rs`: spawn `echo hello\n`, read bytes containing "hello", get `PaneDied`
-- [ ] **1.4 `term::Pane` (vt100-backed)** — *Codex* — `src/term/pane.rs`
+- [x] **1.4 `term::Pane` (vt100-backed)** — *Codex* — `src/term/pane.rs`
   - `Pane { id: PaneId, parser: vt100::Parser, dirty: bool }`
   - `process(&mut self, bytes: &[u8])` feeds parser, sets `dirty = true`
   - `screen() -> &vt100::Screen` accessor
