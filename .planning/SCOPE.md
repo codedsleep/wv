@@ -316,7 +316,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
       - 220 ms open-new-pane ease-out-back: on the long end vs Hyprland's typical 70–200 ms, but the overshoot reads better with the extra time. ✓
       - 180 ms open-sibling ease-out-cubic + 180 ms close ease-out-cubic: pair cleanly with each other. ✓
     - **Verdict:** keep all current curves and durations for v1. The motion-feel matches Hyprland's reference closely enough that no tuning is required before flipping the repo public. Revisit during real-terminal testing in Phase 4 once tmux backend lands.
-- [ ] **3.14 Update README + screenshots/cast** — *Claude* — `README.md`, `docs/`
+- [x] **3.14 Update README + screenshots/cast** — *Claude* — `README.md`, `docs/`
   - Status: phase 3 — animations
   - asciinema cast or animated GIF embedded
   - **Accept:** README looks shippable
