@@ -147,7 +147,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - `cells_into(surface, x, y)` blits the parser's screen into a `Surface` rect, mapping `vt100::Cell` → our `Cell`
   - **Wrap behind this interface** — vt100 must not leak elsewhere (so we can swap to `alacritty_terminal` later)
   - **Accept:** unit test feeds `"hello\x1b[31mworld"` and asserts the Surface contains red `world`
-- [ ] **1.5 Compositor: single pane fullscreen** — *Codex* — `src/render/compositor.rs`
+- [x] **1.5 Compositor: single pane fullscreen** — *Codex* — `src/render/compositor.rs`
   - `compose(panes: &[Pane], back: &mut Surface)` blits the (one) pane at (0,0) at full size
   - **Accept:** unit test composes a pane into a 80x24 surface, asserts cells match
 - [ ] **1.6 Diff renderer** — *Codex* — `src/render/diff.rs`
