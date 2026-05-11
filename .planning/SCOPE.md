@@ -372,7 +372,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 - [x] **4.7 Backend parity test** — *Codex* — `tests/backend_parity.rs`
   - Same scripted scenario (spawn 4 panes, write text, close one) under both backends; assert composed Surface matches
   - **Accept:** parity test passes (or documented diffs are intentional)
-- [ ] **4.8 Update README** — *Claude*
+- [x] **4.8 Update README** — *Claude*
   - Document `--backend tmux`, detach/attach workflow, the iTerm2/tmux protocol reference link
 
 **Phase 4 acceptance:** `wv --backend tmux` runs everything Phase 3 did, plus survives detach/reattach with state intact. Parser is proptest-clean. Tag `phase-4` exists.
