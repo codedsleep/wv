@@ -41,11 +41,27 @@ fn init_tracing() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn install_panic_hook() {
+    let prev = std::panic::take_hook();
+
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
+        let _ = crossterm::terminal::disable_raw_mode();
+        tracing::error!("panic: {info}");
+        prev(info);
+    }));
+}
+
 fn main() -> anyhow::Result<()> {
     init_tracing()?;
+    install_panic_hook();
+    let guard = term::TerminalGuard::new()?;
     tracing::info!("weave starting");
     println!("weave starting");
-    let guard = term::TerminalGuard::new()?;
     tracing::info!("entered alt screen");
     std::thread::sleep(std::time::Duration::from_secs(1));
     tracing::info!("leaving alt screen");
