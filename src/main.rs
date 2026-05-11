@@ -45,6 +45,11 @@ fn main() -> anyhow::Result<()> {
     init_tracing()?;
     tracing::info!("weave starting");
     println!("weave starting");
+    let guard = term::TerminalGuard::new()?;
+    tracing::info!("entered alt screen");
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    tracing::info!("leaving alt screen");
+    drop(guard);
 
     Ok(())
 }
