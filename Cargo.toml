@@ -31,3 +31,11 @@ bitflags = "2"
 [dev-dependencies]
 criterion = "0.5"
 insta = "1"
+
+[[bench]]
+name = "diff"
+harness = false
+
+[[bench]]
+name = "compose"
+harness = false

@@ -3,16 +3,6 @@
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::must_use_candidate)]
 
-mod anim;
-mod app;
-mod backend;
-mod command;
-mod config;
-mod input;
-mod layout;
-mod render;
-mod term;
-
 fn init_tracing() -> anyhow::Result<()> {
     let log_path =
         std::path::PathBuf::from(std::env::var("HOME")?).join(".local/state/weave/weave.log");
@@ -58,14 +48,14 @@ fn install_panic_hook() {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let args = crate::app::Args::parse_env();
+    let args = weave::app::Args::parse_env();
     init_tracing()?;
     install_panic_hook();
-    let _guard = term::TerminalGuard::new()?;
+    let _guard = weave::term::TerminalGuard::new()?;
     tracing::info!("weave starting");
     tracing::info!("entered alt screen");
     let (width, height) = crossterm::terminal::size()?;
-    crate::app::App::new(width, height, args).run().await?;
+    weave::app::App::new(width, height, args).run().await?;
 
     Ok(())
 }

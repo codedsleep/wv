@@ -290,7 +290,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - `backend.resize()` is called **only when a leaf's tween completes**, not per frame
   - Add a `debug_assert!` that catches per-frame resize calls
   - **Accept:** unit test on a mock backend confirms exactly one resize per topology change
-- [ ] **3.10 `--debug` overlay** — *Codex* — `src/render/chrome.rs`
+- [x] **3.10 `--debug` overlay** — *Codex* — `src/render/chrome.rs`
   - Top-right corner: `fps:160 frame:5.8ms tweens:3 dirty:1240`
   - Behind `wv --debug` flag
   - **Accept:** overlay renders without affecting normal output
