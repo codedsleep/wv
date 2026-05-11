@@ -369,7 +369,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 - [x] **4.6 Session naming** — *Codex* — `src/backend/tmux/mod.rs`
   - Auto-generate: `weave-<short-uid>`; `wv ls` lists weave-prefixed sessions; `wv attach <name>` attaches a specific one
   - **Accept:** can have two parallel sessions and attach the right one
-- [ ] **4.7 Backend parity test** — *Codex* — `tests/backend_parity.rs`
+- [x] **4.7 Backend parity test** — *Codex* — `tests/backend_parity.rs`
   - Same scripted scenario (spawn 4 panes, write text, close one) under both backends; assert composed Surface matches
   - **Accept:** parity test passes (or documented diffs are intentional)
 - [ ] **4.8 Update README** — *Claude*
