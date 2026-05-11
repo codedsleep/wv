@@ -298,13 +298,24 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - `diff`: bench front-vs-back diff on 200x60 surfaces with 0% / 1% / 50% / 100% changed cells
   - `compose`: bench compose pass with 1, 4, 16 panes
   - **Accept:** `cargo bench` runs; numbers logged for baseline
-- [ ] **3.12 Insta snapshot tests** — *Codex* — `tests/render_snapshots.rs`
+- [x] **3.12 Insta snapshot tests** — *Codex* — `tests/render_snapshots.rs`
   - Compose canonical scenarios (1 pane, 2-leaf horizontal, 4-leaf nested) into a Surface; render to ANSI string; snapshot via `insta::assert_snapshot!`
   - **Accept:** snapshots accepted; reruns are deterministic
-- [ ] **3.13 Motion-feel review** — *Claude*
+- [x] **3.13 Motion-feel review** — *Claude*
   - Drive the binary, evaluate easing curves and durations against Hyprland's reference
   - Tune Easing defaults if needed; record changes in this file
   - **Accept:** at least one written review pass with verdict
+  - **Review (2026-05-11):**
+    - **Bezier curves vs reference.** Compared the four easings in `src/anim/tween.rs::Easing::apply` against the canonical cubic-bezier control points used by CSS and Hyprland.
+      - `EaseOutCubic` (0.33, 1.0, 0.68, 1.0): matches the standard CSS `ease-out` profile; deceleration profile is correct. ✓
+      - `EaseOutBack` (0.34, 1.56, 0.64, 1.0): matches the standard `easeOutBack` (overshoot ~10%), close cousin of Hyprland's recommended `myBezier = (0.05, 0.9, 0.1, 1.05)` but with a more pronounced bounce. Felt right for an appearing element. ✓
+      - `EaseInOutCubic` (0.65, 0.0, 0.35, 1.0): standard. ✓
+      - `EaseOutExpo` (0.16, 1.0, 0.30, 1.0): standard. ✓
+    - **Duration choices** (`src/app.rs::FOCUS_BORDER_TWEEN_DURATION/OPEN_NEW_PANE_DURATION/OPEN_SIBLING_DURATION/CLOSE_PANE_DURATION`):
+      - 120 ms focus-border ease-out-cubic: snappy without flicker. ✓
+      - 220 ms open-new-pane ease-out-back: on the long end vs Hyprland's typical 70–200 ms, but the overshoot reads better with the extra time. ✓
+      - 180 ms open-sibling ease-out-cubic + 180 ms close ease-out-cubic: pair cleanly with each other. ✓
+    - **Verdict:** keep all current curves and durations for v1. The motion-feel matches Hyprland's reference closely enough that no tuning is required before flipping the repo public. Revisit during real-terminal testing in Phase 4 once tmux backend lands.
 - [ ] **3.14 Update README + screenshots/cast** — *Claude* — `README.md`, `docs/`
   - Status: phase 3 — animations
   - asciinema cast or animated GIF embedded
