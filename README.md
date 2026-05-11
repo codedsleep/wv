@@ -2,43 +2,63 @@
 
 An animated tiling terminal multiplexer in Rust.
 
-`wv` is a terminal-native tiling window manager + multiplexer that aims for 60–160 FPS interpolated motion, BSP layout, and both native (PTY) and tmux process backends. Linux only.
+`wv` is a terminal-native tiling window manager + multiplexer with smooth, sub-cell-accurate motion at 60–160 FPS, recursive BSP splits, and both a native PTY backend and a `tmux -CC` backend for detach/reattach. Linux only.
 
-**Status:** Phase 4 — tmux control-mode backend with detach/reattach in addition to everything from Phase 3 (160 Hz animated BSP layout, native PTY backend, Alt-chord keymap, TOML config, criterion benches, insta snapshot tests, `--debug` HUD).
+> _Demo cast: place a recording at `docs/demo.cast` (asciinema) — embed when the public release lands._
+>
+> Until then, run `wv --debug` and split / close panes — the top-right HUD shows fps, frame time, in-flight tweens, and dirty-cell count per frame.
 
-> A demo cast lands alongside the public release at the end of Phase 3. Until then, run `wv --debug` and split/close panes — the top-right HUD shows fps, frame time, in-flight tweens, and dirty-cell count per frame.
+**Status:** v0.1.0 — Phase 5 polish (themes, OSC 0/2 pane titles, truecolor + 256-color fallback, rotating log file, cargo-dist Linux release pipeline).
 
-## Build
+## Features
+
+- **Smooth animated layout.** Every topology change is interpolated frame-by-frame with sub-cell precision. PTYs are resized only at tween completion, so children never see per-frame `SIGWINCH` storms.
+- **Two backends.** Native via [`portable-pty`](https://crates.io/crates/portable-pty), or `tmux -CC` for detach/reattach with state preserved.
+- **BSP splits.** Recursive horizontal/vertical splits with geometric focus navigation (`h/j/k/l`).
+- **Configurable themes.** Hex color overrides for borders, status bar, and accent; ships with `nord` and `tokyonight` presets (default `tokyonight`).
+- **Pane titles.** OSC 0/2 sequences (`printf '\e]2;hello\a'`) surface as centered top-border labels.
+- **Truecolor with graceful degradation.** Detects `COLORTERM=truecolor`; otherwise quantizes RGB to the xterm-256 cube.
+- **Panic-safe.** Terminal state is always restored on crash; panic info goes to the log file.
+- **`#![forbid(unsafe_code)]`** at the crate root.
+
+## Install
+
+### Prebuilt binary (recommended)
+
+Pre-built Linux binaries (x86_64 and aarch64, `.tar.xz`) are attached to each GitHub Release once published. After the first tagged release:
 
 ```sh
+curl -L https://github.com/<owner>/weave/releases/latest/download/wv-x86_64-unknown-linux-gnu.tar.xz \
+  | tar -xJ
+sudo install -m 755 wv /usr/local/bin/
+```
+
+### cargo install
+
+```sh
+cargo install --git https://github.com/<owner>/weave --locked
+```
+
+### Build from source
+
+Requires Rust 1.75 or newer.
+
+```sh
+git clone https://github.com/<owner>/weave
+cd weave
 cargo build --release
 ./target/release/wv
 ```
 
-Or run directly:
+## Quickstart
+
+`wv` enters the alternate screen with a single shell (`$SHELL`, falling back to `/bin/sh`). Type to interact with the focused pane; resize the host terminal and panes reflow.
+
+Run with `--debug` to overlay live frame stats:
 
 ```sh
-cargo run --release
+wv --debug
 ```
-
-## Try it
-
-`wv` enters the alternate screen with a single shell (your `$SHELL`, falling back to `/bin/sh`).
-
-- Type to interact with the focused pane.
-- Resize the host terminal — panes reflow.
-- The bottom row shows mode, pane count, and the clock.
-- Run with `wv --debug` to overlay live frame stats in the top-right corner.
-
-### Animation
-
-`wv` interpolates every topology change at the monitor's refresh rate (160 Hz target, configurable via `[ui] target_fps`):
-
-- **Open** — a new pane grows from the split line with an `EaseOutBack` overshoot (220 ms); the sibling shrinks in step (`EaseOutCubic`, 180 ms).
-- **Close** — the closing pane collapses to a line (`EaseOutCubic`, 180 ms) before being removed; its sibling expands to fill.
-- **Focus** — the active border color cross-fades (`EaseOutCubic`, 120 ms).
-- **Sub-cell edges** — fractional pane offsets are painted with the half-block glyphs (`▌▐▀▄`) and an sRGB-blended color so motion looks smooth between cell boundaries.
-- **PTYs only resize at tween completion** — children never see per-frame `SIGWINCH` storms.
 
 ### Default keybindings
 
@@ -53,29 +73,49 @@ cargo run --release
 | `Alt+D`                   | Detach (tmux backend only)   |
 | `Alt+Shift+Q`             | Quit                         |
 
+## Animation
+
+`wv` interpolates every topology change at the monitor's refresh rate (160 Hz target by default, configurable via `[ui] target_fps`):
+
+- **Open** — a new pane grows from the split line with an `EaseOutBack` overshoot (220 ms); the sibling shrinks in step (`EaseOutCubic`, 180 ms).
+- **Close** — the closing pane collapses to a line (`EaseOutCubic`, 180 ms) before being removed; its sibling expands to fill.
+- **Focus** — the active border color cross-fades (`EaseOutCubic`, 120 ms).
+- **Sub-cell edges** — fractional pane offsets are painted with the half-block glyphs (`▌▐▀▄`) and sRGB-blended colors so motion looks smooth between cell boundaries.
+
+Bezier curves were tuned against [Hyprland's](https://wiki.hyprland.org/Configuring/Animations/) reference profiles.
+
 ## Config
 
-`wv` reads `$XDG_CONFIG_HOME/weave/config.toml` (falling back to `~/.config/weave/config.toml`). A missing or malformed file falls back to defaults — `wv` will not crash on bad config.
-
-Example:
+`wv` reads `$XDG_CONFIG_HOME/weave/config.toml` (or `~/.config/weave/config.toml`). A missing or malformed file falls back to defaults — `wv` will not crash on bad config.
 
 ```toml
 [keymap.bindings]
-"Alt+h" = "focus-left"
-"Alt+j" = "focus-down"
-"Alt+k" = "focus-up"
-"Alt+l" = "focus-right"
-"Alt+v" = "split-v"
-"Alt+q" = "close"
-"Alt+Q" = "quit"
+"Alt+h"     = "focus-left"
+"Alt+j"     = "focus-down"
+"Alt+k"     = "focus-up"
+"Alt+l"     = "focus-right"
+"Alt+v"     = "split-v"
+"Alt+Enter" = "split-h"
+"Alt+q"     = "close"
+"Alt+Q"     = "quit"
 
 [ui]
-border_color = "cyan"
-status_bar = true
-target_fps = 160
+border_color = "cyan"   # legacy override; takes a back seat to [theme]
+status_bar   = true
+pane_titles  = true
+target_fps   = 160
+
+[theme]
+preset = "tokyonight"   # or "nord"
+# Per-key overrides win over the preset:
+# border_focused   = "#7dcfff"
+# border_unfocused = "#414868"
+# status_fg        = "#c0caf5"
+# status_bg        = "#1a1b26"
+# accent           = "#f7768e"
 ```
 
-The config parser currently accepts a single modifier (`Ctrl+` or `Alt+`). Multi-modifier chords aren't expressible in the config yet.
+The config parser currently accepts a single modifier (`Ctrl+` or `Alt+`). Multi-modifier chords aren't expressible yet.
 
 ## Backends
 
@@ -86,19 +126,19 @@ wv                     # default: --backend native (portable-pty)
 wv --backend tmux      # tmux -CC control-mode backend
 ```
 
-The native backend spawns PTYs directly via [`portable-pty`](https://crates.io/crates/portable-pty) and is the simplest path. The tmux backend drives a `tmux -CC` control-mode session, which adds two things on top:
+The native backend is the simplest path. The tmux backend drives a `tmux -CC` control-mode session, which adds:
 
-- **Detach.** `Alt+D` detaches the current `wv` session — the tmux session keeps running in the background with all its panes alive. Use this when you want to disconnect without killing your work.
-- **Reattach.** `wv attach [name]` reconnects to a previously detached weave session. With no name, it picks the most recently active `weave-*` session.
-- **List sessions.** `wv ls` enumerates `weave-*` tmux sessions (name, created-at, attached/detached state) so you can pick the one to reattach.
+- **Detach.** `Alt+D` detaches the current `wv` session — tmux keeps it running in the background with all panes alive.
+- **Reattach.** `wv attach [name]` reconnects to a previously detached weave session. With no name, picks the most recent `weave-*` session.
+- **List.** `wv ls` enumerates `weave-*` tmux sessions so you can pick which to reattach.
 
-Each tmux session is auto-named `weave-<8-hex-uid>`, so multiple parallel weave sessions coexist without collision. The internal tmux chrome (`status`, `pane-border-status`) is disabled at startup — `wv` draws its own.
+Each tmux session is auto-named `weave-<8-hex-uid>` so multiple parallel sessions coexist. Internal tmux chrome (`status`, `pane-border-status`) is disabled at startup — `wv` draws its own.
 
-The tmux backend parser is `#![forbid(unsafe_code)]` and covered by both unit tests and [proptest](https://crates.io/crates/proptest)-driven randomized robustness tests (see `src/backend/tmux/parser.rs`). The protocol surface is modelled on [iTerm2's tmux integration](https://iterm2.com/documentation-tmux-integration.html) — the same control-mode wire format.
+The tmux backend parser is `#![forbid(unsafe_code)]` and covered by both unit tests and [proptest](https://crates.io/crates/proptest)-driven randomized robustness tests (`src/backend/tmux/parser.rs`). The protocol surface is modelled on [iTerm2's tmux integration](https://iterm2.com/documentation-tmux-integration.html).
 
 ## Logs
 
-Tracing output is written to `~/.local/state/weave/weave.log`. Set `WEAVE_LOG=debug` (or `trace`) for verbose output.
+Tracing output is written to `~/.local/state/weave/weave.log`. The file rotates at 10 MB and keeps 3 numbered archives (`weave.log.1`–`weave.log.3`). Set `WEAVE_LOG=debug` (or `trace` / `warn` / `error`) for level control.
 
 ## Development
 
@@ -108,10 +148,52 @@ cargo bench                    # criterion benches for the diff and compose hot 
 cargo clippy -- -D warnings    # pedantic-clean
 ```
 
-## Roadmap
+## Non-goals
 
-See [`.planning/SCOPE.md`](./.planning/SCOPE.md) and [`.planning/PROMPT.md`](./.planning/PROMPT.md) for the full plan. Phase 4 (tmux backend, detach/reattach) is complete; themes + prebuilt-binary release land in Phase 5.
+`wv` is deliberately small. The following are **not** on the roadmap:
+
+- **No graphical WM.** It's a terminal multiplexer, not a Wayland compositor.
+- **No plugin system.** Behavior is defined in Rust; configuration is data, not code.
+- **No floating windows.** Pure tiling.
+- **No GPU.** Pure cell grid + diff. The "animation" is interpolated cell coordinates plus half-block sub-cell shading.
+- **No Windows or macOS in v1.** Linux only.
+- **No 1:1 tmux replacement.** The tmux backend exists so that detach/reattach come free; `wv` is not a tmux fork.
+- **No scrollback in v1.** Punted until later.
+
+## FAQ
+
+**Why not just a tmux fork?**
+
+tmux is a process supervisor with a rendering layer bolted on. weave starts from the rendering layer (animated, sub-cell-accurate compositor) and treats process supervision as a backend (`PaneBackend` trait, with `NativeBackend` and `TmuxBackend` implementations). Forking tmux would mean fighting decades of assumptions about how the screen is drawn.
+
+**Why Linux only?**
+
+Realistically, this is what the author runs and tests. macOS and Windows could work later but aren't in v1. The codebase is `#![forbid(unsafe_code)]` and the OS-specific surface area is small (PTY spawning, signal handlers), so a port is plausible — just not on the v1 critical path.
+
+**Why animate at all?**
+
+Because instantaneous layout changes are jarring once you have more than two panes — your eye can't track which pane went where. Smooth interpolation lets you actually see the topology change happen, the way a tiling Wayland WM (Hyprland) does for windows.
+
+**Why no GPU?**
+
+The animation budget is dominated by terminal output bandwidth (escape sequences to your host terminal), not by interpolation math. A GPU buys nothing when your bottleneck is `write(stdout)` on the other end of a Unicode-aware emulator.
+
+**Is the tmux backend supported on remote sessions?**
+
+It should work over SSH or in any environment where you can run `tmux -CC` and pump bytes back and forth. Latency will show up in input lag and animation smoothness; the renderer is otherwise transport-agnostic.
 
 ## License
 
-MIT OR Apache-2.0
+Dual-licensed under either of:
+
+- [Apache License, Version 2.0](./LICENSE-APACHE)
+- [MIT license](./LICENSE-MIT)
+
+at your option.
+
+## Acknowledgements
+
+- [Hyprland](https://hypr.land) — motion-feel reference for the animation curves.
+- [iTerm2](https://iterm2.com) — `tmux -CC` integration documentation.
+- [vt100](https://crates.io/crates/vt100) — VT escape sequence parser.
+- [portable-pty](https://crates.io/crates/portable-pty) — PTY abstraction.

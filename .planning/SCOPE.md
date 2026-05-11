@@ -409,7 +409,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Jobs: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo bench --no-run`
   - Ubuntu runners only (Linux-only project)
   - **Accept:** CI green on a sample PR
-- [ ] **5.7 README final pass** — *Claude*
+- [x] **5.7 README final pass** — *Claude*
   - Animated demo (asciinema preferred for terminal-native rendering)
   - Install instructions: prebuilt binary (preferred), `cargo install --git ...`, build from source
   - Feature list, non-goals, FAQ (why not a tmux fork?)
