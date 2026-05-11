@@ -150,7 +150,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 - [x] **1.5 Compositor: single pane fullscreen** — *Codex* — `src/render/compositor.rs`
   - `compose(panes: &[Pane], back: &mut Surface)` blits the (one) pane at (0,0) at full size
   - **Accept:** unit test composes a pane into a 80x24 surface, asserts cells match
-- [ ] **1.6 Diff renderer** — *Codex* — `src/render/diff.rs`
+- [x] **1.6 Diff renderer** — *Codex* — `src/render/diff.rs`
   - `flush(front: &Surface, back: &Surface, out: &mut impl Write)`: walk row-major; for each run of differing cells, emit `MoveTo + SetForegroundColor + SetBackgroundColor + SetAttributes + Print`
   - Coalesce runs of same-style cells into one `Print` call
   - **Reuse a `Vec<u8>` queue buffer across calls** — accept `&mut Vec<u8>` or own one in a renderer struct
