@@ -56,6 +56,15 @@ impl NativeBackend {
         )
     }
 
+    pub fn with_senders(output_tx: OutputSender, event_tx: EventSender) -> Self {
+        Self {
+            panes: HashMap::new(),
+            output_tx,
+            event_tx,
+            next_id: 1,
+        }
+    }
+
     fn allocate_id(&mut self) -> PaneId {
         let id = PaneId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);

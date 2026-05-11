@@ -1,3 +1,6 @@
+use std::ffi::OsString;
+use std::sync::Mutex;
+
 use crossterm::style::Color;
 use weave::anim::timeline::Timeline;
 use weave::backend::PaneId;
@@ -10,6 +13,7 @@ use weave::term::surface::Surface;
 
 const WIDTH: u16 = 80;
 const HEIGHT: u16 = 24;
+static ANSI_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn single_fullscreen_pane() {
@@ -106,6 +110,11 @@ fn pane(id: PaneId, rect: Rect, text: &str) -> Pane {
 }
 
 fn render_ansi(root: &Node, panes: &[Pane]) -> String {
+    let _env_lock = ANSI_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _no_color = NoColorEnvGuard::remove();
+
     let front = Surface::new(WIDTH, HEIGHT);
     let mut back = Surface::new(WIDTH, HEIGHT);
     let mut renderer = DiffRenderer::new();
@@ -124,4 +133,26 @@ fn render_ansi(root: &Node, panes: &[Pane]) -> String {
         .expect("diff flush should succeed");
 
     String::from_utf8(bytes).expect("crossterm output should be utf8")
+}
+
+struct NoColorEnvGuard {
+    previous: Option<OsString>,
+}
+
+impl NoColorEnvGuard {
+    fn remove() -> Self {
+        let previous = std::env::var_os("NO_COLOR");
+        std::env::remove_var("NO_COLOR");
+        Self { previous }
+    }
+}
+
+impl Drop for NoColorEnvGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::env::set_var("NO_COLOR", previous);
+        } else {
+            std::env::remove_var("NO_COLOR");
+        }
+    }
 }

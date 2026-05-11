@@ -2,8 +2,9 @@
 
 use std::collections::HashSet;
 use std::io::{self, Write};
+use std::process::{Command as ProcessCommand, Stdio};
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use bytes::Bytes;
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
@@ -14,6 +15,7 @@ use tokio::time::{self, Duration};
 use crate::anim::timeline::Timeline;
 use crate::anim::tween::Easing;
 use crate::backend::native::NativeBackend;
+use crate::backend::tmux::TmuxBackend;
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::Command;
 use crate::config::Config;
@@ -31,6 +33,10 @@ const OPEN_NEW_PANE_DURATION: Duration = Duration::from_millis(220);
 const OPEN_SIBLING_DURATION: Duration = Duration::from_millis(180);
 // Close tweens use ease-out-cubic so panes decelerate into the collapsed line.
 const CLOSE_PANE_DURATION: Duration = Duration::from_millis(180);
+const OUTPUT_CHANNEL_CAPACITY: usize = 256;
+const EVENT_CHANNEL_CAPACITY: usize = 64;
+
+type BoxedBackend = Box<dyn PaneBackend>;
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum ResizeMode {
@@ -58,7 +64,7 @@ impl DebugMode {
     }
 }
 
-pub struct App<B = NativeBackend> {
+pub struct App {
     front: Surface,
     back: Surface,
     panes: Vec<Pane>,
@@ -66,7 +72,7 @@ pub struct App<B = NativeBackend> {
     focused: Option<PaneId>,
     closing: HashSet<PaneId>,
     resize_mode: ResizeMode,
-    backend: B,
+    backend: BoxedBackend,
     output_rx: mpsc::Receiver<(PaneId, Bytes)>,
     event_rx: mpsc::Receiver<BackendEvent>,
     stdout: io::Stdout,
@@ -85,33 +91,69 @@ pub struct App<B = NativeBackend> {
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct Args {
-    pub debug: bool,
+pub enum BackendKind {
+    #[default]
+    Native,
+    Tmux,
 }
 
-impl Args {
-    pub fn parse_env() -> Self {
-        Self::parse(std::env::args().skip(1))
-    }
-
-    fn parse<I, S>(args: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        Self {
-            debug: args.into_iter().any(|arg| arg.as_ref() == "--debug"),
+impl BackendKind {
+    fn from_cli_value(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "native" => Ok(Self::Native),
+            "tmux" => Ok(Self::Tmux),
+            _ => bail!("unknown backend `{value}`; expected `native` or `tmux`"),
         }
     }
 }
 
-impl App<NativeBackend> {
-    pub fn new(width: u16, height: u16, args: Args) -> Self {
-        let (backend, output_rx, event_rx) = NativeBackend::new();
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Args {
+    pub debug: bool,
+    pub backend: BackendKind,
+}
+
+impl Args {
+    pub fn parse_env() -> anyhow::Result<Self> {
+        Self::parse(std::env::args().skip(1))
+    }
+
+    fn parse<I, S>(args: I) -> anyhow::Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut parsed = Self::default();
+        let mut args = args.into_iter();
+
+        while let Some(arg) = args.next() {
+            let arg = arg.as_ref();
+
+            if arg == "--debug" {
+                parsed.debug = true;
+            } else if arg == "--backend" {
+                let Some(value) = args.next() else {
+                    bail!("missing value for `--backend`; expected `native` or `tmux`");
+                };
+                parsed.backend = BackendKind::from_cli_value(value.as_ref())?;
+            } else if let Some(value) = arg.strip_prefix("--backend=") {
+                parsed.backend = BackendKind::from_cli_value(value)?;
+            } else {
+                bail!("unknown argument `{arg}`");
+            }
+        }
+
+        Ok(parsed)
+    }
+}
+
+impl App {
+    pub async fn new(width: u16, height: u16, args: Args) -> anyhow::Result<Self> {
+        let (backend, output_rx, event_rx) = build_backend(args.backend).await?;
         let config = Config::load();
         let tick_interval = frame_interval(config.ui.target_fps);
 
-        Self {
+        Ok(Self {
             front: Surface::new(width, height),
             back: Surface::new(width, height),
             panes: Vec::new(),
@@ -135,14 +177,9 @@ impl App<NativeBackend> {
             last_dirty_cells: 0,
             dirty: true,
             quit: false,
-        }
+        })
     }
-}
 
-impl<B> App<B>
-where
-    B: PaneBackend,
-{
     pub async fn run(mut self) -> anyhow::Result<()> {
         let pane_id = self
             .spawn_shell_pane(true)
@@ -672,7 +709,12 @@ where
     }
 
     #[cfg(test)]
-    fn with_backend_for_test(backend: B, width: u16, height: u16, pane_id: PaneId) -> Self {
+    fn with_backend_for_test(
+        backend: BoxedBackend,
+        width: u16,
+        height: u16,
+        pane_id: PaneId,
+    ) -> Self {
         let (_output_tx, output_rx) = mpsc::channel(1);
         let (_event_tx, event_rx) = mpsc::channel(1);
         let root_rect = Rect {
@@ -711,6 +753,46 @@ where
             dirty: true,
             quit: false,
         }
+    }
+}
+
+async fn build_backend(
+    backend: BackendKind,
+) -> anyhow::Result<(
+    BoxedBackend,
+    mpsc::Receiver<(PaneId, Bytes)>,
+    mpsc::Receiver<BackendEvent>,
+)> {
+    let (output_tx, output_rx) = mpsc::channel(OUTPUT_CHANNEL_CAPACITY);
+    let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+
+    let backend: BoxedBackend = match backend {
+        BackendKind::Native => Box::new(NativeBackend::with_senders(output_tx, event_tx)),
+        BackendKind::Tmux => {
+            ensure_tmux_available()?;
+            Box::new(TmuxBackend::new(output_tx, event_tx).await?)
+        }
+    };
+
+    Ok((backend, output_rx, event_rx))
+}
+
+fn ensure_tmux_available() -> anyhow::Result<()> {
+    match ProcessCommand::new("tmux")
+        .arg("-V")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => bail!(
+            "tmux backend selected, but `tmux -V` exited with {status}; install a working tmux or run `wv --backend native`"
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => bail!(
+            "tmux backend selected, but `tmux` was not found on PATH; install tmux or run `wv --backend native`"
+        ),
+        Err(error) => Err(error).context("failed to check tmux availability for tmux backend"),
     }
 }
 
@@ -809,9 +891,10 @@ fn collapsed_close_rect(split: Split, closing_is_a: bool, current: FRect) -> FRe
 mod tests {
     use anyhow::Error;
     use crossterm::style::Color;
+    use std::sync::{Arc, Mutex};
 
     use super::{
-        frame_interval, App, CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION,
+        frame_interval, App, Args, BackendKind, CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION,
         OPEN_NEW_PANE_DURATION,
     };
     use crate::anim::tween::Easing;
@@ -824,7 +907,41 @@ mod tests {
 
     struct MockBackend {
         next_id: PaneId,
-        resized: Vec<(PaneId, u16, u16)>,
+        resized: Arc<Mutex<Vec<(PaneId, u16, u16)>>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct MockBackendHandle {
+        resized: Arc<Mutex<Vec<(PaneId, u16, u16)>>>,
+    }
+
+    impl MockBackendHandle {
+        fn resized(&self) -> Vec<(PaneId, u16, u16)> {
+            lock_resized(&self.resized).clone()
+        }
+
+        fn clear_resized(&self) {
+            lock_resized(&self.resized).clear();
+        }
+    }
+
+    fn mock_backend(next_id: PaneId) -> (Box<dyn PaneBackend>, MockBackendHandle) {
+        let handle = MockBackendHandle::default();
+        (
+            Box::new(MockBackend {
+                next_id,
+                resized: Arc::clone(&handle.resized),
+            }),
+            handle,
+        )
+    }
+
+    fn lock_resized(
+        resized: &Mutex<Vec<(PaneId, u16, u16)>>,
+    ) -> std::sync::MutexGuard<'_, Vec<(PaneId, u16, u16)>> {
+        resized
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[async_trait::async_trait]
@@ -838,7 +955,7 @@ mod tests {
         }
 
         async fn resize(&mut self, id: PaneId, cols: u16, rows: u16) -> Result<(), Error> {
-            self.resized.push((id, cols, rows));
+            lock_resized(&self.resized).push((id, cols, rows));
             Ok(())
         }
 
@@ -849,15 +966,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_split_h_splits_focused_leaf_with_spawned_pane() {
-        let mut app = App::with_backend_for_test(
-            MockBackend {
-                next_id: PaneId(2),
-                resized: Vec::new(),
-            },
-            80,
-            24,
-            PaneId(1),
-        );
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
 
         app.execute(Command::SplitH).await.expect("split succeeds");
 
@@ -887,20 +997,13 @@ mod tests {
         }
         assert_eq!(app.focused, Some(PaneId(2)));
         assert!(app.panes.iter().any(|pane| pane.id() == PaneId(2)));
-        assert!(app.backend.resized.is_empty());
+        assert!(handle.resized().is_empty());
     }
 
     #[tokio::test]
     async fn advance_animations_updates_leaf_current_rect_and_marks_dirty() {
-        let mut app = App::with_backend_for_test(
-            MockBackend {
-                next_id: PaneId(2),
-                resized: Vec::new(),
-            },
-            80,
-            24,
-            PaneId(1),
-        );
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.dirty = false;
         app.timeline.tween_leaf_rect(
             PaneId(1),
@@ -936,15 +1039,8 @@ mod tests {
 
     #[tokio::test]
     async fn focus_change_starts_border_tweens_and_reaches_targets() {
-        let mut app = App::with_backend_for_test(
-            MockBackend {
-                next_id: PaneId(2),
-                resized: Vec::new(),
-            },
-            80,
-            24,
-            PaneId(1),
-        );
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.execute(Command::SplitH).await.expect("split succeeds");
         assert_eq!(app.focused, Some(PaneId(2)));
 
@@ -996,18 +1092,11 @@ mod tests {
 
     #[tokio::test]
     async fn split_v_starts_new_pane_collapsed_and_opens_to_target() {
-        let mut app = App::with_backend_for_test(
-            MockBackend {
-                next_id: PaneId(2),
-                resized: Vec::new(),
-            },
-            80,
-            24,
-            PaneId(1),
-        );
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
 
         app.execute(Command::SplitV).await.expect("split succeeds");
-        assert!(app.backend.resized.is_empty());
+        assert!(handle.resized().is_empty());
 
         let new_target = app
             .leaf_rect_target(PaneId(2))
@@ -1032,9 +1121,10 @@ mod tests {
             .await
             .expect("animations advance");
 
-        assert_eq!(app.backend.resized.len(), 2);
-        assert!(app.backend.resized.contains(&(PaneId(1), 40, 23)));
-        assert!(app.backend.resized.contains(&(PaneId(2), 40, 23)));
+        let resized = handle.resized();
+        assert_eq!(resized.len(), 2);
+        assert!(resized.contains(&(PaneId(1), 40, 23)));
+        assert!(resized.contains(&(PaneId(2), 40, 23)));
         match app
             .root
             .as_ref()
@@ -1053,20 +1143,13 @@ mod tests {
 
     #[tokio::test]
     async fn close_keeps_pane_mid_tween_and_removes_after_completion() {
-        let mut app = App::with_backend_for_test(
-            MockBackend {
-                next_id: PaneId(2),
-                resized: Vec::new(),
-            },
-            80,
-            24,
-            PaneId(1),
-        );
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.execute(Command::SplitH).await.expect("split succeeds");
         app.advance_animations(OPEN_NEW_PANE_DURATION)
             .await
             .expect("open animation completes");
-        app.backend.resized.clear();
+        handle.clear_resized();
 
         app.execute(Command::Close).await.expect("close starts");
 
@@ -1082,7 +1165,7 @@ mod tests {
             .await
             .expect("close animation completes");
 
-        assert_eq!(app.backend.resized, vec![(PaneId(1), 80, 23)]);
+        assert_eq!(handle.resized(), vec![(PaneId(1), 80, 23)]);
         assert!(app
             .root
             .as_ref()
@@ -1095,5 +1178,38 @@ mod tests {
     #[test]
     fn frame_interval_uses_configured_fps() {
         assert_eq!(frame_interval(160), Duration::from_nanos(6_250_000));
+    }
+
+    #[test]
+    fn args_default_to_native_backend() {
+        assert_eq!(
+            Args::parse(std::iter::empty::<&str>()).expect("args parse"),
+            Args {
+                debug: false,
+                backend: BackendKind::Native,
+            }
+        );
+    }
+
+    #[test]
+    fn args_parse_backend_and_debug_flags() {
+        assert_eq!(
+            Args::parse(["--backend", "tmux", "--debug"]).expect("args parse"),
+            Args {
+                debug: true,
+                backend: BackendKind::Tmux,
+            }
+        );
+        assert_eq!(
+            Args::parse(["--backend=native"])
+                .expect("args parse")
+                .backend,
+            BackendKind::Native
+        );
+    }
+
+    #[test]
+    fn args_reject_invalid_backend() {
+        assert!(Args::parse(["--backend", "bogus"]).is_err());
     }
 }

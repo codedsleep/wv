@@ -358,7 +358,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - On `kill`: `kill-pane -t %N`
   - **Disable tmux chrome:** at startup, `set -g status off`, `set -g pane-border-status off`
   - **Accept:** integration test starts a session, spawns echo, captures output, kills pane
-- [ ] **4.4 `--backend` flag + dispatch** — *Codex* — `src/main.rs`, `src/app.rs`
+- [x] **4.4 `--backend` flag + dispatch** — *Codex* — `src/main.rs`, `src/app.rs`
   - `wv --backend native|tmux` (default `native`)
   - `App` becomes generic over `Box<dyn PaneBackend>`
   - **Accept:** both backends launch and pass the same Phase 1–3 smoke tests

@@ -48,14 +48,15 @@ fn install_panic_hook() {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let args = weave::app::Args::parse_env();
+    let args = weave::app::Args::parse_env()?;
     init_tracing()?;
     install_panic_hook();
+    let (width, height) = crossterm::terminal::size()?;
+    let app = weave::app::App::new(width, height, args).await?;
     let _guard = weave::term::TerminalGuard::new()?;
     tracing::info!("weave starting");
     tracing::info!("entered alt screen");
-    let (width, height) = crossterm::terminal::size()?;
-    weave::app::App::new(width, height, args).run().await?;
+    app.run().await?;
 
     Ok(())
 }
