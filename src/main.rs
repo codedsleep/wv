@@ -50,11 +50,16 @@ fn install_panic_hook() {
 async fn main() -> anyhow::Result<()> {
     let launch_args = weave::app::LaunchArgs::parse_env()?;
     init_tracing()?;
-    install_panic_hook();
-    let (width, height) = crossterm::terminal::size()?;
     let app = match launch_args {
-        weave::app::LaunchArgs::Run(args) => weave::app::App::new(width, height, args).await?,
+        weave::app::LaunchArgs::ListSessions => return weave::app::print_weave_sessions(),
+        weave::app::LaunchArgs::Run(args) => {
+            install_panic_hook();
+            let (width, height) = crossterm::terminal::size()?;
+            weave::app::App::new(width, height, args).await?
+        }
         weave::app::LaunchArgs::Attach(args) => {
+            install_panic_hook();
+            let (width, height) = crossterm::terminal::size()?;
             weave::app::App::attach(width, height, args).await?
         }
     };

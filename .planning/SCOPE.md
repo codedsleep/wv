@@ -366,7 +366,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Default Prefix binding `d` → detach (clean exit, leave tmux session running)
   - `wv attach` subcommand → reattach to the most recent weave session
   - **Accept:** detach, run shell tasks, `wv attach`, panes still alive with state intact
-- [ ] **4.6 Session naming** — *Codex* — `src/backend/tmux/mod.rs`
+- [x] **4.6 Session naming** — *Codex* — `src/backend/tmux/mod.rs`
   - Auto-generate: `weave-<short-uid>`; `wv ls` lists weave-prefixed sessions; `wv attach <name>` attaches a specific one
   - **Accept:** can have two parallel sessions and attach the right one
 - [ ] **4.7 Backend parity test** — *Codex* — `tests/backend_parity.rs`

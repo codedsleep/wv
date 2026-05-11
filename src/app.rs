@@ -6,6 +6,7 @@ use std::process::{Command as ProcessCommand, Stdio};
 
 use anyhow::{bail, Context};
 use bytes::Bytes;
+use chrono::{Local, TimeZone};
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
 use tokio::signal::unix::{signal, SignalKind};
@@ -130,6 +131,7 @@ pub struct AttachArgs {
 pub enum LaunchArgs {
     Run(Args),
     Attach(AttachArgs),
+    ListSessions,
 }
 
 struct BackendParts {
@@ -214,8 +216,15 @@ impl LaunchArgs {
             .map(|arg| arg.as_ref().to_owned())
             .collect::<Vec<_>>();
 
-        if args.first().map(String::as_str) == Some("attach") {
-            return Ok(Self::Attach(AttachArgs::parse(args.iter().skip(1))?));
+        match args.first().map(String::as_str) {
+            Some("attach") => return Ok(Self::Attach(AttachArgs::parse(args.iter().skip(1))?)),
+            Some("ls") => {
+                if let Some(arg) = args.get(1) {
+                    bail!("`wv ls` does not accept `{arg}`");
+                }
+                return Ok(Self::ListSessions);
+            }
+            _ => {}
         }
 
         Ok(Self::Run(Args::parse(args)?))
@@ -969,6 +978,26 @@ fn ensure_tmux_available() -> anyhow::Result<()> {
     }
 }
 
+pub fn print_weave_sessions() -> anyhow::Result<()> {
+    let sessions = list_weave_tmux_sessions_for_display()?;
+    if sessions.is_empty() {
+        eprintln!("no weave sessions");
+        return Ok(());
+    }
+
+    println!("{:<17}  {:<19}  state", "name", "created");
+    for session in sessions {
+        println!(
+            "{:<17}  {:<19}  {}",
+            session.name,
+            format_epoch_seconds(session.created),
+            session.state
+        );
+    }
+
+    Ok(())
+}
+
 fn resolve_attach_session(requested: Option<&str>) -> anyhow::Result<String> {
     if let Some(session_name) = requested {
         if tmux_session_exists(session_name)? {
@@ -988,6 +1017,63 @@ fn resolve_attach_session(requested: Option<&str>) -> anyhow::Result<String> {
     };
 
     Ok(session.name)
+}
+
+#[derive(Debug)]
+struct DisplayTmuxSession {
+    name: String,
+    created: i64,
+    state: String,
+}
+
+fn list_weave_tmux_sessions_for_display() -> anyhow::Result<Vec<DisplayTmuxSession>> {
+    let output = match ProcessCommand::new("tmux")
+        .args([
+            "list-sessions",
+            "-F",
+            "#{session_name}\t#{session_created}\t#{?session_attached,attached,detached}",
+        ])
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            bail!("tmux was not found on PATH; install tmux to list weave sessions")
+        }
+        Err(error) => return Err(error).context("failed to list tmux sessions"),
+    };
+
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_weave_tmux_session_for_display)
+        .collect())
+}
+
+fn parse_weave_tmux_session_for_display(line: &str) -> Option<DisplayTmuxSession> {
+    let mut parts = line.split('\t');
+    let name = parts.next()?;
+    let created = parts.next()?;
+    let state = parts.next()?;
+    if parts.next().is_some() || !name.starts_with("weave-") {
+        return None;
+    }
+
+    Some(DisplayTmuxSession {
+        name: name.to_owned(),
+        created: created.parse().unwrap_or_default(),
+        state: state.to_owned(),
+    })
+}
+
+fn format_epoch_seconds(seconds: i64) -> String {
+    Local.timestamp_opt(seconds, 0).single().map_or_else(
+        || "unknown".to_owned(),
+        |time| time.format("%Y-%m-%d %H:%M:%S").to_string(),
+    )
 }
 
 fn tmux_session_exists(session_name: &str) -> anyhow::Result<bool> {
