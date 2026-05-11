@@ -1,4 +1,4 @@
-//! `Keymap`, `Mode`, bindings.
+//! `Keymap` and default key bindings.
 
 use std::collections::HashMap;
 
@@ -6,32 +6,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::command::Command;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Mode {
-    Normal,
-    Prefix,
-}
-
-impl Mode {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Normal => "NORMAL",
-            Self::Prefix => "PREFIX",
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct Keymap {
-    prefix: KeyEvent,
     bindings: HashMap<KeyEvent, Command>,
 }
 
 impl Keymap {
-    pub fn set_prefix(&mut self, prefix: KeyEvent) {
-        self.prefix = normalize_key(&prefix).unwrap_or(prefix);
-    }
-
     pub fn set_binding(&mut self, key: KeyEvent, command: Command) {
         if let Some(key) = normalize_key(&key) {
             self.bindings.insert(key, command);
@@ -41,28 +21,31 @@ impl Keymap {
     pub fn command_for(&self, event: &KeyEvent) -> Option<Command> {
         self.bindings.get(&normalize_key(event)?).copied()
     }
-
-    pub fn is_prefix(&self, event: &KeyEvent) -> bool {
-        normalize_key(event).is_some_and(|key| key == self.prefix)
-    }
 }
 
 impl Default for Keymap {
     fn default() -> Self {
         let mut bindings = HashMap::new();
-        bindings.insert(char_key('s'), Command::SplitH);
-        bindings.insert(char_key('v'), Command::SplitV);
-        bindings.insert(char_key('h'), Command::FocusLeft);
-        bindings.insert(char_key('j'), Command::FocusDown);
-        bindings.insert(char_key('k'), Command::FocusUp);
-        bindings.insert(char_key('l'), Command::FocusRight);
-        bindings.insert(char_key('x'), Command::Close);
-        bindings.insert(char_key('q'), Command::Quit);
+        bindings.insert(alt_char('h'), Command::FocusLeft);
+        bindings.insert(alt_char('j'), Command::FocusDown);
+        bindings.insert(alt_char('k'), Command::FocusUp);
+        bindings.insert(alt_char('l'), Command::FocusRight);
+        bindings.insert(alt_char('q'), Command::Close);
+        bindings.insert(alt_char('v'), Command::SplitV);
+        // Some terminals fold Shift into the uppercase char and drop the SHIFT
+        // modifier; kitty-style protocols keep it. Register both so Alt+Shift+Q
+        // reliably quits.
+        bindings.insert(alt_char('Q'), Command::Quit);
+        bindings.insert(
+            KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+            Command::Quit,
+        );
+        bindings.insert(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+            Command::SplitH,
+        );
 
-        Self {
-            prefix: KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
-            bindings,
-        }
+        Self { bindings }
     }
 }
 
@@ -74,52 +57,94 @@ fn normalize_key(event: &KeyEvent) -> Option<KeyEvent> {
     Some(KeyEvent::new(event.code, event.modifiers))
 }
 
-fn char_key(ch: char) -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
+fn alt_char(ch: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT)
 }
 
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{Keymap, Mode};
+    use super::Keymap;
     use crate::command::Command;
 
-    fn key(ch: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
+    fn alt(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
+    }
+
+    fn alt_shift(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT | KeyModifiers::SHIFT)
     }
 
     #[test]
-    fn default_s_binding_splits_horizontally() {
+    fn default_alt_enter_splits_horizontally() {
         let keymap = Keymap::default();
 
-        assert_eq!(keymap.command_for(&key('s')), Some(Command::SplitH));
+        assert_eq!(
+            keymap.command_for(&alt(KeyCode::Enter)),
+            Some(Command::SplitH)
+        );
     }
 
     #[test]
-    fn default_h_binding_focuses_left() {
+    fn default_alt_v_splits_vertically() {
         let keymap = Keymap::default();
 
-        assert_eq!(keymap.command_for(&key('h')), Some(Command::FocusLeft));
+        assert_eq!(
+            keymap.command_for(&alt(KeyCode::Char('v'))),
+            Some(Command::SplitV)
+        );
+    }
+
+    #[test]
+    fn default_alt_h_focuses_left() {
+        let keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.command_for(&alt(KeyCode::Char('h'))),
+            Some(Command::FocusLeft)
+        );
+    }
+
+    #[test]
+    fn default_alt_q_closes_pane() {
+        let keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.command_for(&alt(KeyCode::Char('q'))),
+            Some(Command::Close)
+        );
+    }
+
+    #[test]
+    fn default_alt_shift_q_quits_with_or_without_shift_modifier() {
+        let keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.command_for(&alt(KeyCode::Char('Q'))),
+            Some(Command::Quit)
+        );
+        assert_eq!(
+            keymap.command_for(&alt_shift(KeyCode::Char('Q'))),
+            Some(Command::Quit)
+        );
     }
 
     #[test]
     fn unbound_key_returns_none() {
         let keymap = Keymap::default();
 
-        assert_eq!(keymap.command_for(&key('z')), None);
+        assert_eq!(keymap.command_for(&alt(KeyCode::Char('z'))), None);
     }
 
     #[test]
-    fn default_prefix_is_ctrl_space() {
+    fn unmodified_letter_passes_through() {
+        // Plain letters now flow to the focused PTY; only Alt+ bindings trigger commands.
         let keymap = Keymap::default();
 
-        assert!(keymap.is_prefix(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)));
-    }
-
-    #[test]
-    fn mode_labels_match_status_bar_text() {
-        assert_eq!(Mode::Normal.label(), "NORMAL");
-        assert_eq!(Mode::Prefix.label(), "PREFIX");
+        assert_eq!(
+            keymap.command_for(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            None
+        );
     }
 }

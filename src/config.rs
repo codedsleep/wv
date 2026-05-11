@@ -67,10 +67,6 @@ impl Config {
     fn from_raw(raw: RawConfig) -> Result<Self, ConfigError> {
         let mut config = Self::default();
 
-        if let Some(prefix) = raw.keymap.prefix {
-            config.keymap.set_prefix(parse_key(&prefix)?);
-        }
-
         for (key, command) in raw.keymap.bindings {
             let key = parse_key(&key)?;
             let command = Command::from_str(&command)
@@ -198,7 +194,6 @@ struct RawConfig {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct RawKeymap {
-    prefix: Option<String>,
     bindings: HashMap<String, String>,
 }
 
@@ -218,22 +213,19 @@ mod tests {
     use super::{parse_key, Config, ConfigError};
     use crate::command::Command;
 
-    fn key(ch: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
+    fn alt(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT)
     }
 
     #[test]
     fn default_config_matches_default_keymap() {
         let config = Config::default();
 
-        assert!(config
-            .keymap
-            .is_prefix(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)));
-        assert_eq!(config.keymap.command_for(&key('s')), Some(Command::SplitH));
         assert_eq!(
-            config.keymap.command_for(&key('h')),
+            config.keymap.command_for(&alt('h')),
             Some(Command::FocusLeft)
         );
+        assert_eq!(config.keymap.command_for(&alt('q')), Some(Command::Close));
         assert_eq!(config.ui.border_color, Color::Cyan);
         assert!(config.ui.status_bar);
         assert_eq!(config.ui.target_fps, 160);
@@ -243,11 +235,8 @@ mod tests {
     fn sample_toml_parses_and_overrides_defaults() {
         let config = Config::from_toml_str(
             r#"
-            [keymap]
-            prefix = "Alt+x"
-
             [keymap.bindings]
-            s = "split-v"
+            "Alt+s" = "split-v"
 
             [ui]
             border_color = "magenta"
@@ -257,12 +246,9 @@ mod tests {
         )
         .expect("sample config parses");
 
-        assert!(config
-            .keymap
-            .is_prefix(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)));
-        assert_eq!(config.keymap.command_for(&key('s')), Some(Command::SplitV));
+        assert_eq!(config.keymap.command_for(&alt('s')), Some(Command::SplitV));
         assert_eq!(
-            config.keymap.command_for(&key('h')),
+            config.keymap.command_for(&alt('h')),
             Some(Command::FocusLeft)
         );
         assert_eq!(config.ui.border_color, Color::Magenta);

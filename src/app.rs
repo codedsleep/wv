@@ -5,7 +5,7 @@ use std::io::{self, Write};
 
 use anyhow::Context;
 use bytes::Bytes;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
+use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
@@ -18,7 +18,7 @@ use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::Command;
 use crate::config::Config;
 use crate::input;
-use crate::input::keymap::{Keymap, Mode};
+use crate::input::keymap::Keymap;
 use crate::layout::geometry::{Direction, FRect, Rect, Split};
 use crate::layout::tree::Node;
 use crate::render::diff::DiffRenderer;
@@ -74,7 +74,6 @@ pub struct App<B = NativeBackend> {
     diff: DiffRenderer,
     timeline: Timeline,
     keymap: Keymap,
-    mode: Mode,
     focused_border_color: crossterm::style::Color,
     status_bar: bool,
     tick_interval: Duration,
@@ -128,7 +127,6 @@ impl App<NativeBackend> {
             diff: DiffRenderer::new(),
             timeline: Timeline::new(),
             keymap: config.keymap,
-            mode: Mode::Normal,
             focused_border_color: config.ui.border_color,
             status_bar: config.ui.status_bar,
             tick_interval,
@@ -439,27 +437,10 @@ where
             return Ok(());
         }
 
-        match self.mode {
-            Mode::Normal if self.keymap.is_prefix(&key) => {
-                self.mode = Mode::Prefix;
-                self.dirty = true;
-                return Ok(());
-            }
-            Mode::Normal => {}
-            Mode::Prefix if key.code == KeyCode::Esc => {
-                self.mode = Mode::Normal;
-                self.dirty = true;
-                return Ok(());
-            }
-            Mode::Prefix => {
-                let command = self.keymap.command_for(&key);
-                self.mode = Mode::Normal;
-                self.dirty = true;
-                if let Some(command) = command {
-                    self.execute(command).await?;
-                }
-                return Ok(());
-            }
+        if let Some(command) = self.keymap.command_for(&key) {
+            self.dirty = true;
+            self.execute(command).await?;
+            return Ok(());
         }
 
         let Some(focused) = self.focused else {
@@ -526,7 +507,7 @@ where
         if self.status_bar {
             chrome::draw_status_bar(
                 &mut self.back,
-                self.mode.label(),
+                "NORMAL",
                 chrome::leaf_count(self.root.as_ref()),
                 chrono::Local::now(),
             );
@@ -721,7 +702,6 @@ where
             diff: DiffRenderer::new(),
             timeline: Timeline::new(),
             keymap: Keymap::default(),
-            mode: Mode::Normal,
             focused_border_color: crossterm::style::Color::Cyan,
             status_bar: true,
             tick_interval: frame_interval(crate::config::DEFAULT_TARGET_FPS),

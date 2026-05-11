@@ -4,7 +4,7 @@ An animated tiling terminal multiplexer in Rust.
 
 `wv` is a terminal-native tiling window manager + multiplexer that aims for 60–160 FPS interpolated motion, BSP layout, and both native (PTY) and tmux process backends. Linux only.
 
-**Status:** Phase 3 — splits, closes, and focus changes animate at 160 Hz with sub-cell precision. BSP layout, native PTY backend, modal keymap, TOML config, criterion benches, insta snapshot tests, `--debug` HUD.
+**Status:** Phase 3 — splits, closes, and focus changes animate at 160 Hz with sub-cell precision. BSP layout, native PTY backend, Alt-chord keymap, TOML config, criterion benches, insta snapshot tests, `--debug` HUD.
 
 > A demo cast lands alongside the public release at the end of Phase 3. Until then, run `wv --debug` and split/close panes — the top-right HUD shows fps, frame time, in-flight tweens, and dirty-cell count per frame.
 
@@ -42,17 +42,15 @@ cargo run --release
 
 ### Default keybindings
 
-`wv` is modal: in **Normal** mode, keys pass through to the focused pane. Press the **prefix** to enter **Prefix** mode for one key, then bindings below take effect.
+`wv` follows tiling-window-manager conventions: every command uses an `Alt` chord, and any unbound key passes straight through to the focused pane.
 
-| Mode    | Key            | Action                  |
-|---------|----------------|-------------------------|
-| Normal  | `Ctrl+Space`   | Enter Prefix mode       |
-| Prefix  | `s`            | Split horizontal        |
-| Prefix  | `v`            | Split vertical          |
-| Prefix  | `h` / `j` / `k` / `l` | Focus left/down/up/right |
-| Prefix  | `x`            | Close focused pane      |
-| Prefix  | `q`            | Quit                    |
-| Prefix  | `Esc`          | Back to Normal          |
+| Key                       | Action                       |
+|---------------------------|------------------------------|
+| `Alt+Enter`               | Split horizontal             |
+| `Alt+V`                   | Split vertical               |
+| `Alt+H` / `J` / `K` / `L` | Focus left / down / up / right |
+| `Alt+Q`                   | Close focused pane           |
+| `Alt+Shift+Q`             | Quit                         |
 
 ## Config
 
@@ -61,24 +59,22 @@ cargo run --release
 Example:
 
 ```toml
-[keymap]
-prefix = "Ctrl+Space"
-
 [keymap.bindings]
-s = "split-h"
-v = "split-v"
-h = "focus-left"
-j = "focus-down"
-k = "focus-up"
-l = "focus-right"
-x = "close"
-q = "quit"
+"Alt+h" = "focus-left"
+"Alt+j" = "focus-down"
+"Alt+k" = "focus-up"
+"Alt+l" = "focus-right"
+"Alt+v" = "split-v"
+"Alt+q" = "close"
+"Alt+Q" = "quit"
 
 [ui]
 border_color = "cyan"
 status_bar = true
 target_fps = 160
 ```
+
+The config parser currently accepts a single modifier (`Ctrl+` or `Alt+`). Multi-modifier chords aren't expressible in the config yet.
 
 ## Logs
 
