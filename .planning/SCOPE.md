@@ -320,16 +320,12 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Status: phase 3 — animations
   - asciinema cast or animated GIF embedded
   - **Accept:** README looks shippable
-- [ ] **3.15 GitHub repo creation (private)** — *Kimi*
+- [x] **3.15 GitHub repo creation (private)** — *Kimi*
   - `gh repo create weave --private --source=. --remote=origin`
   - Push branches and tags
   - **Accept:** `gh repo view` shows the repo
-- [ ] **3.16 Flip repo public** — *Kimi*
-  - `gh repo edit weave --visibility public`
-  - **Only after 3.13 sign-off from Claude**
-  - **Accept:** repo is publicly visible
-
-**Phase 3 acceptance:** all topology changes animate smoothly at the target frame rate on kitty/wezterm/foot/alacritty. Frame budget held under `htop`-in-every-pane load (verify with `--debug`). Snapshot tests + benches in CI-ready state. Repo is **public**. Tag `phase-3` exists.
+- 
+**Phase 3 acceptance:** all topology changes animate smoothly at the target frame rate on kitty/wezterm/foot/alacritty. Frame budget held under `htop`-in-every-pane load (verify with `--debug`). Snapshot tests + benches in CI-ready state. Repo is **private**. Tag `phase-3` exists.
 
 - [ ] **3.99 commit & tag** — *Kimi* — per-task commits, then `git tag phase-3`
 
@@ -339,7 +335,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 
 **Goal:** `wv --backend tmux` produces a session that survives detach/reattach.
 
-- [ ] **4.1 Tmux control mode parser** — *Codex* — `src/backend/tmux/parser.rs` (new submodule)
+- [x] **4.1 Tmux control mode parser** — *Codex* — `src/backend/tmux/parser.rs` (new submodule)
   - Stream parser for `%output %N <data>`, `%window-add`, `%window-close`, `%pane-died %N`, `%session-changed`, `%layout-change`, `%exit`, `%begin/%end/%error` blocks
   - Returns `Vec<TmuxNotification>` per chunk
   - **Reference iTerm2's TmuxGateway** for edge cases (escaping, partial lines, nested begin/end)
@@ -411,7 +407,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Jobs: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo bench --no-run`
   - Ubuntu runners only (Linux-only project)
   - **Accept:** CI green on a sample PR
-- [ ] **5.7 CONTRIBUTING.md** — *Claude*
+  - [ ] **5.7 CONTRIBUTING.md** — *CLAUDE*
   - How to build, run, test, file issues
   - Architecture overview (link to PROMPT.md)
   - Note: tmux protocol parser is fuzzed; add new edge cases via the corpus
