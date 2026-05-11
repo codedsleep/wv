@@ -4,6 +4,18 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/codedsleep/animated-term-tiling-rust"
+
+[workspace]
+members = ["."]
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.25.0"
+ci = "github"
+installers = []
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+hosting = "github"
+unix-archive = ".tar.xz"
 
 [[bin]]
 name = "wv"
@@ -40,3 +52,8 @@ harness = false
 [[bench]]
 name = "compose"
 harness = false
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

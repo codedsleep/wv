@@ -400,12 +400,12 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Rotate weave.log at 10MB; keep 3 archives
   - `WEAVE_LOG=debug` for verbose
   - **Accept:** log rotation observable
-- [ ] **5.5 cargo-dist setup** — *Codex* — `Cargo.toml`, `.github/workflows/release.yml`
+- [x] **5.5 cargo-dist setup** — *Codex* — `Cargo.toml`, `.github/workflows/release.yml`
   - `cargo dist init` (one-time), targets `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`
   - Static-ish musl build optional; gnu acceptable for v0.1.0
   - On `git tag v*` push: builds release artifacts and creates a GitHub Release draft
   - **Accept:** dry-run a release tag on a side branch; artifacts produced
-- [ ] **5.6 GitHub Actions CI** — *Codex* — `.github/workflows/ci.yml`
+- [~] **5.6 GitHub Actions CI** — _skipped (2026-05-11)_
   - Jobs: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo bench --no-run`
   - Ubuntu runners only (Linux-only project)
   - **Accept:** CI green on a sample PR
@@ -420,7 +420,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 - [x] **5.9 Issue templates** — *Claude* — `.github/ISSUE_TEMPLATE/`
   - bug.yml, feature.yml, terminal-compat.yml
   - **Accept:** templates render in the GitHub UI
-- [ ] **5.10 v0.1.0 release** — *kimi*
+- [~] **5.10 v0.1.0 release** — _skipped (2026-05-11)_
   - `git tag v0.1.0`, push tag, watch cargo-dist build, edit GitHub Release notes
   - **Accept:** release page is live with binaries for download
 
