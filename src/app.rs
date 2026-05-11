@@ -290,7 +290,12 @@ where
         }
 
         self.queue_buf.clear();
-        compositor::compose(self.root.as_ref(), &self.panes, &mut self.back);
+        compositor::compose(
+            self.root.as_ref(),
+            &self.panes,
+            self.focused,
+            &mut self.back,
+        );
         self.diff.flush(&self.front, &self.back, &mut self.stdout)?;
         self.stdout.flush()?;
         std::mem::swap(&mut self.front, &mut self.back);

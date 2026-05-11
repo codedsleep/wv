@@ -1,16 +1,19 @@
 //! Compose panes into back surface.
 
 use crate::layout::tree::Node;
+use crate::render::chrome;
 use crate::term::pane::Pane;
 use crate::term::surface::Surface;
+use crate::{backend::PaneId, layout::geometry::Rect};
 
-pub fn compose(root: Option<&Node>, panes: &[Pane], back: &mut Surface) {
+pub fn compose(root: Option<&Node>, panes: &[Pane], focused: Option<PaneId>, back: &mut Surface) {
     let Some(root) = root else {
         back.clear();
         return;
     };
 
     compose_node(root, panes, back);
+    chrome::draw_borders(back, root, focused);
 }
 
 fn compose_node(node: &Node, panes: &[Pane], back: &mut Surface) {
@@ -20,14 +23,24 @@ fn compose_node(node: &Node, panes: &[Pane], back: &mut Surface) {
                 return;
             };
 
-            let mut clipped = Surface::new(rect.w, rect.h);
+            let content_rect = inset_rect(*rect);
+            let mut clipped = Surface::new(content_rect.w, content_rect.h);
             pane.cells_into(&mut clipped, 0, 0);
-            back.blit(&clipped, rect.x, rect.y);
+            back.blit(&clipped, content_rect.x, content_rect.y);
         }
         Node::Internal { a, b, .. } => {
             compose_node(a, panes, back);
             compose_node(b, panes, back);
         }
+    }
+}
+
+fn inset_rect(rect: Rect) -> Rect {
+    Rect {
+        x: rect.x.saturating_add(1),
+        y: rect.y.saturating_add(1),
+        w: rect.w.saturating_sub(2),
+        h: rect.h.saturating_sub(2),
     }
 }
 
@@ -55,10 +68,11 @@ mod tests {
         };
 
         pane.process(b"hi");
-        compose(Some(&root), &[pane], &mut surface);
+        compose(Some(&root), &[pane], Some(PaneId(1)), &mut surface);
 
-        assert_eq!(surface.get(0, 0).expect("cell exists").ch, 'h');
-        assert_eq!(surface.get(1, 0).expect("cell exists").ch, 'i');
+        assert_eq!(surface.get(0, 0).expect("cell exists").ch, '┌');
+        assert_eq!(surface.get(1, 1).expect("cell exists").ch, 'h');
+        assert_eq!(surface.get(2, 1).expect("cell exists").ch, 'i');
     }
 
     #[test]
@@ -97,10 +111,11 @@ mod tests {
 
         top.process(b"A");
         bottom.process(b"B");
-        compose(Some(&root), &[top, bottom], &mut surface);
+        compose(Some(&root), &[top, bottom], Some(PaneId(1)), &mut surface);
 
-        assert_eq!(surface.get(0, 0).expect("cell exists").ch, 'A');
-        assert_eq!(surface.get(0, 12).expect("cell exists").ch, 'B');
+        assert_eq!(surface.get(0, 0).expect("cell exists").ch, '┌');
+        assert_eq!(surface.get(1, 1).expect("cell exists").ch, 'A');
+        assert_eq!(surface.get(1, 13).expect("cell exists").ch, 'B');
     }
 
     #[test]
@@ -120,9 +135,10 @@ mod tests {
                 },
             }),
             &[pane],
+            Some(PaneId(1)),
             &mut surface,
         );
-        compose(None, &[], &mut surface);
+        compose(None, &[], None, &mut surface);
 
         assert_eq!(surface.get(0, 0).expect("cell exists").ch, ' ');
     }

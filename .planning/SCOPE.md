@@ -206,7 +206,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 - [x] **2.4 Compositor: multi-pane** — *Codex* — `src/render/compositor.rs`
   - Walk leaves; blit each pane's screen at its `Rect`
   - **Accept:** integration test composes a 2-leaf tree, both panes appear
-- [ ] **2.5 Chrome: borders + focus** — *Codex* — `src/render/chrome.rs`
+- [x] **2.5 Chrome: borders + focus** — *Codex* — `src/render/chrome.rs`
   - 1-cell borders around every pane (use box-drawing chars: `─│┌┐└┘├┤┬┴┼`)
   - Focused pane border in accent color (default cyan); unfocused dim
   - **Pane interior shrinks by 1 cell per side** — recompute layout to account for this OR draw borders inside the rect (pick: draw inside, simpler)
