@@ -16,8 +16,8 @@ use crate::command::Command;
 use crate::input;
 use crate::layout::geometry::{Direction, Rect, Split};
 use crate::layout::tree::Node;
-use crate::render::compositor;
 use crate::render::diff::DiffRenderer;
+use crate::render::{chrome, compositor};
 use crate::term::pane::Pane;
 use crate::term::surface::Surface;
 
@@ -296,6 +296,12 @@ where
             self.focused,
             &mut self.back,
         );
+        chrome::draw_status_bar(
+            &mut self.back,
+            "NORMAL",
+            chrome::leaf_count(self.root.as_ref()),
+            chrono::Local::now(),
+        );
         self.diff.flush(&self.front, &self.back, &mut self.stdout)?;
         self.stdout.flush()?;
         std::mem::swap(&mut self.front, &mut self.back);
@@ -310,7 +316,7 @@ where
             x: 0,
             y: 0,
             w: self.back.width,
-            h: self.back.height,
+            h: self.back.height.saturating_sub(1),
         }
     }
 
@@ -446,7 +452,7 @@ mod tests {
             } => {
                 assert_eq!(split, Split::Horizontal);
                 assert_eq!(rect.w, 80);
-                assert_eq!(rect.h, 24);
+                assert_eq!(rect.h, 23);
                 assert!(matches!(
                     *a,
                     Node::Leaf {

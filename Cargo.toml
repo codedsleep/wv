@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 crossterm = { version = "0.28", features = ["event-stream"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1", features = ["rt", "macros", "io-util", "time", "sync", "signal"] }
 portable-pty = "0.8"
 vt100 = "0.15"

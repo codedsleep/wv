@@ -211,7 +211,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Focused pane border in accent color (default cyan); unfocused dim
   - **Pane interior shrinks by 1 cell per side** — recompute layout to account for this OR draw borders inside the rect (pick: draw inside, simpler)
   - **Accept:** visual check; borders join correctly at T/+ junctions
-- [ ] **2.6 Status bar** — *Codex* — `src/render/chrome.rs`
+- [x] **2.6 Status bar** — *Codex* — `src/render/chrome.rs`
   - 1-row strip at bottom: `[mode] panes:N HH:MM:SS`
   - Reduce layout root rect by 1 row to make room
   - **Accept:** clock ticks; mode label updates when prefix is pressed

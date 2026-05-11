@@ -10,6 +10,8 @@ use crate::term::surface::Surface;
 
 const FOCUSED_BORDER: Color = Color::Cyan;
 const UNFOCUSED_BORDER: Color = Color::DarkGrey;
+const STATUS_FG: Color = Color::White;
+const STATUS_BG: Color = Color::DarkBlue;
 
 pub fn draw_borders(surface: &mut Surface, tree: &Node, focused: Option<PaneId>) {
     match tree {
@@ -26,6 +28,35 @@ pub fn draw_borders(surface: &mut Surface, tree: &Node, focused: Option<PaneId>)
             draw_borders(surface, b, focused);
         }
     }
+}
+
+pub fn draw_status_bar(
+    surface: &mut Surface,
+    mode_label: &str,
+    pane_count: usize,
+    now: chrono::DateTime<chrono::Local>,
+) {
+    if surface.width == 0 || surface.height == 0 {
+        return;
+    }
+
+    let y = surface.height - 1;
+    for x in 0..surface.width {
+        surface.set(x, y, status_cell(' '));
+    }
+
+    let text = format!(
+        "[{mode_label}] panes:{pane_count} {}",
+        now.format("%H:%M:%S")
+    );
+
+    for (x, ch) in (0..surface.width).zip(text.chars()) {
+        surface.set(x, y, status_cell(ch));
+    }
+}
+
+pub fn leaf_count(tree: Option<&Node>) -> usize {
+    tree.map_or(0, count_leaves)
 }
 
 fn draw_rect_border(surface: &mut Surface, rect: Rect, color: Color) {
@@ -57,11 +88,23 @@ fn border_cell(ch: char, color: Color) -> Cell {
     Cell::new(ch, color, Color::Reset, CellAttrs::empty())
 }
 
+fn status_cell(ch: char) -> Cell {
+    Cell::new(ch, STATUS_FG, STATUS_BG, CellAttrs::empty())
+}
+
+fn count_leaves(node: &Node) -> usize {
+    match node {
+        Node::Leaf { .. } => 1,
+        Node::Internal { a, b, .. } => count_leaves(a) + count_leaves(b),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
     use crossterm::style::Color;
 
-    use super::draw_borders;
+    use super::{draw_borders, draw_status_bar};
     use crate::backend::PaneId;
     use crate::layout::geometry::{Rect, Split};
     use crate::layout::tree::Node;
@@ -107,5 +150,21 @@ mod tests {
         assert_eq!(focused_corner.fg, Color::Cyan);
         assert_eq!(unfocused_corner.ch, '┌');
         assert_eq!(unfocused_corner.fg, Color::DarkGrey);
+    }
+
+    #[test]
+    fn draw_status_bar_writes_pane_count_on_bottom_row() {
+        let mut surface = Surface::new(32, 4);
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 5, 11, 14, 23, 11)
+            .single()
+            .expect("test time exists");
+
+        draw_status_bar(&mut surface, "NORMAL", 2, now);
+
+        let bottom: String = (0..surface.width)
+            .map(|x| surface.get(x, surface.height - 1).expect("cell exists").ch)
+            .collect();
+        assert!(bottom.contains("panes:2"));
     }
 }
