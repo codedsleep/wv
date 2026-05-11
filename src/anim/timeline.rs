@@ -18,7 +18,7 @@ const FLOAT_EPSILON: f32 = 0.000_1;
 pub struct Timeline {
     leaf_rects: HashMap<PaneId, Tween<FRect>>,
     internal_ratios: HashMap<usize, Tween<f32>>,
-    focus_border: Option<Tween<Color>>,
+    pane_border_colors: HashMap<PaneId, Tween<Color>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -33,9 +33,7 @@ impl Timeline {
     }
 
     pub fn active_count(&self) -> usize {
-        self.leaf_rects.len()
-            + self.internal_ratios.len()
-            + usize::from(self.focus_border.is_some())
+        self.leaf_rects.len() + self.internal_ratios.len() + self.pane_border_colors.len()
     }
 
     pub fn is_idle(&self) -> bool {
@@ -74,24 +72,40 @@ impl Timeline {
         );
     }
 
-    pub fn tween_focus_border(
+    pub fn tween_pane_border_color(
         &mut self,
+        pane: PaneId,
         from: Color,
         to: Color,
         duration: Duration,
         easing: Easing,
     ) {
-        self.focus_border = Some(Tween::new(from, to, duration, easing));
+        self.pane_border_colors
+            .insert(pane, Tween::new(from, to, duration, easing));
     }
 
-    pub fn advance(
-        &mut self,
-        dt: Duration,
-        root: Option<&mut Node>,
-        focused_border_color: &mut Color,
-    ) -> TimelineAdvance {
+    pub fn pane_border_color(
+        &self,
+        pane: PaneId,
+        focused: Option<PaneId>,
+        focused_color: Color,
+        unfocused_color: Color,
+    ) -> Color {
+        self.pane_border_colors.get(&pane).map_or_else(
+            || {
+                if Some(pane) == focused {
+                    focused_color
+                } else {
+                    unfocused_color
+                }
+            },
+            Tween::value,
+        )
+    }
+
+    pub fn advance(&mut self, dt: Duration, root: Option<&mut Node>) -> TimelineAdvance {
         let mut advance = TimelineAdvance::default();
-        self.advance_focus_border(dt, focused_border_color, &mut advance);
+        self.advance_pane_border_colors(dt, &mut advance);
 
         let Some(root) = root else {
             self.leaf_rects.clear();
@@ -106,24 +120,28 @@ impl Timeline {
         advance
     }
 
-    fn advance_focus_border(
-        &mut self,
-        dt: Duration,
-        focused_border_color: &mut Color,
-        advance: &mut TimelineAdvance,
-    ) {
-        let Some(tween) = self.focus_border.as_mut() else {
-            return;
-        };
+    fn advance_pane_border_colors(&mut self, dt: Duration, advance: &mut TimelineAdvance) {
+        let mut finished = Vec::new();
+        let panes = self.pane_border_colors.keys().copied().collect::<Vec<_>>();
 
-        let running = tween.advance(dt);
-        let value = tween.value();
-        if *focused_border_color != value {
-            *focused_border_color = value;
-            advance.border_color_changed = true;
+        for pane in panes {
+            let Some(tween) = self.pane_border_colors.get_mut(&pane) else {
+                continue;
+            };
+            let previous = tween.value();
+            let running = tween.advance(dt);
+            let value = tween.value();
+
+            if previous != value {
+                advance.changed_panes.push(pane);
+            }
+            if !running {
+                finished.push(pane);
+            }
         }
-        if !running {
-            self.focus_border = None;
+
+        for pane in finished {
+            self.pane_border_colors.remove(&pane);
         }
     }
 
@@ -281,9 +299,8 @@ mod tests {
             Duration::from_millis(100),
             Easing::Linear,
         );
-        let mut border = Color::Cyan;
 
-        let advance = timeline.advance(Duration::from_millis(50), Some(&mut root), &mut border);
+        let advance = timeline.advance(Duration::from_millis(50), Some(&mut root));
 
         assert_eq!(advance.changed_panes, vec![PaneId(1)]);
         match root {
@@ -312,9 +329,8 @@ mod tests {
             Duration::from_millis(100),
             Easing::Linear,
         );
-        let mut border = Color::Cyan;
 
-        let advance = timeline.advance(Duration::from_millis(100), Some(&mut root), &mut border);
+        let advance = timeline.advance(Duration::from_millis(100), Some(&mut root));
 
         assert_eq!(advance.changed_panes, vec![PaneId(1)]);
         assert!(timeline.is_idle());
@@ -332,9 +348,8 @@ mod tests {
         };
         let mut timeline = Timeline::new();
         timeline.tween_internal_ratio(0, 0.5, 0.75, Duration::from_millis(100), Easing::Linear);
-        let mut border = Color::Cyan;
 
-        let advance = timeline.advance(Duration::from_millis(50), Some(&mut root), &mut border);
+        let advance = timeline.advance(Duration::from_millis(50), Some(&mut root));
 
         assert_eq!(advance.changed_panes, vec![PaneId(1), PaneId(2)]);
         match root {
@@ -344,9 +359,10 @@ mod tests {
     }
 
     #[test]
-    fn focus_border_tween_updates_color() {
+    fn pane_border_tween_updates_color() {
         let mut timeline = Timeline::new();
-        timeline.tween_focus_border(
+        timeline.tween_pane_border_color(
+            PaneId(1),
             Color::Rgb { r: 0, g: 0, b: 0 },
             Color::Rgb {
                 r: 100,
@@ -356,11 +372,13 @@ mod tests {
             Duration::from_millis(100),
             Easing::Linear,
         );
-        let mut border = Color::Rgb { r: 0, g: 0, b: 0 };
 
-        let advance = timeline.advance(Duration::from_millis(50), None, &mut border);
+        let advance = timeline.advance(Duration::from_millis(50), None);
 
-        assert!(advance.border_color_changed);
-        assert_eq!(border, Color::Rgb { r: 50, g: 25, b: 0 });
+        assert_eq!(advance.changed_panes, vec![PaneId(1)]);
+        assert_eq!(
+            timeline.pane_border_color(PaneId(1), None, Color::Cyan, Color::DarkGrey),
+            Color::Rgb { r: 50, g: 25, b: 0 }
+        );
     }
 }

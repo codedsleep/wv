@@ -24,6 +24,8 @@ use crate::render::{chrome, compositor};
 use crate::term::pane::Pane;
 use crate::term::surface::Surface;
 
+const FOCUS_BORDER_TWEEN_DURATION: Duration = Duration::from_millis(120);
+
 pub struct App<B = NativeBackend> {
     front: Surface,
     back: Surface,
@@ -190,14 +192,47 @@ where
         let Some(focused) = self.focused else {
             return;
         };
-        let Some(root) = self.root.as_ref() else {
-            return;
-        };
 
-        if let Some(next) = root.focus_neighbor(focused, dir) {
+        let next = self
+            .root
+            .as_ref()
+            .and_then(|root| root.focus_neighbor(focused, dir));
+
+        if let Some(next) = next {
+            self.start_focus_border_tweens(focused, next);
             self.focused = Some(next);
             self.dirty = true;
         }
+    }
+
+    fn start_focus_border_tweens(&mut self, previous: PaneId, next: PaneId) {
+        if previous == next {
+            return;
+        }
+
+        let focused_color = self.focused_border_color;
+        let unfocused_color = chrome::UNFOCUSED_BORDER;
+        let previous_from =
+            self.timeline
+                .pane_border_color(previous, self.focused, focused_color, unfocused_color);
+        let next_from =
+            self.timeline
+                .pane_border_color(next, self.focused, focused_color, unfocused_color);
+
+        self.timeline.tween_pane_border_color(
+            previous,
+            previous_from,
+            unfocused_color,
+            FOCUS_BORDER_TWEEN_DURATION,
+            crate::anim::tween::Easing::EaseOutCubic,
+        );
+        self.timeline.tween_pane_border_color(
+            next,
+            next_from,
+            focused_color,
+            FOCUS_BORDER_TWEEN_DURATION,
+            crate::anim::tween::Easing::EaseOutCubic,
+        );
     }
 
     async fn close_focused(&mut self) -> anyhow::Result<()> {
@@ -343,6 +378,7 @@ where
             &self.panes,
             self.focused,
             self.focused_border_color,
+            &self.timeline,
             &mut self.back,
         );
         if self.status_bar {
@@ -363,11 +399,9 @@ where
     }
 
     fn advance_animations(&mut self, dt: Duration) {
-        let advance = self
-            .timeline
-            .advance(dt, self.root.as_mut(), &mut self.focused_border_color);
+        let advance = self.timeline.advance(dt, self.root.as_mut());
 
-        if advance.border_color_changed || !advance.changed_panes.is_empty() {
+        if !advance.changed_panes.is_empty() {
             self.dirty = true;
         }
     }
@@ -466,13 +500,15 @@ fn frame_interval(target_fps: u16) -> Duration {
 #[cfg(test)]
 mod tests {
     use anyhow::Error;
+    use crossterm::style::Color;
 
-    use super::{frame_interval, App};
+    use super::{frame_interval, App, FOCUS_BORDER_TWEEN_DURATION};
     use crate::anim::tween::Easing;
     use crate::backend::{PaneBackend, PaneCommand, PaneId};
     use crate::command::Command;
     use crate::layout::geometry::{FRect, Split};
     use crate::layout::tree::Node;
+    use crate::render::chrome;
     use tokio::time::Duration;
 
     struct MockBackend {
@@ -583,6 +619,64 @@ mod tests {
             }
             Node::Internal { .. } => panic!("expected leaf root"),
         }
+    }
+
+    #[tokio::test]
+    async fn focus_change_starts_border_tweens_and_reaches_targets() {
+        let mut app = App::with_backend_for_test(
+            MockBackend {
+                next_id: PaneId(2),
+                resized: Vec::new(),
+            },
+            80,
+            24,
+            PaneId(1),
+        );
+        app.execute(Command::SplitH).await.expect("split succeeds");
+        assert_eq!(app.focused, Some(PaneId(2)));
+
+        app.execute(Command::FocusUp).await.expect("focus succeeds");
+
+        assert_eq!(app.focused, Some(PaneId(1)));
+        assert_eq!(
+            app.timeline.pane_border_color(
+                PaneId(2),
+                app.focused,
+                app.focused_border_color,
+                chrome::UNFOCUSED_BORDER,
+            ),
+            Color::Cyan
+        );
+        assert_eq!(
+            app.timeline.pane_border_color(
+                PaneId(1),
+                app.focused,
+                app.focused_border_color,
+                chrome::UNFOCUSED_BORDER,
+            ),
+            chrome::UNFOCUSED_BORDER
+        );
+
+        app.advance_animations(FOCUS_BORDER_TWEEN_DURATION);
+
+        assert_eq!(
+            app.timeline.pane_border_color(
+                PaneId(1),
+                app.focused,
+                app.focused_border_color,
+                chrome::UNFOCUSED_BORDER,
+            ),
+            Color::Cyan
+        );
+        assert_eq!(
+            app.timeline.pane_border_color(
+                PaneId(2),
+                app.focused,
+                app.focused_border_color,
+                chrome::UNFOCUSED_BORDER,
+            ),
+            chrome::UNFOCUSED_BORDER
+        );
     }
 
     #[test]

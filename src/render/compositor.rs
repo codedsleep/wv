@@ -2,6 +2,7 @@
 
 use crossterm::style::Color;
 
+use crate::anim::timeline::Timeline;
 use crate::layout::tree::Node;
 use crate::render::{chrome, subcell};
 use crate::term::pane::Pane;
@@ -16,6 +17,7 @@ pub fn compose(
     panes: &[Pane],
     focused: Option<PaneId>,
     focused_border_color: crossterm::style::Color,
+    timeline: &Timeline,
     back: &mut Surface,
 ) {
     let Some(root) = root else {
@@ -24,7 +26,7 @@ pub fn compose(
     };
 
     compose_node(root, panes, back);
-    chrome::draw_borders(back, root, focused, focused_border_color);
+    chrome::draw_borders(back, root, focused, focused_border_color, timeline);
 }
 
 fn compose_node(node: &Node, panes: &[Pane], back: &mut Surface) {
@@ -101,6 +103,7 @@ fn ceil_to_u16(value: f32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{compose, inset_rect};
+    use crate::anim::timeline::Timeline;
     use crate::backend::PaneId;
     use crate::layout::geometry::{FRect, Rect, Split};
     use crate::layout::tree::Node;
@@ -134,6 +137,7 @@ mod tests {
             &[pane],
             Some(PaneId(1)),
             crossterm::style::Color::Cyan,
+            &Timeline::new(),
             &mut surface,
         );
 
@@ -196,6 +200,7 @@ mod tests {
             &[top, bottom],
             Some(PaneId(1)),
             crossterm::style::Color::Cyan,
+            &Timeline::new(),
             &mut surface,
         );
 
@@ -229,9 +234,17 @@ mod tests {
             &[pane],
             Some(PaneId(1)),
             crossterm::style::Color::Cyan,
+            &Timeline::new(),
             &mut surface,
         );
-        compose(None, &[], None, crossterm::style::Color::Cyan, &mut surface);
+        compose(
+            None,
+            &[],
+            None,
+            crossterm::style::Color::Cyan,
+            &Timeline::new(),
+            &mut surface,
+        );
 
         assert_eq!(surface.get(0, 0).expect("cell exists").ch, ' ');
     }
@@ -293,6 +306,7 @@ mod tests {
             &panes,
             Some(PaneId(1)),
             crossterm::style::Color::Cyan,
+            &Timeline::new(),
             &mut new_surface,
         );
         compose_legacy_target_rects(
@@ -314,7 +328,7 @@ mod tests {
         back: &mut Surface,
     ) {
         compose_legacy_node(root, panes, back);
-        chrome::draw_borders(back, root, focused, focused_border_color);
+        chrome::draw_borders(back, root, focused, focused_border_color, &Timeline::new());
     }
 
     fn compose_legacy_node(node: &Node, panes: &[Pane], back: &mut Surface) {

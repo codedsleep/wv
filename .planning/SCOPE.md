@@ -270,7 +270,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Round `FRect` to cells for the interior blit
   - Pass fractional offsets to `subcell::draw_edges` for soft edges
   - **Accept:** static layout still renders identically; animations look smooth
-- [ ] **3.5 Sub-cell renderer** — *Codex* — `src/render/subcell.rs`
+- [x] **3.5 Sub-cell renderer** — *Codex* — `src/render/subcell.rs`
   - `draw_edges(surface, frect, fg_bg_below)` — when fractional offset on a side, paint that edge with `▌▐▀▄▘▖▝▗` and a blended color
   - **Alpha blend math first, with unit tests** — `blend(fg: Color, bg: Color, alpha: f32) -> Color` in linear-light or sRGB (pick sRGB, simpler)
   - Document blend choice in module doc comment

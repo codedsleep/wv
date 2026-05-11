@@ -2,14 +2,14 @@
 
 use crossterm::style::Color;
 
+use crate::anim::timeline::Timeline;
 use crate::backend::PaneId;
 use crate::layout::geometry::Rect;
 use crate::layout::tree::Node;
 use crate::term::cell::{Cell, CellAttrs};
 use crate::term::surface::Surface;
 
-const FOCUSED_BORDER: Color = Color::Cyan;
-const UNFOCUSED_BORDER: Color = Color::DarkGrey;
+pub const UNFOCUSED_BORDER: Color = Color::DarkGrey;
 const STATUS_FG: Color = Color::White;
 const STATUS_BG: Color = Color::DarkBlue;
 
@@ -18,21 +18,18 @@ pub fn draw_borders(
     tree: &Node,
     focused: Option<PaneId>,
     focused_color: Color,
+    timeline: &Timeline,
 ) {
     match tree {
         Node::Leaf {
             pane, rect_target, ..
         } => {
-            let color = if Some(*pane) == focused {
-                focused_color
-            } else {
-                UNFOCUSED_BORDER
-            };
+            let color = timeline.pane_border_color(*pane, focused, focused_color, UNFOCUSED_BORDER);
             draw_rect_border(surface, *rect_target, color);
         }
         Node::Internal { a, b, .. } => {
-            draw_borders(surface, a, focused, focused_color);
-            draw_borders(surface, b, focused, focused_color);
+            draw_borders(surface, a, focused, focused_color, timeline);
+            draw_borders(surface, b, focused, focused_color, timeline);
         }
     }
 }
@@ -112,6 +109,7 @@ mod tests {
     use crossterm::style::Color;
 
     use super::{draw_borders, draw_status_bar};
+    use crate::anim::timeline::Timeline;
     use crate::backend::PaneId;
     use crate::layout::geometry::{FRect, Rect, Split};
     use crate::layout::tree::Node;
@@ -162,7 +160,13 @@ mod tests {
             },
         };
 
-        draw_borders(&mut surface, &tree, Some(PaneId(1)), Color::Cyan);
+        draw_borders(
+            &mut surface,
+            &tree,
+            Some(PaneId(1)),
+            Color::Cyan,
+            &Timeline::new(),
+        );
 
         let focused_corner = surface.get(0, 0).expect("cell exists");
         let unfocused_corner = surface.get(0, 2).expect("cell exists");
