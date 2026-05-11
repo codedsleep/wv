@@ -166,7 +166,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Forward bytes to focused pane via `backend.write()`
   - Handle `Ctrl+Q` as global quit (temporary; will move to keymap in Phase 2)
   - **Accept:** can run `vim`, type, `:q!` exits; `htop` renders and responds to `q`
-- [ ] **1.9 SIGWINCH → resize** — *Codex* — `src/app.rs`
+- [x] **1.9 SIGWINCH → resize** — *Codex* — `src/app.rs`
   - On SIGWINCH: read new size via `crossterm::terminal::size()`, resize `front`/`back`, call `backend.resize(pane_id, cols, rows)`, mark dirty
   - **Accept:** resize the host terminal — pane reflows correctly without garbage
 - [ ] **1.10 README stub** — *Claude* — `README.md`

@@ -70,6 +70,7 @@ impl App {
         let mut events = EventStream::new();
         let mut sigint = signal(SignalKind::interrupt())?;
         let mut sigterm = signal(SignalKind::terminate())?;
+        let mut sigwinch = signal(SignalKind::window_change())?;
 
         loop {
             tokio::select! {
@@ -109,6 +110,9 @@ impl App {
                     tracing::info!("SIGTERM received");
                     break;
                 }
+                _ = sigwinch.recv() => {
+                    self.handle_resize().await;
+                }
             }
         }
 
@@ -125,6 +129,28 @@ impl App {
             if let Err(error) = self.backend.write(self.pane.id(), &bytes).await {
                 tracing::warn!("failed to write input to pane: {error:#}");
             }
+        }
+    }
+
+    async fn handle_resize(&mut self) {
+        let (cols, rows) = match crossterm::terminal::size() {
+            Ok(size) => size,
+            Err(error) => {
+                tracing::warn!("failed to read terminal size after SIGWINCH: {error:#}");
+                return;
+            }
+        };
+
+        if cols == self.back.width && rows == self.back.height {
+            return;
+        }
+
+        self.front = Surface::new(cols, rows);
+        self.back = Surface::new(cols, rows);
+        self.pane.resize(cols, rows);
+
+        if let Err(error) = self.backend.resize(self.pane.id(), cols, rows).await {
+            tracing::warn!("failed to resize backend pane: {error:#}");
         }
     }
 
