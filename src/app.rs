@@ -290,9 +290,7 @@ where
         }
 
         self.queue_buf.clear();
-        if let Some(index) = self.focused_pane_index() {
-            compositor::compose(std::slice::from_ref(&self.panes[index]), &mut self.back);
-        }
+        compositor::compose(self.root.as_ref(), &self.panes, &mut self.back);
         self.diff.flush(&self.front, &self.back, &mut self.stdout)?;
         self.stdout.flush()?;
         std::mem::swap(&mut self.front, &mut self.back);
@@ -328,11 +326,6 @@ where
 
     fn remove_pane(&mut self, id: PaneId) {
         self.panes.retain(|pane| pane.id() != id);
-    }
-
-    fn focused_pane_index(&self) -> Option<usize> {
-        let focused = self.focused?;
-        self.panes.iter().position(|pane| pane.id() == focused)
     }
 
     #[cfg(test)]

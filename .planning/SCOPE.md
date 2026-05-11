@@ -203,7 +203,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - `enum Command { SplitH, SplitV, FocusLeft/Right/Up/Down, Close, Quit }`
   - `App::execute(cmd)` mutates tree, spawns/kills via backend, recomputes layout, marks dirty
   - **Accept:** programmatic test: build app, execute SplitH, assert two leaves
-- [ ] **2.4 Compositor: multi-pane** — *Codex* — `src/render/compositor.rs`
+- [x] **2.4 Compositor: multi-pane** — *Codex* — `src/render/compositor.rs`
   - Walk leaves; blit each pane's screen at its `Rect`
   - **Accept:** integration test composes a 2-leaf tree, both panes appear
 - [ ] **2.5 Chrome: borders + focus** — *Codex* — `src/render/chrome.rs`
