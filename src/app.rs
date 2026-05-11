@@ -38,6 +38,26 @@ enum ResizeMode {
     HostResize,
 }
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum DebugMode {
+    Off,
+    On,
+}
+
+impl DebugMode {
+    const fn from_enabled(enabled: bool) -> Self {
+        if enabled {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+
+    const fn is_enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
 pub struct App<B = NativeBackend> {
     front: Surface,
     back: Surface,
@@ -58,12 +78,36 @@ pub struct App<B = NativeBackend> {
     focused_border_color: crossterm::style::Color,
     status_bar: bool,
     tick_interval: Duration,
+    debug: DebugMode,
+    last_tick_dt: Duration,
+    last_dirty_cells: usize,
     dirty: bool,
     quit: bool,
 }
 
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Args {
+    pub debug: bool,
+}
+
+impl Args {
+    pub fn parse_env() -> Self {
+        Self::parse(std::env::args().skip(1))
+    }
+
+    fn parse<I, S>(args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self {
+            debug: args.into_iter().any(|arg| arg.as_ref() == "--debug"),
+        }
+    }
+}
+
 impl App<NativeBackend> {
-    pub fn new(width: u16, height: u16) -> Self {
+    pub fn new(width: u16, height: u16, args: Args) -> Self {
         let (backend, output_rx, event_rx) = NativeBackend::new();
         let config = Config::load();
         let tick_interval = frame_interval(config.ui.target_fps);
@@ -88,6 +132,9 @@ impl App<NativeBackend> {
             focused_border_color: config.ui.border_color,
             status_bar: config.ui.status_bar,
             tick_interval,
+            debug: DebugMode::from_enabled(args.debug),
+            last_tick_dt: Duration::ZERO,
+            last_dirty_cells: 0,
             dirty: true,
             quit: false,
         }
@@ -460,6 +507,7 @@ where
     }
 
     async fn tick(&mut self, dt: Duration) -> anyhow::Result<()> {
+        self.last_tick_dt = dt;
         self.advance_animations(dt).await?;
 
         if !self.dirty {
@@ -483,6 +531,11 @@ where
                 chrono::Local::now(),
             );
         }
+        self.last_dirty_cells = self.estimated_dirty_cells();
+        if self.debug.is_enabled() {
+            let debug_overlay = self.debug_overlay();
+            chrome::draw_debug_overlay(&mut self.back, debug_overlay);
+        }
         self.diff.flush(&self.front, &self.back, &mut self.stdout)?;
         self.stdout.flush()?;
         std::mem::swap(&mut self.front, &mut self.back);
@@ -490,6 +543,22 @@ where
         self.dirty = false;
 
         Ok(())
+    }
+
+    fn estimated_dirty_cells(&self) -> usize {
+        usize::from(self.back.width) * usize::from(self.back.height)
+    }
+
+    fn debug_overlay(&self) -> chrome::DebugOverlay {
+        let elapsed = self.last_tick_dt.as_secs_f64();
+        let fps = if elapsed > 0.0 { 1.0 / elapsed } else { 0.0 };
+
+        chrome::DebugOverlay {
+            fps,
+            frame_ms: elapsed * 1_000.0,
+            tweens: self.timeline.active_count(),
+            dirty_cells: self.last_dirty_cells,
+        }
     }
 
     async fn advance_animations(&mut self, dt: Duration) -> anyhow::Result<()> {
@@ -656,6 +725,9 @@ where
             focused_border_color: crossterm::style::Color::Cyan,
             status_bar: true,
             tick_interval: frame_interval(crate::config::DEFAULT_TARGET_FPS),
+            debug: DebugMode::Off,
+            last_tick_dt: Duration::ZERO,
+            last_dirty_cells: 0,
             dirty: true,
             quit: false,
         }

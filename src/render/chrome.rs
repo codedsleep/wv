@@ -12,6 +12,16 @@ use crate::term::surface::Surface;
 pub const UNFOCUSED_BORDER: Color = Color::DarkGrey;
 const STATUS_FG: Color = Color::White;
 const STATUS_BG: Color = Color::DarkBlue;
+const DEBUG_FG: Color = Color::Black;
+const DEBUG_BG: Color = Color::White;
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct DebugOverlay {
+    pub fps: f64,
+    pub frame_ms: f64,
+    pub tweens: usize,
+    pub dirty_cells: usize,
+}
 
 pub fn draw_borders(
     surface: &mut Surface,
@@ -59,6 +69,27 @@ pub fn draw_status_bar(
     }
 }
 
+pub fn draw_debug_overlay(surface: &mut Surface, stats: DebugOverlay) {
+    if surface.width == 0 || surface.height == 0 {
+        return;
+    }
+
+    let text = format!(
+        "fps:{:.0} frame:{:.1}ms tweens:{} dirty:{}",
+        stats.fps, stats.frame_ms, stats.tweens, stats.dirty_cells
+    );
+    let surface_width = usize::from(surface.width);
+    let text_width = text.chars().count();
+    let rendered_width = text_width.min(surface_width);
+    let start = surface_width.saturating_sub(rendered_width);
+    let skip = text_width.saturating_sub(rendered_width);
+
+    for (offset, ch) in text.chars().skip(skip).enumerate() {
+        let x = u16::try_from(start + offset).unwrap_or(u16::MAX);
+        surface.set(x, 0, debug_cell(ch));
+    }
+}
+
 pub fn leaf_count(tree: Option<&Node>) -> usize {
     tree.map_or(0, count_leaves)
 }
@@ -96,6 +127,10 @@ fn status_cell(ch: char) -> Cell {
     Cell::new(ch, STATUS_FG, STATUS_BG, CellAttrs::empty())
 }
 
+fn debug_cell(ch: char) -> Cell {
+    Cell::new(ch, DEBUG_FG, DEBUG_BG, CellAttrs::empty())
+}
+
 fn count_leaves(node: &Node) -> usize {
     match node {
         Node::Leaf { .. } => 1,
@@ -108,7 +143,7 @@ mod tests {
     use chrono::TimeZone;
     use crossterm::style::Color;
 
-    use super::{draw_borders, draw_status_bar};
+    use super::{draw_borders, draw_debug_overlay, draw_status_bar, DebugOverlay};
     use crate::anim::timeline::Timeline;
     use crate::backend::PaneId;
     use crate::layout::geometry::{FRect, Rect, Split};
@@ -190,5 +225,35 @@ mod tests {
             .map(|x| surface.get(x, surface.height - 1).expect("cell exists").ch)
             .collect();
         assert!(bottom.contains("panes:2"));
+    }
+
+    #[test]
+    fn draw_debug_overlay_right_aligns_on_top_row() {
+        let mut surface = Surface::new(48, 3);
+
+        draw_debug_overlay(
+            &mut surface,
+            DebugOverlay {
+                fps: 160.0,
+                frame_ms: 6.25,
+                tweens: 3,
+                dirty_cells: 80,
+            },
+        );
+
+        let top: String = (0..surface.width)
+            .map(|x| surface.get(x, 0).expect("cell exists").ch)
+            .collect();
+        assert!(top.ends_with("fps:160 frame:6.2ms tweens:3 dirty:80"));
+
+        let first_overlay_x = top.find("fps:").expect("overlay is present");
+        let cell = surface
+            .get(
+                u16::try_from(first_overlay_x).expect("test width fits u16"),
+                0,
+            )
+            .expect("cell exists");
+        assert_eq!(cell.fg, Color::Black);
+        assert_eq!(cell.bg, Color::White);
     }
 }

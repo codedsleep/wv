@@ -110,12 +110,18 @@ mod tests {
 
     #[test]
     fn encode_up_returns_escape_sequence() {
-        assert_eq!(encode(&key(KeyCode::Up, KeyModifiers::NONE)), Some(b"\x1b[A".to_vec()));
+        assert_eq!(
+            encode(&key(KeyCode::Up, KeyModifiers::NONE)),
+            Some(b"\x1b[A".to_vec())
+        );
     }
 
     #[test]
     fn encode_enter_returns_carriage_return() {
-        assert_eq!(encode(&key(KeyCode::Enter, KeyModifiers::NONE)), Some(b"\r".to_vec()));
+        assert_eq!(
+            encode(&key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(b"\r".to_vec())
+        );
     }
 
     #[test]

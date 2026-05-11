@@ -41,8 +41,8 @@ impl Surface {
         for y in 0..copy_height {
             for x in 0..copy_width {
                 let src_index = usize::from(y) * usize::from(src.width) + usize::from(x);
-                let dst_index = usize::from(dst_y + y) * usize::from(self.width)
-                    + usize::from(dst_x + x);
+                let dst_index =
+                    usize::from(dst_y + y) * usize::from(self.width) + usize::from(dst_x + x);
 
                 self.cells[dst_index] = src.cells[src_index];
             }

@@ -87,9 +87,7 @@ impl NativeBackend {
     }
 
     async fn send_spawn_failed(event_tx: EventSender, id: PaneId, message: String) {
-        let _ = event_tx
-            .send(BackendEvent::SpawnFailed(id, message))
-            .await;
+        let _ = event_tx.send(BackendEvent::SpawnFailed(id, message)).await;
     }
 
     fn spawn_reader(

@@ -286,7 +286,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - On `Close`: leaf collapses to a line over 180ms; sibling expands to fill
   - Pane is removed from the tree only after the tween completes
   - **Accept:** visual smoke check
-- [ ] **3.9 Resize-at-tween-end** — *Codex* — `src/app.rs`
+- [x] **3.9 Resize-at-tween-end** — *Codex* — `src/app.rs`
   - `backend.resize()` is called **only when a leaf's tween completes**, not per frame
   - Add a `debug_assert!` that catches per-frame resize calls
   - **Accept:** unit test on a mock backend confirms exactly one resize per topology change
