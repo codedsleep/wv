@@ -117,6 +117,16 @@ impl Parser {
                 .map(|pane_id| TmuxNotification::PaneDied { pane_id });
         }
 
+        if text.starts_with("%message") {
+            let raw = raw_args(text, "%message");
+            if let Some(pane_id) = raw
+                .strip_prefix("weave-pane-exited ")
+                .and_then(|token| parse_id(token.trim(), '%'))
+            {
+                return Some(TmuxNotification::PaneDied { pane_id });
+            }
+        }
+
         if text.starts_with("%session-changed") {
             return Some(TmuxNotification::SessionChanged {
                 raw: raw_args(text, "%session-changed").to_owned(),
@@ -339,6 +349,7 @@ mod tests {
         assert_eq!(
             parser.feed(
                 b"%pane-died %9
+%message weave-pane-exited %10
 %session-changed $1 0
 %layout-change @2 layout-string visible
 %exit
@@ -346,6 +357,7 @@ mod tests {
             ),
             vec![
                 TmuxNotification::PaneDied { pane_id: 9 },
+                TmuxNotification::PaneDied { pane_id: 10 },
                 TmuxNotification::SessionChanged {
                     raw: "$1 0".to_owned(),
                 },

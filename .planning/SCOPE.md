@@ -347,7 +347,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Additional roundtrip property: well-formed `%output %N <payload>` lines parse back to the original payload after escape decode
   - **Note:** swapped from cargo-fuzz to proptest — same robustness coverage on stable Rust without nightly toolchain
   - **Accept:** `cargo test backend::tmux::parser::proptests` runs 256+ cases without panic
-- [ ] **4.3 `TmuxBackend` impl** — *Codex* — `src/backend/tmux/mod.rs`, `tmux/process.rs`
+- [x] **4.3 `TmuxBackend` impl** — *Codex* — `src/backend/tmux/mod.rs`, `tmux/process.rs`
   - Spawn `tmux -CC new-session -s weave -d` (detached create) then attach via `-CC attach`
   - One internal task pumps tmux stdout → parser → BackendEvent / output channel
   - Maps tmux pane IDs (`%42`) ↔ our `PaneId(u64)` via `BiMap` (or two HashMaps)
