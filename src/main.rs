@@ -56,16 +56,15 @@ fn install_panic_hook() {
     }));
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
     init_tracing()?;
     install_panic_hook();
-    let guard = term::TerminalGuard::new()?;
+    let _guard = term::TerminalGuard::new()?;
     tracing::info!("weave starting");
     println!("weave starting");
     tracing::info!("entered alt screen");
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    tracing::info!("leaving alt screen");
-    drop(guard);
+    crate::app::App::new().run().await?;
 
     Ok(())
 }
