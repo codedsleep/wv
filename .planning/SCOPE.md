@@ -261,7 +261,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Refactor `Node`: leaves carry `rect_current: FRect, rect_target: Rect`; internals carry `ratio: f32, ratio_target: f32`
   - `compute_layout` updates `_target` only; never `_current`
   - **Accept:** existing layout tests still pass against `_target`
-- [ ] **3.3 Animation tick** — *Codex* — `src/anim/timeline.rs`, `src/app.rs`
+- [x] **3.3 Animation tick** — *Codex* — `src/anim/timeline.rs`, `src/app.rs`
   - `Timeline` owns the set of in-flight tweens (per node + chrome focus color)
   - `App::advance_animations(dt)` advances all, marks all rendered regions dirty (any pane whose `FRect` changed this frame)
   - Tick interval drops to **6.25ms (160Hz)**; configurable via `[ui] target_fps = 160`

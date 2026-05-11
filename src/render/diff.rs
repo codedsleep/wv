@@ -125,7 +125,10 @@ fn emit_style(
     }
 
     if current_style.map_or(true, |style| style.attrs != next_style.attrs) {
-        queue!(queue_buf, SetAttributes(to_crossterm_attrs(next_style.attrs)))?;
+        queue!(
+            queue_buf,
+            SetAttributes(to_crossterm_attrs(next_style.attrs))
+        )?;
     }
 
     *current_style = Some(next_style);

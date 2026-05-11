@@ -6,3 +6,5 @@ pub mod chrome;
 pub mod compositor;
 #[allow(dead_code)]
 pub mod diff;
+#[allow(dead_code)]
+pub mod subcell;

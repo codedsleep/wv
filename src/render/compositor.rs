@@ -1,10 +1,15 @@
 //! Compose panes into back surface.
 
+use crossterm::style::Color;
+
 use crate::layout::tree::Node;
-use crate::render::chrome;
+use crate::render::{chrome, subcell};
 use crate::term::pane::Pane;
 use crate::term::surface::Surface;
-use crate::{backend::PaneId, layout::geometry::Rect};
+use crate::{
+    backend::PaneId,
+    layout::geometry::{FRect, Rect},
+};
 
 pub fn compose(
     root: Option<&Node>,
@@ -25,21 +30,36 @@ pub fn compose(
 fn compose_node(node: &Node, panes: &[Pane], back: &mut Surface) {
     match node {
         Node::Leaf {
-            pane, rect_target, ..
+            pane, rect_current, ..
         } => {
             let Some(pane) = panes.iter().find(|candidate| candidate.id() == *pane) else {
                 return;
             };
 
-            let content_rect = inset_rect(*rect_target);
+            let content_rect = inset_rect(frect_to_covering_rect(*rect_current));
             let mut clipped = Surface::new(content_rect.w, content_rect.h);
             pane.cells_into(&mut clipped, 0, 0);
             back.blit(&clipped, content_rect.x, content_rect.y);
+            subcell::draw_edges(back, *rect_current, Color::Reset, Color::Reset);
         }
         Node::Internal { a, b, .. } => {
             compose_node(a, panes, back);
             compose_node(b, panes, back);
         }
+    }
+}
+
+fn frect_to_covering_rect(rect: FRect) -> Rect {
+    let left = floor_to_u16(rect.x);
+    let top = floor_to_u16(rect.y);
+    let right = ceil_to_u16(rect.x + rect.w);
+    let bottom = ceil_to_u16(rect.y + rect.h);
+
+    Rect {
+        x: left,
+        y: top,
+        w: right.saturating_sub(left),
+        h: bottom.saturating_sub(top),
     }
 }
 
@@ -52,12 +72,39 @@ fn inset_rect(rect: Rect) -> Rect {
     }
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn floor_to_u16(value: f32) -> u16 {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+
+    if value >= f32::from(u16::MAX) {
+        return u16::MAX;
+    }
+
+    value.floor() as u16
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn ceil_to_u16(value: f32) -> u16 {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+
+    if value >= f32::from(u16::MAX) {
+        return u16::MAX;
+    }
+
+    value.ceil() as u16
+}
+
 #[cfg(test)]
 mod tests {
-    use super::compose;
+    use super::{compose, inset_rect};
     use crate::backend::PaneId;
     use crate::layout::geometry::{FRect, Rect, Split};
     use crate::layout::tree::Node;
+    use crate::render::chrome;
     use crate::term::pane::Pane;
     use crate::term::surface::Surface;
 
@@ -187,5 +234,107 @@ mod tests {
         compose(None, &[], None, crossterm::style::Color::Cyan, &mut surface);
 
         assert_eq!(surface.get(0, 0).expect("cell exists").ch, ' ');
+    }
+
+    #[test]
+    fn integer_frects_match_target_rect_composition() {
+        let mut new_surface = Surface::new(80, 24);
+        let mut old_surface = Surface::new(80, 24);
+        let mut top = Pane::new(PaneId(1), 80, 12);
+        let mut bottom = Pane::new(PaneId(2), 80, 12);
+        let tree = Node::Internal {
+            split: Split::Horizontal,
+            ratio: 0.5,
+            ratio_target: 0.5,
+            a: Box::new(Node::Leaf {
+                pane: PaneId(1),
+                rect_current: FRect::from(Rect {
+                    x: 0,
+                    y: 0,
+                    w: 80,
+                    h: 12,
+                }),
+                rect_target: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 80,
+                    h: 12,
+                },
+            }),
+            b: Box::new(Node::Leaf {
+                pane: PaneId(2),
+                rect_current: FRect::from(Rect {
+                    x: 0,
+                    y: 12,
+                    w: 80,
+                    h: 12,
+                }),
+                rect_target: Rect {
+                    x: 0,
+                    y: 12,
+                    w: 80,
+                    h: 12,
+                },
+            }),
+            rect: Rect {
+                x: 0,
+                y: 0,
+                w: 80,
+                h: 24,
+            },
+        };
+
+        top.process(b"A");
+        bottom.process(b"B");
+        let panes = [top, bottom];
+
+        compose(
+            Some(&tree),
+            &panes,
+            Some(PaneId(1)),
+            crossterm::style::Color::Cyan,
+            &mut new_surface,
+        );
+        compose_legacy_target_rects(
+            &tree,
+            &panes,
+            Some(PaneId(1)),
+            crossterm::style::Color::Cyan,
+            &mut old_surface,
+        );
+
+        assert_eq!(new_surface.cells, old_surface.cells);
+    }
+
+    fn compose_legacy_target_rects(
+        root: &Node,
+        panes: &[Pane],
+        focused: Option<PaneId>,
+        focused_border_color: crossterm::style::Color,
+        back: &mut Surface,
+    ) {
+        compose_legacy_node(root, panes, back);
+        chrome::draw_borders(back, root, focused, focused_border_color);
+    }
+
+    fn compose_legacy_node(node: &Node, panes: &[Pane], back: &mut Surface) {
+        match node {
+            Node::Leaf {
+                pane, rect_target, ..
+            } => {
+                let Some(pane) = panes.iter().find(|candidate| candidate.id() == *pane) else {
+                    return;
+                };
+
+                let content_rect = inset_rect(*rect_target);
+                let mut clipped = Surface::new(content_rect.w, content_rect.h);
+                pane.cells_into(&mut clipped, 0, 0);
+                back.blit(&clipped, content_rect.x, content_rect.y);
+            }
+            Node::Internal { a, b, .. } => {
+                compose_legacy_node(a, panes, back);
+                compose_legacy_node(b, panes, back);
+            }
+        }
     }
 }
