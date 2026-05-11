@@ -266,7 +266,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - `App::advance_animations(dt)` advances all, marks all rendered regions dirty (any pane whose `FRect` changed this frame)
   - Tick interval drops to **6.25ms (160Hz)**; configurable via `[ui] target_fps = 160`
   - **Accept:** debug overlay (3.10) shows frames advancing at target rate
-- [ ] **3.4 Compositor uses `FRect`** — *Codex* — `src/render/compositor.rs`
+- [x] **3.4 Compositor uses `FRect`** — *Codex* — `src/render/compositor.rs`
   - Round `FRect` to cells for the interior blit
   - Pass fractional offsets to `subcell::draw_edges` for soft edges
   - **Accept:** static layout still renders identically; animations look smooth
