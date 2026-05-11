@@ -282,7 +282,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - On `SplitH/V`: new pane's `rect_current` starts at the split line (zero width/height), tweens to `rect_target` over 220ms ease-out-back
   - Sibling shrinks from old rect to new rect over 180ms ease-out-cubic
   - **Accept:** visual smoke check
-- [ ] **3.8 Close animation** — *Codex* — `src/app.rs`
+- [x] **3.8 Close animation** — *Codex* — `src/app.rs`
   - On `Close`: leaf collapses to a line over 180ms; sibling expands to fill
   - Pane is removed from the tree only after the tween completes
   - **Accept:** visual smoke check

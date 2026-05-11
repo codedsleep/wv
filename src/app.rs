@@ -32,6 +32,12 @@ const OPEN_SIBLING_DURATION: Duration = Duration::from_millis(180);
 // Close tweens use ease-out-cubic so panes decelerate into the collapsed line.
 const CLOSE_PANE_DURATION: Duration = Duration::from_millis(180);
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum ResizeMode {
+    Normal,
+    HostResize,
+}
+
 pub struct App<B = NativeBackend> {
     front: Surface,
     back: Surface,
@@ -39,6 +45,7 @@ pub struct App<B = NativeBackend> {
     root: Option<Node>,
     focused: Option<PaneId>,
     closing: HashSet<PaneId>,
+    resize_mode: ResizeMode,
     backend: B,
     output_rx: mpsc::Receiver<(PaneId, Bytes)>,
     event_rx: mpsc::Receiver<BackendEvent>,
@@ -68,6 +75,7 @@ impl App<NativeBackend> {
             root: None,
             focused: None,
             closing: HashSet::new(),
+            resize_mode: ResizeMode::Normal,
             backend,
             output_rx,
             event_rx,
@@ -92,7 +100,7 @@ where
 {
     pub async fn run(mut self) -> anyhow::Result<()> {
         let pane_id = self
-            .spawn_shell_pane()
+            .spawn_shell_pane(true)
             .await
             .context("failed to spawn shell pane")?;
         self.root = Some(Node::Leaf {
@@ -166,13 +174,14 @@ where
         Ok(())
     }
 
-    async fn spawn_shell_pane(&mut self) -> anyhow::Result<PaneId> {
+    async fn spawn_shell_pane(&mut self, resize_immediately: bool) -> anyhow::Result<PaneId> {
         let pane_id = self.backend.spawn(default_pane_command()).await?;
 
-        self.backend
-            .resize(pane_id, self.back.width, self.back.height)
-            .await
-            .context("failed to resize shell pane")?;
+        if resize_immediately {
+            self.resize_pane(pane_id, self.back.width, self.back.height)
+                .await
+                .context("failed to resize shell pane")?;
+        }
 
         self.panes
             .push(Pane::new(pane_id, self.back.width, self.back.height));
@@ -187,7 +196,7 @@ where
         let Some(old_parent_rect) = self.leaf_rect_target(focused) else {
             return Ok(());
         };
-        let new_pane = self.spawn_shell_pane().await?;
+        let new_pane = self.spawn_shell_pane(false).await?;
 
         if let Some(root) = self.root.as_mut() {
             root.split_focused(focused, split, new_pane);
@@ -439,11 +448,13 @@ where
         }
         self.recompute_layout();
 
+        self.resize_mode = ResizeMode::HostResize;
         for pane_id in self.pane_ids() {
-            if let Err(error) = self.backend.resize(pane_id, cols, rows).await {
+            if let Err(error) = self.resize_pane(pane_id, cols, rows).await {
                 tracing::warn!("failed to resize backend pane: {error:#}");
             }
         }
+        self.resize_mode = ResizeMode::Normal;
 
         self.dirty = true;
     }
@@ -488,13 +499,31 @@ where
             self.dirty = true;
         }
 
-        let mut completed_closings = advance.completed_leaf_rects;
+        let completed_leaf_rects = advance.completed_leaf_rects;
+        let mut completed_closings = completed_leaf_rects.clone();
         for pane in &self.closing {
             if !self.timeline.has_leaf_rect_tween(*pane) {
                 completed_closings.push(*pane);
             }
         }
+        self.resize_completed_leaf_tweens(&completed_leaf_rects)
+            .await?;
         self.finish_completed_closings(&completed_closings).await?;
+
+        Ok(())
+    }
+
+    async fn resize_completed_leaf_tweens(&mut self, completed: &[PaneId]) -> anyhow::Result<()> {
+        for pane in completed {
+            if self.closing.contains(pane) {
+                continue;
+            }
+            let Some(rect) = self.leaf_rect_current(*pane) else {
+                continue;
+            };
+            let rect = rect.to_rect();
+            self.resize_pane(*pane, rect.w, rect.h).await?;
+        }
 
         Ok(())
     }
@@ -583,6 +612,15 @@ where
         self.panes.retain(|pane| pane.id() != id);
     }
 
+    async fn resize_pane(&mut self, pane: PaneId, cols: u16, rows: u16) -> anyhow::Result<()> {
+        debug_assert!(self.is_safe_to_resize(pane));
+        self.backend.resize(pane, cols, rows).await
+    }
+
+    fn is_safe_to_resize(&self, pane: PaneId) -> bool {
+        self.resize_mode == ResizeMode::HostResize || !self.timeline.has_leaf_rect_tween(pane)
+    }
+
     #[cfg(test)]
     fn with_backend_for_test(backend: B, width: u16, height: u16, pane_id: PaneId) -> Self {
         let (_output_tx, output_rx) = mpsc::channel(1);
@@ -605,6 +643,7 @@ where
             }),
             focused: Some(pane_id),
             closing: HashSet::new(),
+            resize_mode: ResizeMode::Normal,
             backend,
             output_rx,
             event_rx,
@@ -733,7 +772,7 @@ mod tests {
 
     struct MockBackend {
         next_id: PaneId,
-        resized: Vec<PaneId>,
+        resized: Vec<(PaneId, u16, u16)>,
     }
 
     #[async_trait::async_trait]
@@ -746,8 +785,8 @@ mod tests {
             Ok(())
         }
 
-        async fn resize(&mut self, id: PaneId, _cols: u16, _rows: u16) -> Result<(), Error> {
-            self.resized.push(id);
+        async fn resize(&mut self, id: PaneId, cols: u16, rows: u16) -> Result<(), Error> {
+            self.resized.push((id, cols, rows));
             Ok(())
         }
 
@@ -796,7 +835,7 @@ mod tests {
         }
         assert_eq!(app.focused, Some(PaneId(2)));
         assert!(app.panes.iter().any(|pane| pane.id() == PaneId(2)));
-        assert_eq!(app.backend.resized, vec![PaneId(2)]);
+        assert!(app.backend.resized.is_empty());
     }
 
     #[tokio::test]
@@ -916,6 +955,7 @@ mod tests {
         );
 
         app.execute(Command::SplitV).await.expect("split succeeds");
+        assert!(app.backend.resized.is_empty());
 
         let new_target = app
             .leaf_rect_target(PaneId(2))
@@ -940,6 +980,9 @@ mod tests {
             .await
             .expect("animations advance");
 
+        assert_eq!(app.backend.resized.len(), 2);
+        assert!(app.backend.resized.contains(&(PaneId(1), 40, 23)));
+        assert!(app.backend.resized.contains(&(PaneId(2), 40, 23)));
         match app
             .root
             .as_ref()
@@ -971,6 +1014,7 @@ mod tests {
         app.advance_animations(OPEN_NEW_PANE_DURATION)
             .await
             .expect("open animation completes");
+        app.backend.resized.clear();
 
         app.execute(Command::Close).await.expect("close starts");
 
@@ -986,6 +1030,7 @@ mod tests {
             .await
             .expect("close animation completes");
 
+        assert_eq!(app.backend.resized, vec![(PaneId(1), 80, 23)]);
         assert!(app
             .root
             .as_ref()

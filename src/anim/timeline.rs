@@ -142,7 +142,6 @@ impl Timeline {
             }
             if !running {
                 finished.push(pane);
-                advance.completed_leaf_rects.push(pane);
             }
         }
 
@@ -175,6 +174,7 @@ impl Timeline {
 
             if !running {
                 finished.push(pane);
+                advance.completed_leaf_rects.push(pane);
             }
         }
 
