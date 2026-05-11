@@ -169,7 +169,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 - [x] **1.9 SIGWINCH → resize** — *Codex* — `src/app.rs`
   - On SIGWINCH: read new size via `crossterm::terminal::size()`, resize `front`/`back`, call `backend.resize(pane_id, cols, rows)`, mark dirty
   - **Accept:** resize the host terminal — pane reflows correctly without garbage
-- [ ] **1.10 README stub** — *Claude* — `README.md`
+- [x] **1.10 README stub** — *Claude* — `README.md`
   - One paragraph summary, "status: phase 1 — single pane works", build instructions
   - **Accept:** clear enough that a contributor could `cargo run` it
 
