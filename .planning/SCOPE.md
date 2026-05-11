@@ -275,7 +275,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - **Alpha blend math first, with unit tests** — `blend(fg: Color, bg: Color, alpha: f32) -> Color` in linear-light or sRGB (pick sRGB, simpler)
   - Document blend choice in module doc comment
   - **Accept:** blend tests pass; visual smoke check at 0.0/0.25/0.5/0.75 fractional offsets
-- [ ] **3.6 Border color tween on focus** — *Codex* — `src/render/chrome.rs`, `src/anim/timeline.rs`
+- [x] **3.6 Border color tween on focus** — *Codex* — `src/render/chrome.rs`, `src/anim/timeline.rs`
   - On focus change, start a 120ms ease-out-cubic Color tween from old → new border color
   - **Accept:** focus change animates color
 - [ ] **3.7 Open animation** — *Codex* — `src/app.rs`

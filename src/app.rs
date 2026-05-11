@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
 use crate::anim::timeline::Timeline;
+use crate::anim::tween::Easing;
 use crate::backend::native::NativeBackend;
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::Command;
@@ -25,6 +26,8 @@ use crate::term::pane::Pane;
 use crate::term::surface::Surface;
 
 const FOCUS_BORDER_TWEEN_DURATION: Duration = Duration::from_millis(120);
+const OPEN_NEW_PANE_DURATION: Duration = Duration::from_millis(220);
+const OPEN_SIBLING_DURATION: Duration = Duration::from_millis(180);
 
 pub struct App<B = NativeBackend> {
     front: Surface,
@@ -176,16 +179,57 @@ where
         let Some(focused) = self.focused else {
             return Ok(());
         };
+        let Some(old_parent_rect) = self.leaf_rect_target(focused) else {
+            return Ok(());
+        };
         let new_pane = self.spawn_shell_pane().await?;
 
         if let Some(root) = self.root.as_mut() {
             root.split_focused(focused, split, new_pane);
             self.focused = Some(new_pane);
             self.recompute_layout();
+            self.start_open_tweens(focused, new_pane, split, old_parent_rect);
             self.dirty = true;
         }
 
         Ok(())
+    }
+
+    fn start_open_tweens(
+        &mut self,
+        sibling: PaneId,
+        new_pane: PaneId,
+        split: Split,
+        old_parent_rect: Rect,
+    ) {
+        let Some(sibling_target) = self.leaf_rect_target(sibling) else {
+            return;
+        };
+        let Some(new_target) = self.leaf_rect_target(new_pane) else {
+            return;
+        };
+
+        let sibling_from = FRect::from(old_parent_rect);
+        let sibling_to = FRect::from(sibling_target);
+        let new_from = collapsed_open_rect(split, old_parent_rect, new_target);
+        let new_to = FRect::from(new_target);
+
+        self.set_leaf_rect_current(sibling, sibling_from);
+        self.set_leaf_rect_current(new_pane, new_from);
+        self.timeline.tween_leaf_rect(
+            sibling,
+            sibling_from,
+            sibling_to,
+            OPEN_SIBLING_DURATION,
+            Easing::EaseOutCubic,
+        );
+        self.timeline.tween_leaf_rect(
+            new_pane,
+            new_from,
+            new_to,
+            OPEN_NEW_PANE_DURATION,
+            Easing::EaseOutBack,
+        );
     }
 
     fn focus(&mut self, dir: Direction) {
@@ -224,14 +268,14 @@ where
             previous_from,
             unfocused_color,
             FOCUS_BORDER_TWEEN_DURATION,
-            crate::anim::tween::Easing::EaseOutCubic,
+            Easing::EaseOutCubic,
         );
         self.timeline.tween_pane_border_color(
             next,
             next_from,
             focused_color,
             FOCUS_BORDER_TWEEN_DURATION,
-            crate::anim::tween::Easing::EaseOutCubic,
+            Easing::EaseOutCubic,
         );
     }
 
@@ -426,6 +470,23 @@ where
         }
     }
 
+    fn leaf_rect_target(&self, pane: PaneId) -> Option<Rect> {
+        match self.root.as_ref()?.find_leaf(pane)? {
+            Node::Leaf { rect_target, .. } => Some(*rect_target),
+            Node::Internal { .. } => None,
+        }
+    }
+
+    fn set_leaf_rect_current(&mut self, pane: PaneId, rect: FRect) {
+        let Some(root) = self.root.as_mut() else {
+            return;
+        };
+        let Some(Node::Leaf { rect_current, .. }) = root.find_leaf_mut(pane) else {
+            return;
+        };
+        *rect_current = rect;
+    }
+
     fn pane_ids(&self) -> Vec<PaneId> {
         self.panes.iter().map(Pane::id).collect()
     }
@@ -497,12 +558,29 @@ fn frame_interval(target_fps: u16) -> Duration {
     Duration::from_nanos(1_000_000_000 / u64::from(target_fps))
 }
 
+fn collapsed_open_rect(split: Split, old_parent_rect: Rect, new_target: Rect) -> FRect {
+    match split {
+        Split::Vertical => FRect {
+            x: f32::from(new_target.x),
+            y: f32::from(old_parent_rect.y),
+            w: 0.0,
+            h: f32::from(old_parent_rect.h),
+        },
+        Split::Horizontal => FRect {
+            x: f32::from(old_parent_rect.x),
+            y: f32::from(new_target.y),
+            w: f32::from(old_parent_rect.w),
+            h: 0.0,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use anyhow::Error;
     use crossterm::style::Color;
 
-    use super::{frame_interval, App, FOCUS_BORDER_TWEEN_DURATION};
+    use super::{frame_interval, App, FOCUS_BORDER_TWEEN_DURATION, OPEN_NEW_PANE_DURATION};
     use crate::anim::tween::Easing;
     use crate::backend::{PaneBackend, PaneCommand, PaneId};
     use crate::command::Command;
@@ -677,6 +755,57 @@ mod tests {
             ),
             chrome::UNFOCUSED_BORDER
         );
+    }
+
+    #[tokio::test]
+    async fn split_v_starts_new_pane_collapsed_and_opens_to_target() {
+        let mut app = App::with_backend_for_test(
+            MockBackend {
+                next_id: PaneId(2),
+                resized: Vec::new(),
+            },
+            80,
+            24,
+            PaneId(1),
+        );
+
+        app.execute(Command::SplitV).await.expect("split succeeds");
+
+        let new_target = app
+            .leaf_rect_target(PaneId(2))
+            .expect("new pane has target");
+        match app
+            .root
+            .as_ref()
+            .expect("root exists")
+            .find_leaf(PaneId(2))
+            .expect("new pane exists")
+        {
+            Node::Leaf { rect_current, .. } => {
+                assert_eq!(rect_current.x, f32::from(new_target.x));
+                assert_eq!(rect_current.y, 0.0);
+                assert_eq!(rect_current.w, 0.0);
+                assert_eq!(rect_current.h, 24.0);
+            }
+            Node::Internal { .. } => panic!("expected new leaf"),
+        }
+
+        app.advance_animations(OPEN_NEW_PANE_DURATION);
+
+        match app
+            .root
+            .as_ref()
+            .expect("root exists")
+            .find_leaf(PaneId(2))
+            .expect("new pane exists")
+        {
+            Node::Leaf {
+                rect_current,
+                rect_target,
+                ..
+            } => assert_eq!(*rect_current, FRect::from(*rect_target)),
+            Node::Internal { .. } => panic!("expected new leaf"),
+        }
     }
 
     #[test]
