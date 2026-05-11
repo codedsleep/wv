@@ -4,7 +4,7 @@ use std::io::{self, Write};
 
 use anyhow::Context;
 use bytes::Bytes;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
 use futures::StreamExt;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
@@ -14,6 +14,7 @@ use crate::backend::native::NativeBackend;
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::Command;
 use crate::input;
+use crate::input::keymap::{Keymap, Mode};
 use crate::layout::geometry::{Direction, Rect, Split};
 use crate::layout::tree::Node;
 use crate::render::diff::DiffRenderer;
@@ -33,6 +34,8 @@ pub struct App<B = NativeBackend> {
     stdout: io::Stdout,
     queue_buf: Vec<u8>,
     diff: DiffRenderer,
+    keymap: Keymap,
+    mode: Mode,
     dirty: bool,
     quit: bool,
 }
@@ -53,6 +56,8 @@ impl App<NativeBackend> {
             stdout: io::stdout(),
             queue_buf: Vec::new(),
             diff: DiffRenderer::new(),
+            keymap: Keymap::default(),
+            mode: Mode::Normal,
             dirty: true,
             quit: false,
         }
@@ -96,12 +101,7 @@ where
                     self.handle_backend_event(event);
                 }
                 event = events.next() => {
-                    if should_quit(event.as_ref()) {
-                        tracing::info!("ctrl-q received");
-                        self.execute(Command::Quit).await?;
-                    } else {
-                        self.handle_input(event).await;
-                    }
+                    self.handle_input(event).await?;
                 }
                 _ = sigint.recv() => {
                     tracing::info!("SIGINT received");
@@ -240,12 +240,39 @@ where
         }
     }
 
-    async fn handle_input(&mut self, event: Option<io::Result<Event>>) {
+    async fn handle_input(&mut self, event: Option<io::Result<Event>>) -> anyhow::Result<()> {
         let Some(Ok(Event::Key(key))) = event else {
-            return;
+            return Ok(());
         };
+        if matches!(key.kind, KeyEventKind::Release) {
+            return Ok(());
+        }
+
+        match self.mode {
+            Mode::Normal if self.keymap.is_prefix(&key) => {
+                self.mode = Mode::Prefix;
+                self.dirty = true;
+                return Ok(());
+            }
+            Mode::Normal => {}
+            Mode::Prefix if key.code == KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.dirty = true;
+                return Ok(());
+            }
+            Mode::Prefix => {
+                let command = self.keymap.command_for(&key);
+                self.mode = Mode::Normal;
+                self.dirty = true;
+                if let Some(command) = command {
+                    self.execute(command).await?;
+                }
+                return Ok(());
+            }
+        }
+
         let Some(focused) = self.focused else {
-            return;
+            return Ok(());
         };
 
         if let Some(bytes) = input::encode(&key) {
@@ -253,6 +280,8 @@ where
                 tracing::warn!("failed to write input to pane: {error:#}");
             }
         }
+
+        Ok(())
     }
 
     async fn handle_resize(&mut self) {
@@ -298,7 +327,7 @@ where
         );
         chrome::draw_status_bar(
             &mut self.back,
-            "NORMAL",
+            self.mode.label(),
             chrome::leaf_count(self.root.as_ref()),
             chrono::Local::now(),
         );
@@ -365,20 +394,12 @@ where
             stdout: io::stdout(),
             queue_buf: Vec::new(),
             diff: DiffRenderer::new(),
+            keymap: Keymap::default(),
+            mode: Mode::Normal,
             dirty: true,
             quit: false,
         }
     }
-}
-
-fn should_quit(event: Option<&io::Result<Event>>) -> bool {
-    matches!(
-        event,
-        Some(Ok(Event::Key(key)))
-            if key.kind == KeyEventKind::Press
-                && key.code == KeyCode::Char('q')
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-    )
 }
 
 fn default_pane_command() -> PaneCommand {

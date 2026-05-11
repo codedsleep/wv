@@ -215,7 +215,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - 1-row strip at bottom: `[mode] panes:N HH:MM:SS`
   - Reduce layout root rect by 1 row to make room
   - **Accept:** clock ticks; mode label updates when prefix is pressed
-- [ ] **2.7 Keymap + modal input** — *Codex* — `src/input/keymap.rs`
+- [x] **2.7 Keymap + modal input** — *Codex* — `src/input/keymap.rs`
   - `enum Mode { Normal, Prefix }` — Normal forwards to focused pane; Prefix consumes one key, dispatches Command
   - Default prefix: `Ctrl+Space`
   - Default bindings (in Prefix mode): `s`→SplitH, `v`→SplitV, `h/j/k/l`→FocusLeft/Down/Up/Right, `x`→Close, `q`→Quit, `Esc`→back to Normal
