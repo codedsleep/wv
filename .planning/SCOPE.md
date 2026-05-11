@@ -190,7 +190,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - `Rect::split(self, split, ratio: f32) -> (Rect, Rect)` with integer cell math, no zero-area children
   - Unit tests for split math at edges (1-cell, 2-cell, ratios near 0/1)
   - **Accept:** `cargo test layout::geometry` passes
-- [ ] **2.2 BSP `Node` tree** — *Codex* — `src/layout/tree.rs`
+- [x] **2.2 BSP `Node` tree** — *Codex* — `src/layout/tree.rs`
   - `enum Node { Leaf { pane: PaneId, rect: Rect }, Internal { split: Split, ratio: f32, a: Box<Node>, b: Box<Node>, rect: Rect } }`
   - `compute_layout(&mut self, root_rect: Rect)` recursively assigns rects
   - `find_leaf(pane: PaneId) -> Option<&mut Node>`
