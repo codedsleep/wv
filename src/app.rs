@@ -12,6 +12,7 @@ use tokio::time::{self, Duration};
 
 use crate::backend::native::NativeBackend;
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
+use crate::input;
 use crate::render::compositor;
 use crate::render::diff::DiffRenderer;
 use crate::term::pane::Pane;
@@ -98,6 +99,7 @@ impl App {
                         tracing::info!("ctrl-q received");
                         break;
                     }
+                    self.handle_input(event).await;
                 }
                 _ = sigint.recv() => {
                     tracing::info!("SIGINT received");
@@ -112,6 +114,18 @@ impl App {
 
         let _ = self.backend.kill(self.pane.id()).await;
         Ok(())
+    }
+
+    async fn handle_input(&mut self, event: Option<io::Result<Event>>) {
+        let Some(Ok(Event::Key(key))) = event else {
+            return;
+        };
+
+        if let Some(bytes) = input::encode(&key) {
+            if let Err(error) = self.backend.write(self.pane.id(), &bytes).await {
+                tracing::warn!("failed to write input to pane: {error:#}");
+            }
+        }
     }
 
     fn tick(&mut self) -> io::Result<()> {

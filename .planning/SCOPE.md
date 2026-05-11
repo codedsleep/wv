@@ -161,7 +161,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - `tokio::select!` over: tick interval (16ms for now — 6.25ms targeted in Phase 3), input events, backend output, backend events
   - Tick handler: compose → diff → swap buffers
   - **Accept:** `wv` opens a shell, prompt renders, `ls` works
-- [ ] **1.8 Input passthrough** — *Codex* — `src/input/mod.rs`
+- [x] **1.8 Input passthrough** — *Codex* — `src/input/mod.rs`
   - Read `crossterm::event::EventStream`, map `KeyEvent` → bytes (handle Ctrl/Alt modifiers, function keys, arrows)
   - Forward bytes to focused pane via `backend.write()`
   - Handle `Ctrl+Q` as global quit (temporary; will move to keymap in Phase 2)
