@@ -1,5 +1,10 @@
 //! Terminal RAII guard + module exports.
 
+#[allow(dead_code)]
+pub mod cell;
+#[allow(dead_code)]
+pub mod surface;
+
 pub struct TerminalGuard {
     _private: (),
 }

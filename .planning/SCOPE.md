@@ -122,7 +122,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 
 **Goal:** a single shell pane fills the screen, renders correctly, accepts input. No layout, no animation.
 
-- [ ] **1.1 `Cell` + `Surface` types** — *Codex* — `src/term/cell.rs`, `src/term/surface.rs`
+- [x] **1.1 `Cell` + `Surface` types** — *Codex* — `src/term/cell.rs`, `src/term/surface.rs`
   - `Cell { ch: char, fg: Color, bg: Color, attrs: CellAttrs }` (`Color` from crossterm, `CellAttrs` bitflags for bold/italic/underline/reverse)
   - `Surface { width: u16, height: u16, cells: Vec<Cell> }` row-major, indexed `y*width + x`
   - Methods: `new(w,h)`, `clear()`, `set(x,y,cell)`, `get(x,y)`, `blit(src: &Surface, dst_x, dst_y)` with clipping
