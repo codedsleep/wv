@@ -396,7 +396,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Detect: `COLORTERM=truecolor` or `=24bit` → truecolor; else nearest-256
   - All theme colors quantize gracefully
   - **Accept:** runs cleanly in a 256-color-only terminal (test under `TERM=xterm-256color COLORTERM=`)
-- [ ] **5.4 Logging polish** — *Codex* — `src/main.rs`
+- [x] **5.4 Logging polish** — *Codex* — `src/main.rs`
   - Rotate weave.log at 10MB; keep 3 archives
   - `WEAVE_LOG=debug` for verbose
   - **Accept:** log rotation observable
