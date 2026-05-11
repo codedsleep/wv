@@ -1,17 +1,19 @@
 //! BSP `Node` tree.
 
 use crate::backend::PaneId;
-use crate::layout::geometry::{Direction, Rect, Split};
+use crate::layout::geometry::{Direction, FRect, Rect, Split};
 
 #[derive(Clone, Debug)]
 pub enum Node {
     Leaf {
         pane: PaneId,
-        rect: Rect,
+        rect_current: FRect,
+        rect_target: Rect,
     },
     Internal {
         split: Split,
         ratio: f32,
+        ratio_target: f32,
         a: Box<Node>,
         b: Box<Node>,
         rect: Rect,
@@ -21,16 +23,17 @@ pub enum Node {
 impl Node {
     pub fn compute_layout(&mut self, root_rect: Rect) {
         match self {
-            Self::Leaf { rect, .. } => *rect = root_rect,
+            Self::Leaf { rect_target, .. } => *rect_target = root_rect,
             Self::Internal {
                 split,
-                ratio,
+                ratio_target,
                 a,
                 b,
                 rect,
+                ..
             } => {
                 *rect = root_rect;
-                let (a_rect, b_rect) = root_rect.split(*split, *ratio);
+                let (a_rect, b_rect) = root_rect.split(*split, *ratio_target);
                 a.compute_layout(a_rect);
                 b.compute_layout(b_rect);
             }
@@ -85,21 +88,29 @@ impl Node {
 
     fn try_split_focused(&mut self, focused: PaneId, split: Split, new_pane: PaneId) -> bool {
         match self {
-            Self::Leaf { pane, rect } if *pane == focused => {
+            Self::Leaf {
+                pane,
+                rect_current,
+                rect_target,
+            } if *pane == focused => {
                 let old_pane = *pane;
-                let placeholder_rect = *rect;
+                let placeholder_current = *rect_current;
+                let placeholder_target = *rect_target;
                 *self = Self::Internal {
                     split,
                     ratio: 0.5,
+                    ratio_target: 0.5,
                     a: Box::new(Self::Leaf {
                         pane: old_pane,
-                        rect: placeholder_rect,
+                        rect_current: placeholder_current,
+                        rect_target: placeholder_target,
                     }),
                     b: Box::new(Self::Leaf {
                         pane: new_pane,
-                        rect: placeholder_rect,
+                        rect_current: placeholder_current,
+                        rect_target: placeholder_target,
                     }),
-                    rect: placeholder_rect,
+                    rect: placeholder_target,
                 };
                 true
             }
@@ -117,7 +128,7 @@ impl Node {
 
     fn leaf_rect(&self, pane: PaneId) -> Option<Rect> {
         match self.find_leaf(pane)? {
-            Self::Leaf { rect, .. } => Some(*rect),
+            Self::Leaf { rect_target, .. } => Some(*rect_target),
             Self::Internal { .. } => None,
         }
     }
@@ -130,12 +141,14 @@ impl Node {
         best: &mut Option<NeighborCandidate>,
     ) {
         match self {
-            Self::Leaf { pane, rect } => {
+            Self::Leaf {
+                pane, rect_target, ..
+            } => {
                 if *pane == focused {
                     return;
                 }
 
-                let Some(overlap) = shared_edge_overlap(focused_rect, *rect, dir) else {
+                let Some(overlap) = shared_edge_overlap(focused_rect, *rect_target, dir) else {
                     return;
                 };
 
@@ -252,7 +265,7 @@ fn range_overlap(a_start: u16, a_end: u16, b_start: u16, b_end: u16) -> u16 {
 mod tests {
     use super::{rect_right, Node};
     use crate::backend::PaneId;
-    use crate::layout::geometry::{Direction, Rect, Split};
+    use crate::layout::geometry::{Direction, FRect, Rect, Split};
 
     const ROOT: Rect = Rect {
         x: 0,
@@ -264,13 +277,14 @@ mod tests {
     fn leaf(id: u64) -> Node {
         Node::Leaf {
             pane: PaneId(id),
-            rect: ROOT,
+            rect_current: FRect::from(ROOT),
+            rect_target: ROOT,
         }
     }
 
     fn rect_for(tree: &Node, id: u64) -> Rect {
         match tree.find_leaf(PaneId(id)).expect("leaf exists") {
-            Node::Leaf { rect, .. } => *rect,
+            Node::Leaf { rect_target, .. } => *rect_target,
             Node::Internal { .. } => unreachable!("find_leaf only returns leaves"),
         }
     }
@@ -285,12 +299,14 @@ mod tests {
             Node::Internal {
                 split,
                 ratio,
+                ratio_target,
                 ref a,
                 ref b,
                 ..
             } => {
                 assert_eq!(split, Split::Vertical);
                 assert_eq!(ratio, 0.5);
+                assert_eq!(ratio_target, 0.5);
                 assert!(matches!(
                     **a,
                     Node::Leaf {
@@ -354,6 +370,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn compute_layout_does_not_touch_leaf_current_rects() {
+        let mut tree = leaf(1);
+        let current_before = match &tree {
+            Node::Leaf { rect_current, .. } => *rect_current,
+            Node::Internal { .. } => unreachable!("test starts with a leaf"),
+        };
+
+        tree.compute_layout(Rect {
+            x: 10,
+            y: 11,
+            w: 12,
+            h: 13,
+        });
+
+        match tree {
+            Node::Leaf {
+                rect_current,
+                rect_target,
+                ..
+            } => {
+                assert_eq!(rect_current, current_before);
+                assert_eq!(
+                    rect_target,
+                    Rect {
+                        x: 10,
+                        y: 11,
+                        w: 12,
+                        h: 13,
+                    }
+                );
+            }
+            Node::Internal { .. } => unreachable!("test starts with a leaf"),
+        }
     }
 
     #[test]

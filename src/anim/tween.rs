@@ -6,19 +6,13 @@ use std::time::Duration;
 
 use crossterm::style::Color;
 
+use crate::layout::geometry::FRect;
+
 const BAKED_POINTS: usize = 255;
 const INV_BAKED_POINTS: f32 = 1.0 / 255.0;
 
 pub trait Lerp: Copy {
     fn lerp(&self, other: &Self, t: f32) -> Self;
-}
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct FRect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -280,7 +274,8 @@ fn lerp_channel(from: u8, to: u8, t: f32) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Easing, FRect, Lerp, Tween};
+    use super::{Easing, Lerp, Tween};
+    use crate::layout::geometry::FRect;
     use crossterm::style::Color;
     use std::time::Duration;
 

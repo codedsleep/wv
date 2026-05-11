@@ -24,12 +24,14 @@ pub fn compose(
 
 fn compose_node(node: &Node, panes: &[Pane], back: &mut Surface) {
     match node {
-        Node::Leaf { pane, rect } => {
+        Node::Leaf {
+            pane, rect_target, ..
+        } => {
             let Some(pane) = panes.iter().find(|candidate| candidate.id() == *pane) else {
                 return;
             };
 
-            let content_rect = inset_rect(*rect);
+            let content_rect = inset_rect(*rect_target);
             let mut clipped = Surface::new(content_rect.w, content_rect.h);
             pane.cells_into(&mut clipped, 0, 0);
             back.blit(&clipped, content_rect.x, content_rect.y);
@@ -54,7 +56,7 @@ fn inset_rect(rect: Rect) -> Rect {
 mod tests {
     use super::compose;
     use crate::backend::PaneId;
-    use crate::layout::geometry::{Rect, Split};
+    use crate::layout::geometry::{FRect, Rect, Split};
     use crate::layout::tree::Node;
     use crate::term::pane::Pane;
     use crate::term::surface::Surface;
@@ -65,7 +67,13 @@ mod tests {
         let mut pane = Pane::new(PaneId(1), 80, 24);
         let root = Node::Leaf {
             pane: PaneId(1),
-            rect: Rect {
+            rect_current: FRect::from(Rect {
+                x: 0,
+                y: 0,
+                w: 80,
+                h: 24,
+            }),
+            rect_target: Rect {
                 x: 0,
                 y: 0,
                 w: 80,
@@ -95,9 +103,16 @@ mod tests {
         let root = Node::Internal {
             split: Split::Horizontal,
             ratio: 0.5,
+            ratio_target: 0.5,
             a: Box::new(Node::Leaf {
                 pane: PaneId(1),
-                rect: Rect {
+                rect_current: FRect::from(Rect {
+                    x: 0,
+                    y: 0,
+                    w: 80,
+                    h: 12,
+                }),
+                rect_target: Rect {
                     x: 0,
                     y: 0,
                     w: 80,
@@ -106,7 +121,13 @@ mod tests {
             }),
             b: Box::new(Node::Leaf {
                 pane: PaneId(2),
-                rect: Rect {
+                rect_current: FRect::from(Rect {
+                    x: 0,
+                    y: 12,
+                    w: 80,
+                    h: 12,
+                }),
+                rect_target: Rect {
                     x: 0,
                     y: 12,
                     w: 80,
@@ -145,7 +166,13 @@ mod tests {
         compose(
             Some(&Node::Leaf {
                 pane: PaneId(1),
-                rect: Rect {
+                rect_current: FRect::from(Rect {
+                    x: 0,
+                    y: 0,
+                    w: 2,
+                    h: 1,
+                }),
+                rect_target: Rect {
                     x: 0,
                     y: 0,
                     w: 2,

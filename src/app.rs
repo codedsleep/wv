@@ -16,7 +16,7 @@ use crate::command::Command;
 use crate::config::Config;
 use crate::input;
 use crate::input::keymap::{Keymap, Mode};
-use crate::layout::geometry::{Direction, Rect, Split};
+use crate::layout::geometry::{Direction, FRect, Rect, Split};
 use crate::layout::tree::Node;
 use crate::render::diff::DiffRenderer;
 use crate::render::{chrome, compositor};
@@ -81,7 +81,8 @@ where
             .context("failed to spawn shell pane")?;
         self.root = Some(Node::Leaf {
             pane: pane_id,
-            rect: self.root_rect(),
+            rect_current: FRect::from(self.root_rect()),
+            rect_target: self.root_rect(),
         });
         self.focused = Some(pane_id);
         self.recompute_layout();
@@ -398,7 +399,8 @@ where
             panes: vec![Pane::new(pane_id, width, height)],
             root: Some(Node::Leaf {
                 pane: pane_id,
-                rect: root_rect,
+                rect_current: FRect::from(root_rect),
+                rect_target: root_rect,
             }),
             focused: Some(pane_id),
             backend,

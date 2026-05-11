@@ -1,4 +1,4 @@
-//! Integer geometry primitives for BSP layout.
+//! Integer and fractional geometry primitives for BSP layout.
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Rect {
@@ -6,6 +6,14 @@ pub struct Rect {
     pub y: u16,
     pub w: u16,
     pub h: u16,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct FRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -20,6 +28,28 @@ pub enum Direction {
 pub enum Split {
     Horizontal,
     Vertical,
+}
+
+impl FRect {
+    pub fn to_rect(self) -> Rect {
+        Rect {
+            x: round_to_u16(self.x),
+            y: round_to_u16(self.y),
+            w: round_to_u16(self.w),
+            h: round_to_u16(self.h),
+        }
+    }
+}
+
+impl From<Rect> for FRect {
+    fn from(rect: Rect) -> Self {
+        Self {
+            x: f32::from(rect.x),
+            y: f32::from(rect.y),
+            w: f32::from(rect.w),
+            h: f32::from(rect.h),
+        }
+    }
 }
 
 impl Rect {
@@ -55,6 +85,19 @@ impl Rect {
     }
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn round_to_u16(value: f32) -> u16 {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+
+    if value >= f32::from(u16::MAX) {
+        return u16::MAX;
+    }
+
+    value.round() as u16
+}
+
 fn split_extent(extent: u16, ratio: f32) -> u16 {
     if extent <= 1 {
         return 1;
@@ -74,7 +117,7 @@ fn split_extent(extent: u16, ratio: f32) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rect, Split};
+    use super::{FRect, Rect, Split};
 
     #[test]
     fn one_cell_width_split_does_not_panic_or_zero_children() {
@@ -240,5 +283,45 @@ mod tests {
         assert_eq!(left.w, 4);
         assert_eq!(right.x, 6);
         assert_eq!(right.w, 4);
+    }
+
+    #[test]
+    fn frect_from_rect_preserves_components_as_floats() {
+        let rect = Rect {
+            x: 2,
+            y: 4,
+            w: 8,
+            h: 6,
+        };
+
+        assert_eq!(
+            FRect::from(rect),
+            FRect {
+                x: 2.0,
+                y: 4.0,
+                w: 8.0,
+                h: 6.0,
+            }
+        );
+    }
+
+    #[test]
+    fn frect_to_rect_rounds_components() {
+        let frect = FRect {
+            x: 1.4,
+            y: 2.5,
+            w: 10.49,
+            h: 20.5,
+        };
+
+        assert_eq!(
+            frect.to_rect(),
+            Rect {
+                x: 1,
+                y: 3,
+                w: 10,
+                h: 21,
+            }
+        );
     }
 }

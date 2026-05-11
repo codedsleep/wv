@@ -20,13 +20,15 @@ pub fn draw_borders(
     focused_color: Color,
 ) {
     match tree {
-        Node::Leaf { pane, rect } => {
+        Node::Leaf {
+            pane, rect_target, ..
+        } => {
             let color = if Some(*pane) == focused {
                 focused_color
             } else {
                 UNFOCUSED_BORDER
             };
-            draw_rect_border(surface, *rect, color);
+            draw_rect_border(surface, *rect_target, color);
         }
         Node::Internal { a, b, .. } => {
             draw_borders(surface, a, focused, focused_color);
@@ -111,7 +113,7 @@ mod tests {
 
     use super::{draw_borders, draw_status_bar};
     use crate::backend::PaneId;
-    use crate::layout::geometry::{Rect, Split};
+    use crate::layout::geometry::{FRect, Rect, Split};
     use crate::layout::tree::Node;
     use crate::term::surface::Surface;
 
@@ -121,9 +123,16 @@ mod tests {
         let tree = Node::Internal {
             split: Split::Horizontal,
             ratio: 0.5,
+            ratio_target: 0.5,
             a: Box::new(Node::Leaf {
                 pane: PaneId(1),
-                rect: Rect {
+                rect_current: FRect::from(Rect {
+                    x: 0,
+                    y: 0,
+                    w: 4,
+                    h: 2,
+                }),
+                rect_target: Rect {
                     x: 0,
                     y: 0,
                     w: 4,
@@ -132,7 +141,13 @@ mod tests {
             }),
             b: Box::new(Node::Leaf {
                 pane: PaneId(2),
-                rect: Rect {
+                rect_current: FRect::from(Rect {
+                    x: 0,
+                    y: 2,
+                    w: 4,
+                    h: 2,
+                }),
+                rect_target: Rect {
                     x: 0,
                     y: 2,
                     w: 4,
