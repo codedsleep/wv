@@ -461,3 +461,110 @@ outer after
         }
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::{Parser, TmuxNotification};
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 256,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn arbitrary_bytes_never_panic(chunks in byte_chunks()) {
+            let mut parser = Parser::new();
+
+            for chunk in chunks {
+                let _notifications = parser.feed(&chunk);
+            }
+        }
+
+        #[test]
+        fn output_payload_roundtrip(pane_id in any::<u64>(), payload in output_payload()) {
+            let mut line = format!("%output %{pane_id} ").into_bytes();
+            line.extend(escape_payload(&payload));
+            line.push(b'\n');
+
+            let mut parser = Parser::new();
+            prop_assert_eq!(
+                parser.feed(&line),
+                vec![TmuxNotification::Output {
+                    pane_id,
+                    data: payload,
+                }]
+            );
+        }
+    }
+
+    fn byte_chunks() -> impl Strategy<Value = Vec<Vec<u8>>> {
+        prop::collection::vec(any::<u8>(), 0..=1024).prop_flat_map(|input| {
+            let len = input.len();
+            (Just(input), 1usize..=3, 0usize..=len, 0usize..=len).prop_map(
+                |(input, chunk_count, first, second)| match chunk_count {
+                    1 => vec![input],
+                    2 => vec![input[..first].to_vec(), input[first..].to_vec()],
+                    3 => {
+                        let start = first.min(second);
+                        let end = first.max(second);
+                        vec![
+                            input[..start].to_vec(),
+                            input[start..end].to_vec(),
+                            input[end..].to_vec(),
+                        ]
+                    }
+                    _ => unreachable!("chunk count strategy only produces 1..=3"),
+                },
+            )
+        })
+    }
+
+    fn output_payload() -> impl Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            prop::collection::vec(printable_ascii(), 0..=128),
+            prop::collection::vec(control_byte(), 1..=64),
+            prop::collection::vec(high_byte(), 1..=64),
+            (
+                prop::collection::vec(printable_ascii(), 1..=64),
+                prop::collection::vec(control_byte(), 1..=32),
+                prop::collection::vec(high_byte(), 1..=32),
+            )
+                .prop_map(|(mut ascii, mut controls, mut high_bytes)| {
+                    ascii.append(&mut controls);
+                    ascii.append(&mut high_bytes);
+                    ascii
+                }),
+        ]
+    }
+
+    fn printable_ascii() -> impl Strategy<Value = u8> {
+        prop_oneof![b' '..=b'[', b']'..=b'~']
+    }
+
+    fn control_byte() -> impl Strategy<Value = u8> {
+        prop_oneof![0u8..=0x1f, Just(0x7f)]
+    }
+
+    fn high_byte() -> impl Strategy<Value = u8> {
+        0x80u8..=u8::MAX
+    }
+
+    fn escape_payload(payload: &[u8]) -> Vec<u8> {
+        let mut escaped = Vec::with_capacity(payload.len());
+
+        for &byte in payload {
+            if (b' '..=b'~').contains(&byte) && byte != b'\\' {
+                escaped.push(byte);
+            } else {
+                escaped.push(b'\\');
+                escaped.push(b'0' + byte / 64);
+                escaped.push(b'0' + (byte / 8) % 8);
+                escaped.push(b'0' + byte % 8);
+            }
+        }
+
+        escaped
+    }
+}
