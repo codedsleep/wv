@@ -128,7 +128,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Methods: `new(w,h)`, `clear()`, `set(x,y,cell)`, `get(x,y)`, `blit(src: &Surface, dst_x, dst_y)` with clipping
   - Unit tests: blit clips at edges, get/set roundtrip, clear resets every cell
   - **Accept:** `cargo test term::` passes
-- [ ] **1.2 `PaneBackend` trait + types** — *Codex* — `src/backend/mod.rs`
+- [x] **1.2 `PaneBackend` trait + types** — *Codex* — `src/backend/mod.rs`
   - `PaneId(u64)` newtype, `Copy + Eq + Hash`
   - `PaneCommand { program: String, args: Vec<String>, env: Vec<(String,String)>, cwd: Option<PathBuf> }`
   - `BackendEvent::PaneDied(PaneId)`, `::SpawnFailed(PaneId, String)`
