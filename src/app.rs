@@ -16,6 +16,8 @@ use tokio::time::{self, Duration};
 use crate::anim::timeline::Timeline;
 use crate::anim::tween::Easing;
 use crate::backend::native::NativeBackend;
+use crate::backend::tmux::layout::LayoutAst;
+use crate::backend::tmux::reconcile::{self, LayoutDelta, StructuralPath};
 use crate::backend::tmux::TmuxBackend;
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::Command;
@@ -531,6 +533,7 @@ impl App {
         for pane in pane_ids {
             self.timeline.clear_pane_tweens(pane);
         }
+        self.timeline.clear_internal_ratio_tweens();
         if let Some(root) = self.workspaces[idx].root.as_mut() {
             snap_leaves_to_target(root);
         }
@@ -675,6 +678,218 @@ impl App {
         }
         self.resize_mode = ResizeMode::Normal;
         Ok(())
+    }
+
+    pub async fn apply_external_layout_change(
+        &mut self,
+        window_id: u64,
+        layout: LayoutAst,
+    ) -> anyhow::Result<()> {
+        let workspace_idx = self.workspace_for_tmux_window(window_id);
+        self.snap_workspace_tweens(workspace_idx).await?;
+
+        let normalized = reconcile::normalize(layout);
+        let Some(old_root) = self.workspaces[workspace_idx].root.clone() else {
+            self.install_external_layout_without_diff(workspace_idx, &normalized);
+            return Ok(());
+        };
+        let deltas = reconcile::diff(&old_root, &normalized);
+        if deltas.is_empty() {
+            return Ok(());
+        }
+
+        let new_root = node_from_layout_ast(&normalized, Some(&old_root), &mut Vec::new());
+        self.workspaces[workspace_idx].root = Some(new_root);
+
+        self.ensure_external_panes(&deltas);
+        self.queue_external_layout_tweens(workspace_idx, &old_root, &deltas);
+        self.remove_external_panes(&deltas);
+
+        let ws = &mut self.workspaces[workspace_idx];
+        if ws.focused.is_none_or(|pane| {
+            ws.root
+                .as_ref()
+                .is_none_or(|root| root.find_leaf(pane).is_none())
+        }) {
+            ws.focused = ws.root.as_ref().and_then(first_leaf_pane);
+        }
+
+        if workspace_idx == self.current_workspace {
+            self.dirty = true;
+        }
+
+        Ok(())
+    }
+
+    fn workspace_for_tmux_window(&self, _window_id: u64) -> usize {
+        // TODO(C.1): replace this with tmux window id -> workspace mapping.
+        0
+    }
+
+    fn install_external_layout_without_diff(&mut self, workspace_idx: usize, layout: &LayoutAst) {
+        let root = node_from_layout_ast(layout, None, &mut Vec::new());
+        let mut panes = Vec::new();
+        collect_layout_panes(layout, &mut panes);
+        for pane in panes {
+            self.ensure_pane_registered(pane);
+        }
+
+        let ws = &mut self.workspaces[workspace_idx];
+        ws.focused = first_leaf_pane(&root);
+        ws.root = Some(root);
+        if workspace_idx == self.current_workspace {
+            self.dirty = true;
+        }
+    }
+
+    fn ensure_external_panes(&mut self, deltas: &[LayoutDelta]) {
+        for delta in deltas {
+            if let LayoutDelta::AddPane { pane, .. } = delta {
+                self.ensure_pane_registered(*pane);
+            }
+        }
+    }
+
+    fn ensure_pane_registered(&mut self, pane: PaneId) {
+        if self.panes.iter().any(|existing| existing.id() == pane) {
+            return;
+        }
+
+        // TODO(C.1): allocate a weave PaneId and register it with TmuxBackend's
+        // tmux pane BiMap. Until that API exists, B.3 treats tmux pane ids as
+        // backend PaneIds so diff -> apply can be exercised end-to-end.
+        self.panes
+            .push(Pane::new(pane, self.back.width, self.back.height));
+    }
+
+    fn queue_external_layout_tweens(
+        &mut self,
+        workspace_idx: usize,
+        old_root: &Node,
+        deltas: &[LayoutDelta],
+    ) {
+        let Some((new_targets, ratio_tweens)) =
+            self.workspaces[workspace_idx]
+                .root
+                .as_ref()
+                .map(|new_root| {
+                    let mut new_targets = Vec::new();
+                    collect_leaf_targets(new_root, &mut new_targets);
+                    let ratio_tweens = deltas
+                        .iter()
+                        .filter_map(|delta| match delta {
+                            LayoutDelta::ResizeRatio { path, from, to } => {
+                                internal_preorder_index_at_path(new_root, path)
+                                    .map(|index| (index, *from, *to))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    (new_targets, ratio_tweens)
+                })
+        else {
+            return;
+        };
+        let added = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                LayoutDelta::AddPane { pane, .. } => Some(*pane),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let removed = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                LayoutDelta::RemovePane { pane, .. } => Some(*pane),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+
+        for (pane, target) in new_targets {
+            if added.contains(&pane) || removed.contains(&pane) {
+                continue;
+            }
+            let Some(from) = leaf_current_in(old_root, pane) else {
+                continue;
+            };
+            self.timeline.tween_leaf_rect(
+                pane,
+                from,
+                FRect::from(target),
+                OPEN_SIBLING_DURATION,
+                Easing::EaseOutCubic,
+            );
+        }
+
+        for delta in deltas {
+            match delta {
+                LayoutDelta::AddPane { path, pane, rect } => {
+                    self.queue_external_add_tween(workspace_idx, old_root, path, *pane, *rect);
+                }
+                LayoutDelta::RemovePane { pane, .. } => {
+                    if let Some(from) = leaf_current_in(old_root, *pane) {
+                        let to = close_plan(old_root, *pane).map_or(from, |plan| {
+                            collapsed_close_rect(plan.split, plan.closing_is_a, from)
+                        });
+                        self.timeline.tween_leaf_rect(
+                            *pane,
+                            from,
+                            to,
+                            CLOSE_PANE_DURATION,
+                            Easing::EaseOutCubic,
+                        );
+                    }
+                }
+                LayoutDelta::ResizeRatio { .. } => {}
+                LayoutDelta::SplitInternal { .. }
+                | LayoutDelta::MergeInternal { .. }
+                | LayoutDelta::SwapLeaves { .. } => {}
+            }
+        }
+
+        for (index, from, to) in ratio_tweens {
+            self.timeline.tween_internal_ratio(
+                index,
+                from,
+                to,
+                OPEN_SIBLING_DURATION,
+                Easing::EaseOutCubic,
+            );
+        }
+    }
+
+    fn queue_external_add_tween(
+        &mut self,
+        workspace_idx: usize,
+        old_root: &Node,
+        path: &[usize],
+        pane: PaneId,
+        target: Rect,
+    ) {
+        let parent_path = path
+            .split_last()
+            .map_or(&[][..], |(_leaf_index, parent_path)| parent_path);
+        let Some(new_root) = self.workspaces[workspace_idx].root.as_ref() else {
+            return;
+        };
+        let Some(split) = internal_split_at_path(new_root, parent_path) else {
+            return;
+        };
+        let old_parent_rect = node_rect_at_path(old_root, parent_path).unwrap_or(target);
+        let from = collapsed_open_rect(split, old_parent_rect, target);
+        let to = FRect::from(target);
+
+        self.set_leaf_rect_current(pane, from);
+        self.timeline
+            .tween_leaf_rect(pane, from, to, OPEN_NEW_PANE_DURATION, Easing::EaseOutBack);
+    }
+
+    fn remove_external_panes(&mut self, deltas: &[LayoutDelta]) {
+        for delta in deltas {
+            if let LayoutDelta::RemovePane { pane, .. } = delta {
+                self.remove_pane(*pane);
+            }
+        }
     }
 
     async fn split_focused(&mut self, split: Split) -> anyhow::Result<()> {
@@ -1468,6 +1683,194 @@ fn flat_horizontal_root(panes: &[PaneId], rect: Rect) -> Option<Node> {
     })
 }
 
+fn node_from_layout_ast(
+    ast: &LayoutAst,
+    old_root: Option<&Node>,
+    path: &mut StructuralPath,
+) -> Node {
+    match ast {
+        LayoutAst::Leaf { pane_id, rect } => {
+            let pane = PaneId(*pane_id);
+            Node::Leaf {
+                pane,
+                rect_current: old_root
+                    .and_then(|root| leaf_current_in(root, pane))
+                    .unwrap_or_else(|| FRect::from(*rect)),
+                rect_target: *rect,
+            }
+        }
+        LayoutAst::Horizontal { rect, children } | LayoutAst::Vertical { rect, children } => {
+            let [first, second] = children.as_slice() else {
+                panic!("tmux layout reconciliation requires normalized binary groups");
+            };
+            let (split, ratio_target) = layout_ast_split_ratio(ast);
+            let ratio = old_root
+                .and_then(|root| internal_ratio_at_path(root, path, split))
+                .unwrap_or(ratio_target);
+
+            path.push(0);
+            let a = node_from_layout_ast(first, old_root, path);
+            path.pop();
+
+            path.push(1);
+            let b = node_from_layout_ast(second, old_root, path);
+            path.pop();
+
+            Node::Internal {
+                split,
+                ratio,
+                ratio_target,
+                a: Box::new(a),
+                b: Box::new(b),
+                rect: *rect,
+            }
+        }
+    }
+}
+
+fn layout_ast_split_ratio(ast: &LayoutAst) -> (Split, f32) {
+    match ast {
+        LayoutAst::Leaf { .. } => panic!("leaves do not have split ratios"),
+        LayoutAst::Horizontal { rect, children } => {
+            let [first, _second] = children.as_slice() else {
+                panic!("tmux layout reconciliation requires normalized binary groups");
+            };
+            (Split::Vertical, split_ratio(first.rect().w, rect.w))
+        }
+        LayoutAst::Vertical { rect, children } => {
+            let [first, _second] = children.as_slice() else {
+                panic!("tmux layout reconciliation requires normalized binary groups");
+            };
+            (Split::Horizontal, split_ratio(first.rect().h, rect.h))
+        }
+    }
+}
+
+fn split_ratio(first: u16, total: u16) -> f32 {
+    if total == 0 {
+        return 0.5;
+    }
+
+    f32::from(first) / f32::from(total)
+}
+
+fn collect_layout_panes(ast: &LayoutAst, panes: &mut Vec<PaneId>) {
+    match ast {
+        LayoutAst::Leaf { pane_id, .. } => panes.push(PaneId(*pane_id)),
+        LayoutAst::Horizontal { children, .. } | LayoutAst::Vertical { children, .. } => {
+            for child in children {
+                collect_layout_panes(child, panes);
+            }
+        }
+    }
+}
+
+fn leaf_current_in(node: &Node, pane: PaneId) -> Option<FRect> {
+    match node.find_leaf(pane)? {
+        Node::Leaf { rect_current, .. } => Some(*rect_current),
+        Node::Internal { .. } => None,
+    }
+}
+
+fn internal_ratio_at_path(node: &Node, path: &[usize], expected_split: Split) -> Option<f32> {
+    let Node::Internal {
+        split, ratio, a, b, ..
+    } = node
+    else {
+        return None;
+    };
+
+    if path.is_empty() {
+        return (*split == expected_split).then_some(*ratio);
+    }
+
+    match path[0] {
+        0 => internal_ratio_at_path(a, &path[1..], expected_split),
+        1 => internal_ratio_at_path(b, &path[1..], expected_split),
+        _ => None,
+    }
+}
+
+fn internal_split_at_path(node: &Node, path: &[usize]) -> Option<Split> {
+    let Node::Internal { split, a, b, .. } = node else {
+        return None;
+    };
+
+    if path.is_empty() {
+        return Some(*split);
+    }
+
+    match path[0] {
+        0 => internal_split_at_path(a, &path[1..]),
+        1 => internal_split_at_path(b, &path[1..]),
+        _ => None,
+    }
+}
+
+fn internal_preorder_index_at_path(root: &Node, target_path: &[usize]) -> Option<usize> {
+    let mut index = 0;
+    internal_preorder_index_at_path_inner(root, target_path, &mut Vec::new(), &mut index)
+}
+
+fn internal_preorder_index_at_path_inner(
+    node: &Node,
+    target_path: &[usize],
+    current_path: &mut StructuralPath,
+    next_index: &mut usize,
+) -> Option<usize> {
+    match node {
+        Node::Leaf { .. } => None,
+        Node::Internal { a, b, .. } => {
+            let current_index = *next_index;
+            *next_index += 1;
+            if current_path == target_path {
+                return Some(current_index);
+            }
+
+            current_path.push(0);
+            let found =
+                internal_preorder_index_at_path_inner(a, target_path, current_path, next_index);
+            current_path.pop();
+            if found.is_some() {
+                return found;
+            }
+
+            current_path.push(1);
+            let found =
+                internal_preorder_index_at_path_inner(b, target_path, current_path, next_index);
+            current_path.pop();
+            found
+        }
+    }
+}
+
+fn node_rect_at_path(node: &Node, path: &[usize]) -> Option<Rect> {
+    match node {
+        Node::Leaf { rect_target, .. } if path.is_empty() => Some(*rect_target),
+        Node::Leaf { .. } => None,
+        Node::Internal { rect, a, b, .. } if path.is_empty() => Some(*rect),
+        Node::Internal { a, b, .. } => match path[0] {
+            0 => node_rect_at_path(a, &path[1..]),
+            1 => node_rect_at_path(b, &path[1..]),
+            _ => None,
+        },
+    }
+}
+
+trait LayoutAstRect {
+    fn rect(&self) -> Rect;
+}
+
+impl LayoutAstRect for LayoutAst {
+    fn rect(&self) -> Rect {
+        match self {
+            Self::Leaf { rect, .. }
+            | Self::Horizontal { rect, .. }
+            | Self::Vertical { rect, .. } => *rect,
+        }
+    }
+}
+
 fn count_workspace_leaves(node: &Node) -> usize {
     match node {
         Node::Leaf { .. } => 1,
@@ -1595,9 +1998,10 @@ mod tests {
         CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION, OPEN_NEW_PANE_DURATION,
     };
     use crate::anim::tween::Easing;
+    use crate::backend::tmux::layout::LayoutAst;
     use crate::backend::{PaneBackend, PaneCommand, PaneId};
     use crate::command::Command;
-    use crate::layout::geometry::{FRect, Split};
+    use crate::layout::geometry::{FRect, Rect, Split};
     use crate::layout::tree::Node;
     use tokio::time::Duration;
 
@@ -1638,6 +2042,14 @@ mod tests {
         resized
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    fn layout_leaf(pane_id: u64, rect: Rect) -> LayoutAst {
+        LayoutAst::Leaf { pane_id, rect }
     }
 
     #[async_trait::async_trait]
@@ -1845,6 +2257,81 @@ mod tests {
             } => assert_eq!(*rect_current, FRect::from(*rect_target)),
             Node::Internal { .. } => panic!("expected new leaf"),
         }
+    }
+
+    #[tokio::test]
+    async fn external_layout_split_mutates_tree_and_queues_animations() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let layout = LayoutAst::Horizontal {
+            rect: rect(0, 0, 80, 24),
+            children: vec![
+                layout_leaf(1, rect(0, 0, 40, 24)),
+                layout_leaf(2, rect(40, 0, 40, 24)),
+            ],
+        };
+
+        app.apply_external_layout_change(1, layout)
+            .await
+            .expect("external layout applies");
+
+        let ws = &app.workspaces[0];
+        match ws.root.as_ref().expect("root exists") {
+            Node::Internal { split, a, b, .. } => {
+                assert_eq!(*split, Split::Vertical);
+                assert!(matches!(
+                    **a,
+                    Node::Leaf {
+                        pane: PaneId(1),
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    **b,
+                    Node::Leaf {
+                        pane: PaneId(2),
+                        ..
+                    }
+                ));
+            }
+            Node::Leaf { .. } => panic!("expected external split root"),
+        }
+        assert!(app.panes.iter().any(|pane| pane.id() == PaneId(2)));
+        assert!(app.timeline.has_leaf_rect_tween(PaneId(1)));
+        assert!(app.timeline.has_leaf_rect_tween(PaneId(2)));
+    }
+
+    #[tokio::test]
+    async fn external_layout_merge_mutates_tree_and_queues_animations() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let split_layout = LayoutAst::Horizontal {
+            rect: rect(0, 0, 80, 24),
+            children: vec![
+                layout_leaf(1, rect(0, 0, 40, 24)),
+                layout_leaf(2, rect(40, 0, 40, 24)),
+            ],
+        };
+        app.apply_external_layout_change(1, split_layout)
+            .await
+            .expect("external split applies");
+
+        let merge_layout = layout_leaf(1, rect(0, 0, 80, 24));
+        app.apply_external_layout_change(1, merge_layout)
+            .await
+            .expect("external merge applies");
+
+        let ws = &app.workspaces[0];
+        assert!(matches!(
+            ws.root.as_ref().expect("root exists"),
+            Node::Leaf {
+                pane: PaneId(1),
+                ..
+            }
+        ));
+        assert!(app.panes.iter().any(|pane| pane.id() == PaneId(1)));
+        assert!(!app.panes.iter().any(|pane| pane.id() == PaneId(2)));
+        assert!(app.timeline.has_leaf_rect_tween(PaneId(1)));
     }
 
     #[tokio::test]

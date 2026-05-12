@@ -123,7 +123,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - Normalize: collapse N-ary splits into right-leaning BSP — `H(a,b,c,d) → H(a, H(b, H(c, d)))`. Ratios preserved by carrying cumulative widths.
   - **Accept:** unit test: 4-pane `tiled` layout normalizes deterministically; pane IDs preserved; ratios within ±1 cell of tmux's render.
 
-- [ ] **B.3 Apply LayoutDelta + animate** — *Codex* — `src/app.rs`, `src/backend/tmux/reconcile.rs`
+- [x] **B.3 Apply LayoutDelta + animate** — *Codex* — `src/app.rs`, `src/backend/tmux/reconcile.rs`
   - New `App` method `apply_external_layout_change(window_id, LayoutAst) -> Result<()>` that:
     1. Looks up workspace by window_id (see C.1).
     2. Diffs against current BSP for that workspace.
@@ -343,7 +343,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] A.10 Best-effort shutdown cleanup
 - [x] B.1 LayoutAst → BSP tree diff
 - [x] B.2 Non-BSP normalization
-- [ ] B.3 Apply LayoutDelta + animate
+- [x] B.3 Apply LayoutDelta + animate
 - [ ] B.4 Ingest externally-spawned pane IDs
 - [ ] B.5 Full re-attach reconciliation
 - [ ] B.6 Conflict resolution policy

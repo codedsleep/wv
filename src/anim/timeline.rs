@@ -50,6 +50,10 @@ impl Timeline {
         self.pane_border_colors.remove(&pane);
     }
 
+    pub fn clear_internal_ratio_tweens(&mut self) {
+        self.internal_ratios.clear();
+    }
+
     pub fn tween_leaf_rect(
         &mut self,
         pane: PaneId,
