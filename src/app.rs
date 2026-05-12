@@ -39,6 +39,33 @@ const EVENT_CHANNEL_CAPACITY: usize = 64;
 
 type BoxedBackend = Box<dyn PaneBackend>;
 
+pub const WORKSPACE_COUNT: usize = 9;
+
+#[derive(Default)]
+struct Workspace {
+    root: Option<Node>,
+    focused: Option<PaneId>,
+    closing: HashSet<PaneId>,
+}
+
+impl Workspace {
+    fn is_empty(&self) -> bool {
+        self.root.is_none()
+    }
+
+    fn pane_count(&self) -> usize {
+        self.root.as_ref().map_or(0, count_workspace_leaves)
+    }
+
+    fn leaf_panes(&self) -> Vec<PaneId> {
+        let mut panes = Vec::new();
+        if let Some(root) = self.root.as_ref() {
+            collect_leaf_pane_ids(root, &mut panes);
+        }
+        panes
+    }
+}
+
 #[cfg(test)]
 const fn test_theme() -> ThemeConfig {
     ThemeConfig {
@@ -87,9 +114,8 @@ pub struct App {
     front: Surface,
     back: Surface,
     panes: Vec<Pane>,
-    root: Option<Node>,
-    focused: Option<PaneId>,
-    closing: HashSet<PaneId>,
+    workspaces: Vec<Workspace>,
+    current_workspace: usize,
     resize_mode: ResizeMode,
     backend_kind: BackendKind,
     backend: BoxedBackend,
@@ -287,6 +313,14 @@ impl App {
         let root = flat_horizontal_root(&initial_panes, root_rect);
         let focused = initial_panes.first().copied();
 
+        let mut workspaces: Vec<Workspace> =
+            (0..WORKSPACE_COUNT).map(|_| Workspace::default()).collect();
+        workspaces[0] = Workspace {
+            root,
+            focused,
+            closing: HashSet::new(),
+        };
+
         Self {
             front: Surface::new(width, height),
             back: Surface::new(width, height),
@@ -294,9 +328,8 @@ impl App {
                 .into_iter()
                 .map(|pane| Pane::new(pane, width, height))
                 .collect(),
-            root,
-            focused,
-            closing: HashSet::new(),
+            workspaces,
+            current_workspace: 0,
             resize_mode: ResizeMode::Normal,
             backend_kind: backend_parts.kind,
             backend: backend_parts.backend,
@@ -319,18 +352,133 @@ impl App {
         }
     }
 
+    fn current(&self) -> &Workspace {
+        &self.workspaces[self.current_workspace]
+    }
+
+    fn current_mut(&mut self) -> &mut Workspace {
+        &mut self.workspaces[self.current_workspace]
+    }
+
+    fn workspace_of_pane(&self, id: PaneId) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .position(|ws| ws.root.as_ref().is_some_and(|r| r.find_leaf(id).is_some()))
+    }
+
+    fn all_other_workspaces_empty(&self) -> bool {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .all(|(i, ws)| i == self.current_workspace || ws.is_empty())
+    }
+
+    fn workspace_indicators(&self) -> Vec<chrome::WorkspaceIndicator> {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, ws)| {
+                let is_current = idx == self.current_workspace;
+                if !is_current && ws.is_empty() {
+                    return None;
+                }
+                Some(chrome::WorkspaceIndicator {
+                    number: u8::try_from(idx + 1).unwrap_or(u8::MAX),
+                    is_current,
+                    pane_count: ws.pane_count(),
+                })
+            })
+            .collect()
+    }
+
+    async fn switch_workspace(&mut self, number: u8) -> anyhow::Result<()> {
+        if number < 1 || usize::from(number) > WORKSPACE_COUNT {
+            return Ok(());
+        }
+        let target = usize::from(number) - 1;
+        if target == self.current_workspace {
+            return Ok(());
+        }
+
+        // Snap any inflight animations on the outgoing workspace so its layout
+        // is at rest when we return to it later.
+        self.snap_workspace_tweens(self.current_workspace).await?;
+
+        self.current_workspace = target;
+        if self.current().is_empty() {
+            let pane_id = self.spawn_shell_pane(true).await?;
+            let root_rect = self.root_rect();
+            let ws = self.current_mut();
+            ws.root = Some(Node::Leaf {
+                pane: pane_id,
+                rect_current: FRect::from(root_rect),
+                rect_target: root_rect,
+            });
+            ws.focused = Some(pane_id);
+        }
+        self.recompute_layout();
+        // Refresh PTY sizes for the incoming workspace so panes match the
+        // current terminal geometry (it may have changed since they were last
+        // visible).
+        let pane_ids = self.current().leaf_panes();
+        self.resize_mode = ResizeMode::HostResize;
+        for pane in pane_ids {
+            if let Some(rect) = self.leaf_rect_target(pane) {
+                if let Some(p) = self.pane_mut(pane) {
+                    p.resize(rect.w, rect.h);
+                }
+                let _ = self.resize_pane(pane, rect.w, rect.h).await;
+            }
+        }
+        self.resize_mode = ResizeMode::Normal;
+        self.dirty = true;
+        Ok(())
+    }
+
+    async fn snap_workspace_tweens(&mut self, idx: usize) -> anyhow::Result<()> {
+        // Finish any outstanding close animations synchronously: kill panes,
+        // drop them from the tree, drop the tween entries.
+        let closing: Vec<PaneId> = self.workspaces[idx].closing.iter().copied().collect();
+        for pane in closing {
+            self.workspaces[idx].closing.remove(&pane);
+            self.timeline.clear_pane_tweens(pane);
+            self.backend.kill(pane).await?;
+            self.remove_pane(pane);
+            let ws = &mut self.workspaces[idx];
+            if let Some(root) = ws.root.as_mut() {
+                if !root.close(pane) {
+                    ws.root = None;
+                    ws.focused = None;
+                }
+            }
+        }
+
+        // For all surviving leaves, snap rect_current to rect_target and drop
+        // any remaining tweens so layout is at rest.
+        let pane_ids: Vec<PaneId> = self.workspaces[idx].leaf_panes();
+        for pane in pane_ids {
+            self.timeline.clear_pane_tweens(pane);
+        }
+        if let Some(root) = self.workspaces[idx].root.as_mut() {
+            snap_leaves_to_target(root);
+        }
+        Ok(())
+    }
+
     pub async fn run(mut self) -> anyhow::Result<()> {
-        if self.root.is_none() {
+        if self.current().root.is_none() {
             let pane_id = self
                 .spawn_shell_pane(true)
                 .await
                 .context("failed to spawn shell pane")?;
-            self.root = Some(Node::Leaf {
+            let root_rect = self.root_rect();
+            let ws = self.current_mut();
+            ws.root = Some(Node::Leaf {
                 pane: pane_id,
-                rect_current: FRect::from(self.root_rect()),
-                rect_target: self.root_rect(),
+                rect_current: FRect::from(root_rect),
+                rect_target: root_rect,
             });
-            self.focused = Some(pane_id);
+            ws.focused = Some(pane_id);
             self.recompute_layout();
         }
 
@@ -395,6 +543,7 @@ impl App {
             Command::Close => self.close_focused().await?,
             Command::Detach => self.detach().await?,
             Command::Quit => self.exit = ExitState::Quit,
+            Command::SwitchWorkspace(n) => self.switch_workspace(n).await?,
         }
 
         Ok(())
@@ -446,7 +595,7 @@ impl App {
     }
 
     async fn split_focused(&mut self, split: Split) -> anyhow::Result<()> {
-        let Some(focused) = self.focused else {
+        let Some(focused) = self.current().focused else {
             return Ok(());
         };
         let Some(old_parent_rect) = self.leaf_rect_target(focused) else {
@@ -454,9 +603,10 @@ impl App {
         };
         let new_pane = self.spawn_shell_pane(false).await?;
 
-        if let Some(root) = self.root.as_mut() {
+        let ws = self.current_mut();
+        if let Some(root) = ws.root.as_mut() {
             root.split_focused(focused, split, new_pane);
-            self.focused = Some(new_pane);
+            ws.focused = Some(new_pane);
             self.recompute_layout();
             self.start_open_tweens(focused, new_pane, split, old_parent_rect);
             self.dirty = true;
@@ -503,18 +653,19 @@ impl App {
     }
 
     fn focus(&mut self, dir: Direction) {
-        let Some(focused) = self.focused else {
+        let Some(focused) = self.current().focused else {
             return;
         };
 
         let next = self
+            .current()
             .root
             .as_ref()
             .and_then(|root| root.focus_neighbor(focused, dir));
 
         if let Some(next) = next {
             self.start_focus_border_tweens(focused, next);
-            self.focused = Some(next);
+            self.current_mut().focused = Some(next);
             self.dirty = true;
         }
     }
@@ -524,14 +675,15 @@ impl App {
             return;
         }
 
+        let focused = self.current().focused;
         let focused_color = self.theme.border_focused;
         let unfocused_color = self.theme.border_unfocused;
         let previous_from =
             self.timeline
-                .pane_border_color(previous, self.focused, focused_color, unfocused_color);
+                .pane_border_color(previous, focused, focused_color, unfocused_color);
         let next_from =
             self.timeline
-                .pane_border_color(next, self.focused, focused_color, unfocused_color);
+                .pane_border_color(next, focused, focused_color, unfocused_color);
 
         self.timeline.tween_pane_border_color(
             previous,
@@ -550,16 +702,18 @@ impl App {
     }
 
     async fn close_focused(&mut self) -> anyhow::Result<()> {
-        let Some(focused) = self.focused else {
+        let Some(focused) = self.current().focused else {
             return Ok(());
         };
-        if self.closing.contains(&focused) {
+        if self.current().closing.contains(&focused) {
             return Ok(());
         }
 
-        let Some(root) = self.root.as_ref() else {
-            self.focused = None;
-            self.exit = ExitState::Quit;
+        let Some(root) = self.current().root.as_ref() else {
+            self.current_mut().focused = None;
+            if self.all_other_workspaces_empty() {
+                self.exit = ExitState::Quit;
+            }
             self.dirty = true;
             return Ok(());
         };
@@ -567,9 +721,13 @@ impl App {
         let Some(close_plan) = close_plan(root, focused) else {
             self.backend.kill(focused).await?;
             self.remove_pane(focused);
-            self.root = None;
-            self.focused = None;
-            self.exit = ExitState::Quit;
+            let last_pane_anywhere = self.all_other_workspaces_empty();
+            let ws = self.current_mut();
+            ws.root = None;
+            ws.focused = None;
+            if last_pane_anywhere {
+                self.exit = ExitState::Quit;
+            }
             self.dirty = true;
             return Ok(());
         };
@@ -609,8 +767,10 @@ impl App {
             CLOSE_PANE_DURATION,
             Easing::EaseOutCubic,
         );
-        self.closing.insert(focused);
-        self.focused = first_leaf_pane(&post_close_root);
+        let new_focus = first_leaf_pane(&post_close_root);
+        let ws = self.current_mut();
+        ws.closing.insert(focused);
+        ws.focused = new_focus;
         self.dirty = true;
 
         Ok(())
@@ -621,15 +781,27 @@ impl App {
             BackendEvent::PaneDied(id) => {
                 tracing::info!("pane died: {id:?}");
                 self.remove_pane(id);
-                if let Some(root) = self.root.as_mut() {
-                    if root.close(id) {
-                        self.focused = self.root.as_ref().and_then(first_leaf_pane);
-                        self.recompute_layout();
-                    } else if self.focused == Some(id) {
-                        self.root = None;
-                        self.focused = None;
-                        self.exit = ExitState::Quit;
+                let owning_ws = self.workspace_of_pane(id);
+                if let Some(ws_idx) = owning_ws {
+                    let ws = &mut self.workspaces[ws_idx];
+                    let was_focused = ws.focused == Some(id);
+                    let closed = ws
+                        .root
+                        .as_mut()
+                        .is_some_and(|root| root.close(id));
+                    if closed {
+                        let new_focus = ws.root.as_ref().and_then(first_leaf_pane);
+                        ws.focused = new_focus;
+                        if ws_idx == self.current_workspace {
+                            self.recompute_layout();
+                        }
+                    } else if was_focused {
+                        ws.root = None;
+                        ws.focused = None;
                     }
+                }
+                if self.workspaces.iter().all(Workspace::is_empty) {
+                    self.exit = ExitState::Quit;
                 }
                 self.dirty = true;
             }
@@ -654,7 +826,7 @@ impl App {
             return Ok(());
         }
 
-        let Some(focused) = self.focused else {
+        let Some(focused) = self.current().focused else {
             return Ok(());
         };
 
@@ -707,20 +879,23 @@ impl App {
         }
 
         self.queue_buf.clear();
+        let root = self.workspaces[self.current_workspace].root.as_ref();
+        let focused = self.workspaces[self.current_workspace].focused;
         compositor::compose(
-            self.root.as_ref(),
+            root,
             &self.panes,
-            self.focused,
+            focused,
             self.theme,
             &self.timeline,
             &mut self.back,
             self.pane_titles,
         );
         if self.status_bar {
+            let indicators = self.workspace_indicators();
             chrome::draw_status_bar(
                 &mut self.back,
                 "NORMAL",
-                chrome::leaf_count(self.root.as_ref()),
+                &indicators,
                 chrono::Local::now(),
                 self.theme,
             );
@@ -756,7 +931,11 @@ impl App {
     }
 
     async fn advance_animations(&mut self, dt: Duration) -> anyhow::Result<()> {
-        let advance = self.timeline.advance(dt, self.root.as_mut());
+        let advance = {
+            let current_idx = self.current_workspace;
+            let root = self.workspaces[current_idx].root.as_mut();
+            self.timeline.advance(dt, root)
+        };
 
         if !advance.changed_panes.is_empty() || !advance.completed_leaf_rects.is_empty() {
             self.dirty = true;
@@ -764,7 +943,7 @@ impl App {
 
         let completed_leaf_rects = advance.completed_leaf_rects;
         let mut completed_closings = completed_leaf_rects.clone();
-        for pane in &self.closing {
+        for pane in &self.current().closing {
             if !self.timeline.has_leaf_rect_tween(*pane) {
                 completed_closings.push(*pane);
             }
@@ -778,7 +957,7 @@ impl App {
 
     async fn resize_completed_leaf_tweens(&mut self, completed: &[PaneId]) -> anyhow::Result<()> {
         for pane in completed {
-            if self.closing.contains(pane) {
+            if self.current().closing.contains(pane) {
                 continue;
             }
             let Some(rect) = self.leaf_rect_current(*pane) else {
@@ -793,23 +972,28 @@ impl App {
 
     async fn finish_completed_closings(&mut self, completed: &[PaneId]) -> anyhow::Result<()> {
         for pane in completed {
-            if !self.closing.remove(pane) {
+            if !self.current_mut().closing.remove(pane) {
                 continue;
             }
 
             self.backend.kill(*pane).await?;
             self.remove_pane(*pane);
 
-            if let Some(root) = self.root.as_mut() {
+            let ws = self.current_mut();
+            if let Some(root) = ws.root.as_mut() {
                 if root.close(*pane) {
+                    let needs_refocus = ws.focused.is_none() || ws.focused == Some(*pane);
                     self.recompute_layout();
-                    if self.focused.is_none() || self.focused == Some(*pane) {
-                        self.focused = self.root.as_ref().and_then(first_leaf_pane);
+                    let ws = self.current_mut();
+                    if needs_refocus {
+                        ws.focused = ws.root.as_ref().and_then(first_leaf_pane);
                     }
                 } else {
-                    self.root = None;
-                    self.focused = None;
-                    self.exit = ExitState::Quit;
+                    ws.root = None;
+                    ws.focused = None;
+                    if self.all_other_workspaces_empty() {
+                        self.exit = ExitState::Quit;
+                    }
                 }
             }
 
@@ -834,33 +1018,43 @@ impl App {
 
     fn recompute_layout(&mut self) {
         let root_rect = self.root_rect();
-        if let Some(root) = self.root.as_mut() {
+        if let Some(root) = self.current_mut().root.as_mut() {
             root.compute_layout(root_rect);
         }
     }
 
     fn leaf_rect_target(&self, pane: PaneId) -> Option<Rect> {
-        match self.root.as_ref()?.find_leaf(pane)? {
-            Node::Leaf { rect_target, .. } => Some(*rect_target),
-            Node::Internal { .. } => None,
+        for ws in &self.workspaces {
+            if let Some(root) = ws.root.as_ref() {
+                if let Some(Node::Leaf { rect_target, .. }) = root.find_leaf(pane) {
+                    return Some(*rect_target);
+                }
+            }
         }
+        None
     }
 
     fn leaf_rect_current(&self, pane: PaneId) -> Option<FRect> {
-        match self.root.as_ref()?.find_leaf(pane)? {
-            Node::Leaf { rect_current, .. } => Some(*rect_current),
-            Node::Internal { .. } => None,
+        for ws in &self.workspaces {
+            if let Some(root) = ws.root.as_ref() {
+                if let Some(Node::Leaf { rect_current, .. }) = root.find_leaf(pane) {
+                    return Some(*rect_current);
+                }
+            }
         }
+        None
     }
 
     fn set_leaf_rect_current(&mut self, pane: PaneId, rect: FRect) {
-        let Some(root) = self.root.as_mut() else {
-            return;
-        };
-        let Some(Node::Leaf { rect_current, .. }) = root.find_leaf_mut(pane) else {
-            return;
-        };
-        *rect_current = rect;
+        for ws in &mut self.workspaces {
+            let Some(root) = ws.root.as_mut() else {
+                continue;
+            };
+            if let Some(Node::Leaf { rect_current, .. }) = root.find_leaf_mut(pane) {
+                *rect_current = rect;
+                return;
+            }
+        }
     }
 
     fn pane_ids(&self) -> Vec<PaneId> {
@@ -900,10 +1094,9 @@ impl App {
             h: height,
         };
 
-        Self {
-            front: Surface::new(width, height),
-            back: Surface::new(width, height),
-            panes: vec![Pane::new(pane_id, width, height)],
+        let mut workspaces: Vec<Workspace> =
+            (0..WORKSPACE_COUNT).map(|_| Workspace::default()).collect();
+        workspaces[0] = Workspace {
             root: Some(Node::Leaf {
                 pane: pane_id,
                 rect_current: FRect::from(root_rect),
@@ -911,6 +1104,14 @@ impl App {
             }),
             focused: Some(pane_id),
             closing: HashSet::new(),
+        };
+
+        Self {
+            front: Surface::new(width, height),
+            back: Surface::new(width, height),
+            panes: vec![Pane::new(pane_id, width, height)],
+            workspaces,
+            current_workspace: 0,
             resize_mode: ResizeMode::Normal,
             backend_kind: BackendKind::Native,
             backend,
@@ -1181,6 +1382,39 @@ fn flat_horizontal_root(panes: &[PaneId], rect: Rect) -> Option<Node> {
     })
 }
 
+fn count_workspace_leaves(node: &Node) -> usize {
+    match node {
+        Node::Leaf { .. } => 1,
+        Node::Internal { a, b, .. } => count_workspace_leaves(a) + count_workspace_leaves(b),
+    }
+}
+
+fn collect_leaf_pane_ids(node: &Node, out: &mut Vec<PaneId>) {
+    match node {
+        Node::Leaf { pane, .. } => out.push(*pane),
+        Node::Internal { a, b, .. } => {
+            collect_leaf_pane_ids(a, out);
+            collect_leaf_pane_ids(b, out);
+        }
+    }
+}
+
+fn snap_leaves_to_target(node: &mut Node) {
+    match node {
+        Node::Leaf {
+            rect_current,
+            rect_target,
+            ..
+        } => {
+            *rect_current = FRect::from(*rect_target);
+        }
+        Node::Internal { a, b, .. } => {
+            snap_leaves_to_target(a);
+            snap_leaves_to_target(b);
+        }
+    }
+}
+
 fn first_leaf_pane(node: &Node) -> Option<PaneId> {
     match node {
         Node::Leaf { pane, .. } => Some(*pane),
@@ -1346,7 +1580,8 @@ mod tests {
 
         app.execute(Command::SplitH).await.expect("split succeeds");
 
-        match app.root.expect("root exists") {
+        let ws = &app.workspaces[app.current_workspace];
+        match ws.root.clone().expect("root exists") {
             Node::Internal {
                 split, a, b, rect, ..
             } => {
@@ -1370,7 +1605,7 @@ mod tests {
             }
             Node::Leaf { .. } => panic!("expected split root"),
         }
-        assert_eq!(app.focused, Some(PaneId(2)));
+        assert_eq!(ws.focused, Some(PaneId(2)));
         assert!(app.panes.iter().any(|pane| pane.id() == PaneId(2)));
         assert!(handle.resized().is_empty());
     }
@@ -1403,7 +1638,11 @@ mod tests {
             .expect("animations advance");
 
         assert!(app.dirty);
-        match app.root.expect("root exists") {
+        match app.workspaces[app.current_workspace]
+            .root
+            .clone()
+            .expect("root exists")
+        {
             Node::Leaf { rect_current, .. } => {
                 assert_eq!(rect_current.x, 5.0);
                 assert_eq!(rect_current.w, 75.0);
@@ -1417,15 +1656,16 @@ mod tests {
         let (backend, _handle) = mock_backend(PaneId(2));
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.execute(Command::SplitH).await.expect("split succeeds");
-        assert_eq!(app.focused, Some(PaneId(2)));
+        assert_eq!(app.workspaces[app.current_workspace].focused, Some(PaneId(2)));
 
         app.execute(Command::FocusUp).await.expect("focus succeeds");
 
-        assert_eq!(app.focused, Some(PaneId(1)));
+        let focused = app.workspaces[app.current_workspace].focused;
+        assert_eq!(focused, Some(PaneId(1)));
         assert_eq!(
             app.timeline.pane_border_color(
                 PaneId(2),
-                app.focused,
+                focused,
                 app.theme.border_focused,
                 app.theme.border_unfocused,
             ),
@@ -1434,7 +1674,7 @@ mod tests {
         assert_eq!(
             app.timeline.pane_border_color(
                 PaneId(1),
-                app.focused,
+                focused,
                 app.theme.border_focused,
                 app.theme.border_unfocused,
             ),
@@ -1445,10 +1685,11 @@ mod tests {
             .await
             .expect("animations advance");
 
+        let focused = app.workspaces[app.current_workspace].focused;
         assert_eq!(
             app.timeline.pane_border_color(
                 PaneId(1),
-                app.focused,
+                focused,
                 app.theme.border_focused,
                 app.theme.border_unfocused,
             ),
@@ -1457,7 +1698,7 @@ mod tests {
         assert_eq!(
             app.timeline.pane_border_color(
                 PaneId(2),
-                app.focused,
+                focused,
                 app.theme.border_focused,
                 app.theme.border_unfocused,
             ),
@@ -1476,7 +1717,7 @@ mod tests {
         let new_target = app
             .leaf_rect_target(PaneId(2))
             .expect("new pane has target");
-        match app
+        match app.workspaces[app.current_workspace]
             .root
             .as_ref()
             .expect("root exists")
@@ -1500,7 +1741,7 @@ mod tests {
         assert_eq!(resized.len(), 2);
         assert!(resized.contains(&(PaneId(1), 40, 23)));
         assert!(resized.contains(&(PaneId(2), 40, 23)));
-        match app
+        match app.workspaces[app.current_workspace]
             .root
             .as_ref()
             .expect("root exists")
@@ -1528,7 +1769,7 @@ mod tests {
 
         app.execute(Command::Close).await.expect("close starts");
 
-        assert!(app
+        assert!(app.workspaces[app.current_workspace]
             .root
             .as_ref()
             .expect("root exists")
@@ -1541,13 +1782,61 @@ mod tests {
             .expect("close animation completes");
 
         assert_eq!(handle.resized(), vec![(PaneId(1), 80, 23)]);
-        assert!(app
+        assert!(app.workspaces[app.current_workspace]
             .root
             .as_ref()
             .expect("root exists")
             .find_leaf(PaneId(2))
             .is_none());
         assert!(!app.panes.iter().any(|pane| pane.id() == PaneId(2)));
+    }
+
+    #[tokio::test]
+    async fn switch_workspace_spawns_lazy_shell_and_changes_current() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(Command::SwitchWorkspace(2))
+            .await
+            .expect("switch succeeds");
+
+        assert_eq!(app.current_workspace, 1);
+        let ws = &app.workspaces[1];
+        assert_eq!(ws.focused, Some(PaneId(2)));
+        assert!(ws.root.is_some());
+        // Workspace 1 (the original) keeps its pane.
+        assert!(app.workspaces[0].root.is_some());
+        assert!(app.workspaces[0].focused.is_some());
+    }
+
+    #[tokio::test]
+    async fn switch_workspace_round_trip_keeps_existing_panes() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(Command::SwitchWorkspace(2))
+            .await
+            .expect("switch to 2");
+        app.execute(Command::SwitchWorkspace(1))
+            .await
+            .expect("switch back to 1");
+
+        assert_eq!(app.current_workspace, 0);
+        assert_eq!(app.workspaces[0].focused, Some(PaneId(1)));
+        assert_eq!(app.workspaces[1].focused, Some(PaneId(2)));
+    }
+
+    #[test]
+    fn workspace_indicators_show_current_and_occupied() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        let indicators = app.workspace_indicators();
+
+        assert_eq!(indicators.len(), 1);
+        assert_eq!(indicators[0].number, 1);
+        assert!(indicators[0].is_current);
+        assert_eq!(indicators[0].pane_count, 1);
     }
 
     #[tokio::test]

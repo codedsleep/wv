@@ -45,6 +45,11 @@ impl Timeline {
         self.leaf_rects.contains_key(&pane)
     }
 
+    pub fn clear_pane_tweens(&mut self, pane: PaneId) {
+        self.leaf_rects.remove(&pane);
+        self.pane_border_colors.remove(&pane);
+    }
+
     pub fn tween_leaf_rect(
         &mut self,
         pane: PaneId,

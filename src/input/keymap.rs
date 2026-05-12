@@ -45,6 +45,10 @@ impl Default for Keymap {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
             Command::SplitH,
         );
+        for n in 1u8..=9 {
+            let digit = char::from(b'0' + n);
+            bindings.insert(alt_char(digit), Command::SwitchWorkspace(n));
+        }
 
         Self { bindings }
     }
@@ -139,6 +143,21 @@ mod tests {
             keymap.command_for(&alt_shift(KeyCode::Char('Q'))),
             Some(Command::Quit)
         );
+    }
+
+    #[test]
+    fn default_alt_digits_switch_workspaces() {
+        let keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.command_for(&alt(KeyCode::Char('1'))),
+            Some(Command::SwitchWorkspace(1))
+        );
+        assert_eq!(
+            keymap.command_for(&alt(KeyCode::Char('9'))),
+            Some(Command::SwitchWorkspace(9))
+        );
+        assert_eq!(keymap.command_for(&alt(KeyCode::Char('0'))), None);
     }
 
     #[test]

@@ -13,11 +13,12 @@ pub enum Command {
     Close,
     Detach,
     Quit,
+    SwitchWorkspace(u8),
 }
 
 impl Command {
     #[allow(clippy::should_implement_trait)]
-    pub const fn from_str(s: &str) -> Option<Self> {
+    pub fn from_str(s: &str) -> Option<Self> {
         match s.as_bytes() {
             b"split-h" => Some(Self::SplitH),
             b"split-v" => Some(Self::SplitV),
@@ -28,8 +29,19 @@ impl Command {
             b"close" => Some(Self::Close),
             b"detach" => Some(Self::Detach),
             b"quit" => Some(Self::Quit),
-            _ => None,
+            other => parse_switch_workspace(other),
         }
+    }
+}
+
+fn parse_switch_workspace(bytes: &[u8]) -> Option<Command> {
+    let rest = bytes.strip_prefix(b"workspace-")?;
+    if rest.len() != 1 {
+        return None;
+    }
+    match rest[0] {
+        b'1'..=b'9' => Some(Command::SwitchWorkspace(rest[0] - b'0')),
+        _ => None,
     }
 }
 
@@ -49,5 +61,19 @@ mod tests {
         assert_eq!(Command::from_str("detach"), Some(Command::Detach));
         assert_eq!(Command::from_str("quit"), Some(Command::Quit));
         assert_eq!(Command::from_str("split_h"), None);
+    }
+
+    #[test]
+    fn parses_workspace_commands() {
+        assert_eq!(
+            Command::from_str("workspace-1"),
+            Some(Command::SwitchWorkspace(1))
+        );
+        assert_eq!(
+            Command::from_str("workspace-9"),
+            Some(Command::SwitchWorkspace(9))
+        );
+        assert_eq!(Command::from_str("workspace-0"), None);
+        assert_eq!(Command::from_str("workspace-10"), None);
     }
 }

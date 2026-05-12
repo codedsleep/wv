@@ -2,11 +2,20 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use crossterm::style::Color;
 use weave::anim::timeline::Timeline;
 use weave::backend::PaneId;
+use weave::config::ThemeConfig;
 use weave::layout::geometry::{FRect, Rect, Split};
 use weave::layout::tree::Node;
 use weave::render::compositor::compose;
 use weave::term::pane::Pane;
 use weave::term::surface::Surface;
+
+const BENCH_THEME: ThemeConfig = ThemeConfig {
+    border_focused: Color::Cyan,
+    border_unfocused: Color::DarkGrey,
+    status_fg: Color::White,
+    status_bg: Color::DarkBlue,
+    accent: Color::Red,
+};
 
 const WIDTH: u16 = 200;
 const HEIGHT: u16 = 60;
@@ -92,9 +101,10 @@ fn bench_compose(c: &mut Criterion) {
                     Some(black_box(&root)),
                     black_box(&panes),
                     Some(PaneId(1)),
-                    Color::Cyan,
+                    BENCH_THEME,
                     black_box(&timeline),
                     black_box(&mut surface),
+                    false,
                 );
                 black_box(&surface);
             });

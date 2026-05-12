@@ -28,6 +28,13 @@ pub struct DebugOverlay {
     pub dirty_cells: usize,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceIndicator {
+    pub number: u8,
+    pub is_current: bool,
+    pub pane_count: usize,
+}
+
 pub fn draw_borders(
     surface: &mut Surface,
     tree: &Node,
@@ -66,7 +73,7 @@ pub fn draw_borders(
 pub fn draw_status_bar(
     surface: &mut Surface,
     mode_label: &str,
-    pane_count: usize,
+    workspaces: &[WorkspaceIndicator],
     now: chrono::DateTime<chrono::Local>,
     theme: ThemeConfig,
 ) {
@@ -79,14 +86,65 @@ pub fn draw_status_bar(
         surface.set(x, y, status_cell(' ', theme));
     }
 
-    let text = format!(
-        "[{mode_label}] panes:{pane_count} {}",
-        now.format("%H:%M:%S")
-    );
+    let mut x: u16 = 0;
+    let max_x = surface.width;
 
-    for (x, ch) in (0..surface.width).zip(text.chars()) {
-        surface.set(x, y, status_cell(ch, theme));
+    let prefix = format!("[{mode_label}] ");
+    x = write_status_text(surface, x, y, max_x, &prefix, theme.status_fg, theme.status_bg);
+
+    for ws in workspaces {
+        if x >= max_x {
+            break;
+        }
+        let label = format!(" {} ", ws.number);
+        let (fg, bg) = if ws.is_current {
+            (theme.status_bg, theme.accent)
+        } else {
+            (theme.status_fg, theme.status_bg)
+        };
+        x = write_status_text(surface, x, y, max_x, &label, fg, bg);
+        // Separator between workspaces.
+        x = write_status_text(surface, x, y, max_x, " ", theme.status_fg, theme.status_bg);
     }
+
+    let clock = now.format("%H:%M:%S").to_string();
+    let clock_width =
+        u16::try_from(UnicodeWidthStr::width(clock.as_str())).unwrap_or(u16::MAX);
+    if clock_width < max_x {
+        let clock_start = max_x - clock_width;
+        if clock_start >= x {
+            write_status_text(
+                surface,
+                clock_start,
+                y,
+                max_x,
+                &clock,
+                theme.status_fg,
+                theme.status_bg,
+            );
+        }
+    }
+}
+
+fn write_status_text(
+    surface: &mut Surface,
+    start_x: u16,
+    y: u16,
+    max_x: u16,
+    text: &str,
+    fg: Color,
+    bg: Color,
+) -> u16 {
+    let mut x = start_x;
+    for ch in text.chars() {
+        if x >= max_x {
+            break;
+        }
+        surface.set(x, y, Cell::new(ch, fg, bg, CellAttrs::empty()));
+        let step = u16::try_from(UnicodeWidthChar::width(ch).unwrap_or(1).max(1)).unwrap_or(1);
+        x = x.saturating_add(step);
+    }
+    x
 }
 
 pub fn draw_debug_overlay(surface: &mut Surface, stats: DebugOverlay) {
@@ -350,22 +408,45 @@ mod tests {
     }
 
     #[test]
-    fn draw_status_bar_writes_pane_count_on_bottom_row() {
-        let mut surface = Surface::new(32, 4);
+    fn draw_status_bar_highlights_current_workspace() {
+        let mut surface = Surface::new(48, 4);
         let now = chrono::Local
             .with_ymd_and_hms(2026, 5, 11, 14, 23, 11)
             .single()
             .expect("test time exists");
+        let workspaces = [
+            super::WorkspaceIndicator {
+                number: 1,
+                is_current: true,
+                pane_count: 2,
+            },
+            super::WorkspaceIndicator {
+                number: 3,
+                is_current: false,
+                pane_count: 1,
+            },
+        ];
 
-        draw_status_bar(&mut surface, "NORMAL", 2, now, TEST_THEME);
+        draw_status_bar(&mut surface, "NORMAL", &workspaces, now, TEST_THEME);
 
         let bottom: String = (0..surface.width)
             .map(|x| surface.get(x, surface.height - 1).expect("cell exists").ch)
             .collect();
-        assert!(bottom.contains("panes:2"));
-        let cell = surface.get(0, surface.height - 1).expect("cell exists");
-        assert_eq!(cell.fg, Color::White);
-        assert_eq!(cell.bg, Color::DarkBlue);
+        assert!(bottom.starts_with("[NORMAL] "));
+        assert!(bottom.contains(" 1 "));
+        assert!(bottom.contains(" 3 "));
+        assert!(bottom.contains("14:23:11"));
+
+        // Find the cell rendering the current workspace digit '1' and verify
+        // its background uses the accent color.
+        let one_idx = bottom.find(" 1 ").expect("workspace 1 present") + 1;
+        let cell = surface
+            .get(
+                u16::try_from(one_idx).expect("fits"),
+                surface.height - 1,
+            )
+            .expect("cell exists");
+        assert_eq!(cell.bg, Color::Red);
     }
 
     #[test]
