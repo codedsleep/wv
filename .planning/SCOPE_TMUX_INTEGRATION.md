@@ -100,7 +100,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - Update all existing call sites + tests.
   - **Accept:** existing parser proptests (master 4.2) still pass; new tests cover decoded variants.
 
-- [ ] **A.5 Property tests for layout parser** — *Codex* — `src/backend/tmux/layout.rs`
+- [x] **A.5 Property tests for layout parser** — *Codex* — `src/backend/tmux/layout.rs`
   - proptest: round-trip — generate a random BSP `LayoutAst`, render to tmux's string format, parse back, assert equal.
   - proptest: any byte string into the parser must not panic.
   - **Accept:** 1024+ proptest cases green.
@@ -335,7 +335,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] A.2 `--bare` / `--no-attach` mode
 - [x] A.3 Tmux layout-string parser
 - [x] A.4 LayoutChange / WindowAdd / WindowClose payload decode
-- [ ] A.5 Property tests for layout parser
+- [x] A.5 Property tests for layout parser
 - [ ] A.6 Apply Tilerm-proven session options (`prefix None`, `allow-passthrough on`, `aggressive-resize on`)
 - [ ] A.7 Stale-session cleanup on startup
 - [ ] A.8 CWD discovery via `pane_current_path`

@@ -246,60 +246,63 @@ impl<'a> Parser<'a> {
 }
 
 #[cfg(test)]
+fn render_layout(ast: &LayoutAst) -> String {
+    let mut body = String::new();
+    render_node(ast, &mut body);
+    let checksum = layout_checksum(body.as_bytes());
+    format!("{checksum:04x},{body}")
+}
+
+#[cfg(test)]
+fn render_node(ast: &LayoutAst, out: &mut String) {
+    match ast {
+        LayoutAst::Leaf { pane_id, rect } => {
+            push_rect(*rect, out);
+            out.push(',');
+            out.push_str(&pane_id.to_string());
+        }
+        LayoutAst::Horizontal { rect, children } => {
+            push_rect(*rect, out);
+            out.push('{');
+            render_children(children, out);
+            out.push('}');
+        }
+        LayoutAst::Vertical { rect, children } => {
+            push_rect(*rect, out);
+            out.push('[');
+            render_children(children, out);
+            out.push(']');
+        }
+    }
+}
+
+#[cfg(test)]
+fn render_children(children: &[LayoutAst], out: &mut String) {
+    for (idx, child) in children.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        render_node(child, out);
+    }
+}
+
+#[cfg(test)]
+fn push_rect(rect: Rect, out: &mut String) {
+    out.push_str(&rect.w.to_string());
+    out.push('x');
+    out.push_str(&rect.h.to_string());
+    out.push(',');
+    out.push_str(&rect.x.to_string());
+    out.push(',');
+    out.push_str(&rect.y.to_string());
+}
+
+#[cfg(test)]
 mod tests {
-    use super::Rect;
-    use super::{layout_checksum, parse_layout, LayoutAst};
+    use super::{layout_checksum, parse_layout, render_layout, LayoutAst, Rect};
 
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect { x, y, w, h }
-    }
-
-    pub(super) fn render_layout(ast: &LayoutAst) -> String {
-        let mut body = String::new();
-        render_node(ast, &mut body);
-        let checksum = layout_checksum(body.as_bytes());
-        format!("{checksum:04x},{body}")
-    }
-
-    fn render_node(ast: &LayoutAst, out: &mut String) {
-        match ast {
-            LayoutAst::Leaf { pane_id, rect } => {
-                push_rect(*rect, out);
-                out.push(',');
-                out.push_str(&pane_id.to_string());
-            }
-            LayoutAst::Horizontal { rect, children } => {
-                push_rect(*rect, out);
-                out.push('{');
-                render_children(children, out);
-                out.push('}');
-            }
-            LayoutAst::Vertical { rect, children } => {
-                push_rect(*rect, out);
-                out.push('[');
-                render_children(children, out);
-                out.push(']');
-            }
-        }
-    }
-
-    fn render_children(children: &[LayoutAst], out: &mut String) {
-        for (idx, child) in children.iter().enumerate() {
-            if idx > 0 {
-                out.push(',');
-            }
-            render_node(child, out);
-        }
-    }
-
-    fn push_rect(rect: Rect, out: &mut String) {
-        out.push_str(&rect.w.to_string());
-        out.push('x');
-        out.push_str(&rect.h.to_string());
-        out.push(',');
-        out.push_str(&rect.x.to_string());
-        out.push(',');
-        out.push_str(&rect.y.to_string());
     }
 
     fn leaf(pane_id: u64, rect: Rect) -> LayoutAst {
@@ -431,5 +434,67 @@ mod tests {
                 panic!("layout should parse: {error}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::{parse_layout, render_layout, LayoutAst, Rect};
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 1024,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn roundtrip(ast in arbitrary_layout()) {
+            let rendered = render_layout(&ast);
+            let parsed = parse_layout(&rendered).expect("rendered output must parse");
+
+            prop_assert_eq!(parsed, ast);
+        }
+
+        #[test]
+        fn arbitrary_strings_never_panic(s in any::<String>()) {
+            let _ = parse_layout(&s);
+        }
+
+        #[test]
+        fn arbitrary_ascii_never_panic(s in r"[\x00-\x7f]{0,256}") {
+            let _ = parse_layout(&s);
+        }
+    }
+
+    fn arbitrary_layout() -> impl Strategy<Value = LayoutAst> {
+        arbitrary_leaf().prop_recursive(4, 64, 4, |inner| {
+            (
+                arbitrary_rect(),
+                prop::collection::vec(inner, 2..=4),
+                any::<bool>(),
+            )
+                .prop_map(|(rect, children, horizontal)| {
+                    if horizontal {
+                        LayoutAst::Horizontal { rect, children }
+                    } else {
+                        LayoutAst::Vertical { rect, children }
+                    }
+                })
+        })
+    }
+
+    fn arbitrary_leaf() -> impl Strategy<Value = LayoutAst> {
+        (any::<u64>(), arbitrary_rect())
+            .prop_map(|(pane_id, rect)| LayoutAst::Leaf { pane_id, rect })
+    }
+
+    fn arbitrary_rect() -> impl Strategy<Value = Rect> {
+        (0u16..=200, 0u16..=200, 1u16..=200, 1u16..=200).prop_map(|(x, y, w, h)| Rect {
+            x,
+            y,
+            w,
+            h,
+        })
     }
 }
