@@ -205,7 +205,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
 
 ## Phase E — Tests + release gating
 
-- [ ] **E.1 Backend parity test extension** — *Codex* — `tests/backend_parity.rs` (extend master 4.7)
+- [x] **E.1 Backend parity test extension** — *Codex* — `tests/backend_parity.rs` (extend master 4.7)
   - For tmux backend: run the parity scenario both via internal `Command::*` and via external `tmux` subcommands; assert composed `Surface` and BSP tree match.
   - **Accept:** parity holds.
 
@@ -354,7 +354,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] D.1 Document safe-command contract
 - [x] D.2 Example bootstrap script
 - [x] D.3 `wv exec` passthrough
-- [ ] E.1 Backend parity test extension
+- [x] E.1 Backend parity test extension
 - [ ] E.2 Script-driven integration test
 - [ ] E.3 Animation budget under script load
 - [ ] E.4 README + SCOPE.md update

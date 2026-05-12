@@ -761,6 +761,14 @@ impl App {
         self.execute_now(cmd).await
     }
 
+    pub fn current_layout_root(&self) -> Option<&Node> {
+        self.current().root.as_ref()
+    }
+
+    pub async fn advance_animations_by(&mut self, dt: Duration) -> anyhow::Result<()> {
+        self.advance_animations(dt).await
+    }
+
     async fn execute_now(&mut self, cmd: Command) -> anyhow::Result<()> {
         match cmd {
             Command::SplitH => self.split_focused(Split::Horizontal).await?,
