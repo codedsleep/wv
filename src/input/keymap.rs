@@ -168,6 +168,13 @@ mod tests {
     }
 
     #[test]
+    fn default_alt_g_has_no_goto_window_binding() {
+        let keymap = Keymap::default();
+
+        assert_eq!(keymap.command_for(&alt(KeyCode::Char('g'))), None);
+    }
+
+    #[test]
     fn unmodified_letter_passes_through() {
         // Plain letters now flow to the focused PTY; only Alt+ bindings trigger commands.
         let keymap = Keymap::default();

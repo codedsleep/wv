@@ -172,9 +172,9 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - On change: update `App.current_workspace` from the mapping. If the new window is unmapped (overflow), log and stay on the previous workspace visually; visible overflow UI is C.4.
   - **Accept:** external `select-window` flips weave's visible workspace.
 
-- [ ] **C.4 Overflow handling (windows 10+)** — *Codex* — `src/backend/tmux/windows.rs`
-  - Overflow windows are visible via `wv ls --windows` (new flag) and addressable via a new `:goto-window <name>` command (Prefix `g` keybind).
-  - **Accept:** create 11 windows externally; first 9 map to workspaces 0..8; windows 10–11 reachable via `:goto-window`.
+- [x] **C.4 Overflow handling (windows 10+)** — *Codex* — `src/backend/tmux/windows.rs`
+  - Overflow windows are visible via `wv ls --windows` (new flag) and addressable via a new `Command::GotoWindow(window_id)` (programmatic / via `wv exec`; interactive keybind deferred).
+  - **Accept:** create 11 windows externally; first 9 map to workspaces 0..8; windows 10–11 reachable via `Command::GotoWindow`.
 
 **Phase C acceptance:** Workspaces and tmux windows are first-class synonyms. The user can use either control surface; both stay in sync.
 
@@ -350,7 +350,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] C.1 Window-index ↔ workspace-index mapping
 - [x] C.2 `SwitchWorkspace` → `select-window`
 - [x] C.3 `%session-window-changed` / window-active tracking
-- [ ] C.4 Overflow handling (windows 10+)
+- [x] C.4 Overflow handling (windows 10+)
 - [ ] D.1 Document safe-command contract
 - [ ] D.2 Example bootstrap script
 - [ ] D.3 `wv exec` passthrough

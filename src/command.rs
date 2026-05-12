@@ -14,6 +14,7 @@ pub enum Command {
     Detach,
     Quit,
     SwitchWorkspace(u8),
+    GotoWindow(u64),
 }
 
 impl Command {

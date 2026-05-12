@@ -360,6 +360,15 @@ impl TmuxBackend {
         let response = self.send_command(&command).await?;
         ensure_success(&response)
     }
+
+    pub async fn select_window_by_id(&mut self, window_id: u64) -> Result<(), Error> {
+        let command = format!(
+            "select-window -t {}",
+            quote_tmux_arg(&format!("@{window_id}"))
+        );
+        let response = self.send_command(&command).await?;
+        ensure_success(&response)
+    }
 }
 
 #[async_trait::async_trait]
@@ -433,6 +442,10 @@ impl PaneBackend for TmuxBackend {
 
     async fn select_window(&mut self, workspace_idx: usize) -> Result<(), Error> {
         TmuxBackend::select_window(self, workspace_idx).await
+    }
+
+    async fn select_window_by_id(&mut self, window_id: u64) -> Result<(), Error> {
+        TmuxBackend::select_window_by_id(self, window_id).await
     }
 
     async fn ingest_external_pane(&mut self, tmux_pane_id: u64) -> Result<PaneId, Error> {

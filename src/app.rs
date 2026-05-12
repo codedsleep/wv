@@ -179,7 +179,7 @@ pub enum LaunchArgs {
     Run(Args),
     Bare(Args),
     Attach(AttachArgs),
-    ListSessions,
+    ListSessions { windows: bool },
 }
 
 struct BackendParts {
@@ -316,10 +316,17 @@ impl LaunchArgs {
         match args.first().map(String::as_str) {
             Some("attach") => return Ok(Self::Attach(AttachArgs::parse(args.iter().skip(1))?)),
             Some("ls") => {
-                if let Some(arg) = args.get(1) {
-                    bail!("`wv ls` does not accept `{arg}`");
+                let mut windows = false;
+                for arg in args.iter().skip(1) {
+                    if arg == "--windows" {
+                        windows = true;
+                    } else if arg.starts_with("--windows=") {
+                        bail!("`wv ls --windows` does not accept a value");
+                    } else {
+                        bail!("`wv ls` does not accept `{arg}`");
+                    }
                 }
-                return Ok(Self::ListSessions);
+                return Ok(Self::ListSessions { windows });
             }
             _ => {}
         }
@@ -647,9 +654,25 @@ impl App {
             Command::Detach => self.detach().await?,
             Command::Quit => self.exit = ExitState::Quit,
             Command::SwitchWorkspace(n) => self.switch_workspace(n).await?,
+            Command::GotoWindow(window_id) => self.goto_window(window_id).await?,
         }
 
         Ok(())
+    }
+
+    async fn goto_window(&mut self, window_id: u64) -> anyhow::Result<()> {
+        let known_mapped = self.tmux_windows.workspace_for_window(window_id).is_some();
+        let known_overflow = self
+            .tmux_windows
+            .overflow_windows()
+            .any(|overflow_window_id| overflow_window_id == window_id);
+
+        if !known_mapped && !known_overflow {
+            tracing::debug!(window_id, "ignoring goto-window for unknown tmux window");
+            return Ok(());
+        }
+
+        self.backend.select_window_by_id(window_id).await
     }
 
     fn should_queue_internal_command(&self, cmd: Command) -> bool {
@@ -1713,7 +1736,7 @@ fn ensure_tmux_available() -> anyhow::Result<()> {
     }
 }
 
-pub fn print_weave_sessions() -> anyhow::Result<()> {
+pub fn print_weave_sessions(windows: bool) -> anyhow::Result<()> {
     let sessions = list_weave_tmux_sessions_for_display()?;
     if sessions.is_empty() {
         eprintln!("no weave sessions");
@@ -1721,13 +1744,20 @@ pub fn print_weave_sessions() -> anyhow::Result<()> {
     }
 
     println!("{:<17}  {:<19}  state", "name", "created");
-    for session in sessions {
+    for session in &sessions {
         println!(
             "{:<17}  {:<19}  {}",
             session.name,
             format_epoch_seconds(session.created),
             session.state
         );
+    }
+
+    if windows {
+        for session in &sessions {
+            let windows = list_tmux_windows_for_display(&session.name)?;
+            print!("{}", format_window_table(&session.name, &windows));
+        }
     }
 
     Ok(())
@@ -1759,6 +1789,86 @@ struct DisplayTmuxSession {
     name: String,
     created: i64,
     state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowRow {
+    window_index: usize,
+    window_id: u64,
+    name: String,
+}
+
+fn list_tmux_windows_for_display(session_name: &str) -> anyhow::Result<Vec<WindowRow>> {
+    let output = match ProcessCommand::new("tmux")
+        .args([
+            "list-windows",
+            "-t",
+            session_name,
+            "-F",
+            "#{window_index}|#{window_id}|#{window_name}",
+        ])
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            bail!("tmux was not found on PATH; install tmux to list weave sessions")
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to list tmux windows for session `{session_name}`")
+            });
+        }
+    };
+
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(crate::backend::tmux::format::parse_rows(&stdout, 3)
+        .iter()
+        .filter_map(|row| parse_tmux_window_row(row))
+        .collect())
+}
+
+fn parse_tmux_window_row(row: &[&str]) -> Option<WindowRow> {
+    let [window_index, window_id, name] = row else {
+        return None;
+    };
+
+    Some(WindowRow {
+        window_index: window_index.parse().ok()?,
+        window_id: window_id.strip_prefix('@')?.parse().ok()?,
+        name: (*name).to_owned(),
+    })
+}
+
+fn format_window_table(session_name: &str, windows: &[WindowRow]) -> String {
+    let mut output = format!("\nwindows for {session_name}\n");
+    output.push_str(&format!(
+        "{:<7}  {:<10}  {:<10}  {}\n",
+        "index", "window-id", "tag", "name"
+    ));
+
+    for window in windows {
+        output.push_str(&format!(
+            "{:<7}  @{:<9}  {:<10}  {}\n",
+            window.window_index,
+            window.window_id,
+            window_workspace_tag(window.window_index),
+            window.name
+        ));
+    }
+
+    output
+}
+
+fn window_workspace_tag(window_index: usize) -> String {
+    match window_index.checked_sub(1) {
+        Some(workspace) if workspace < WORKSPACE_COUNT => format!("[ws {workspace}]"),
+        _ => "[overflow]".to_owned(),
+    }
 }
 
 fn list_weave_tmux_sessions_for_display() -> anyhow::Result<Vec<DisplayTmuxSession>> {
@@ -2253,10 +2363,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        frame_interval, parse_weave_tmux_session, parse_weave_tmux_session_for_display,
-        validate_session_name, App, Args, AttachArgs, BackendKind, ExitState, LaunchArgs,
-        CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION, OPEN_NEW_PANE_DURATION,
-        OPEN_SIBLING_DURATION,
+        format_window_table, frame_interval, parse_weave_tmux_session,
+        parse_weave_tmux_session_for_display, validate_session_name, App, Args, AttachArgs,
+        BackendKind, ExitState, LaunchArgs, WindowRow, CLOSE_PANE_DURATION,
+        FOCUS_BORDER_TWEEN_DURATION, OPEN_NEW_PANE_DURATION, OPEN_SIBLING_DURATION,
     };
     use crate::anim::tween::Easing;
     use crate::backend::tmux::layout::LayoutAst;
@@ -2274,12 +2384,14 @@ mod tests {
         external_panes: HashMap<u64, PaneId>,
         resized: Arc<Mutex<Vec<(PaneId, u16, u16)>>>,
         selected_windows: Arc<Mutex<Vec<usize>>>,
+        selected_window_ids: Arc<Mutex<Vec<u64>>>,
     }
 
     #[derive(Clone, Default)]
     struct MockBackendHandle {
         resized: Arc<Mutex<Vec<(PaneId, u16, u16)>>>,
         selected_windows: Arc<Mutex<Vec<usize>>>,
+        selected_window_ids: Arc<Mutex<Vec<u64>>>,
     }
 
     impl MockBackendHandle {
@@ -2289,6 +2401,10 @@ mod tests {
 
         fn selected_windows(&self) -> Vec<usize> {
             lock_selected_windows(&self.selected_windows).clone()
+        }
+
+        fn selected_window_ids(&self) -> Vec<u64> {
+            lock_selected_window_ids(&self.selected_window_ids).clone()
         }
 
         fn clear_resized(&self) {
@@ -2313,6 +2429,7 @@ mod tests {
                 external_panes,
                 resized: Arc::clone(&handle.resized),
                 selected_windows: Arc::clone(&handle.selected_windows),
+                selected_window_ids: Arc::clone(&handle.selected_window_ids),
             }),
             handle,
         )
@@ -2322,6 +2439,14 @@ mod tests {
         resized: &Mutex<Vec<(PaneId, u16, u16)>>,
     ) -> std::sync::MutexGuard<'_, Vec<(PaneId, u16, u16)>> {
         resized
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_selected_window_ids(
+        selected_window_ids: &Mutex<Vec<u64>>,
+    ) -> std::sync::MutexGuard<'_, Vec<u64>> {
+        selected_window_ids
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -2365,6 +2490,11 @@ mod tests {
 
         async fn select_window(&mut self, workspace_idx: usize) -> Result<(), Error> {
             lock_selected_windows(&self.selected_windows).push(workspace_idx);
+            Ok(())
+        }
+
+        async fn select_window_by_id(&mut self, window_id: u64) -> Result<(), Error> {
+            lock_selected_window_ids(&self.selected_window_ids).push(window_id);
             Ok(())
         }
 
@@ -2917,6 +3047,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn goto_window_with_mapped_window_id_selects_backend_window_by_id() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let _ = app.tmux_windows.on_window_add(101, 1);
+
+        app.execute(Command::GotoWindow(101))
+            .await
+            .expect("goto-window succeeds");
+
+        assert_eq!(handle.selected_window_ids(), vec![101]);
+    }
+
+    #[tokio::test]
+    async fn goto_window_with_unknown_window_id_is_noop() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let _ = app.tmux_windows.on_window_add(101, 1);
+
+        app.execute(Command::GotoWindow(999))
+            .await
+            .expect("unknown goto-window is ignored");
+
+        assert!(handle.selected_window_ids().is_empty());
+    }
+
+    #[tokio::test]
     async fn switch_workspace_round_trip_keeps_existing_panes() {
         let (backend, _handle) = mock_backend(PaneId(2));
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
@@ -3088,6 +3244,24 @@ mod tests {
     }
 
     #[test]
+    fn launch_args_parse_ls_windows_flag() {
+        assert_eq!(
+            LaunchArgs::parse(["ls"]).expect("launch args parse"),
+            LaunchArgs::ListSessions { windows: false }
+        );
+        assert_eq!(
+            LaunchArgs::parse(["ls", "--windows"]).expect("launch args parse"),
+            LaunchArgs::ListSessions { windows: true }
+        );
+    }
+
+    #[test]
+    fn launch_args_reject_bad_ls_windows_usage() {
+        assert!(LaunchArgs::parse(["ls", "--windows=foo"]).is_err());
+        assert!(LaunchArgs::parse(["ls", "foo", "--windows"]).is_err());
+    }
+
+    #[test]
     fn launch_args_parse_bare_variant() {
         match LaunchArgs::parse(["--bare", "--session", "foo", "--backend", "tmux"])
             .expect("launch args parse")
@@ -3113,6 +3287,42 @@ mod tests {
             .to_string();
 
         assert!(error.contains("wv attach [name]"));
+    }
+
+    #[test]
+    fn format_window_table_tags_workspace_and_overflow_windows() {
+        let table = format_window_table(
+            "weave-test",
+            &[
+                WindowRow {
+                    window_index: 1,
+                    window_id: 101,
+                    name: "editor".to_owned(),
+                },
+                WindowRow {
+                    window_index: 10,
+                    window_id: 110,
+                    name: "logs".to_owned(),
+                },
+            ],
+        );
+
+        assert!(table.contains("windows for weave-test"));
+        let editor_line = table
+            .lines()
+            .find(|line| line.contains("editor"))
+            .expect("editor window row");
+        let logs_line = table
+            .lines()
+            .find(|line| line.contains("logs"))
+            .expect("logs window row");
+
+        assert!(editor_line.contains("1"));
+        assert!(editor_line.contains("@101"));
+        assert!(editor_line.contains("[ws 0]"));
+        assert!(logs_line.contains("10"));
+        assert!(logs_line.contains("@110"));
+        assert!(logs_line.contains("[overflow]"));
     }
 
     #[test]

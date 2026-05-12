@@ -204,7 +204,9 @@ async fn main() -> anyhow::Result<()> {
     let launch_args = weave::app::LaunchArgs::parse_env()?;
     init_tracing()?;
     let app = match launch_args {
-        weave::app::LaunchArgs::ListSessions => return weave::app::print_weave_sessions(),
+        weave::app::LaunchArgs::ListSessions { windows } => {
+            return weave::app::print_weave_sessions(windows);
+        }
         weave::app::LaunchArgs::Bare(args) => {
             return weave::app::App::create_bare(args).await;
         }
