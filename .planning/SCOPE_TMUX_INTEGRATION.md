@@ -190,7 +190,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - **Forbidden**: renaming or killing the session weave is attached to.
   - **Accept:** doc exists; each safe command has a one-liner example.
 
-- [ ] **D.2 Example bootstrap script** — *Claude* — `docs/examples/weave-bootstrap.sh`
+- [x] **D.2 Example bootstrap script** — *Claude* — `docs/examples/weave-bootstrap.sh`
   - A port of the user's `~/Documents/scripts/tmux.sh` style: creates 4 named windows (Code / Terminal / Agents1 / Agents2), each with appropriate splits.
   - Uses `wv --session main --bare &` then drives the layout via `tmux` commands, then `exec wv attach main` to take over.
   - **Accept:** running the script produces a weave instance with the documented layout.
@@ -352,7 +352,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] C.3 `%session-window-changed` / window-active tracking
 - [x] C.4 Overflow handling (windows 10+)
 - [x] D.1 Document safe-command contract
-- [ ] D.2 Example bootstrap script
+- [x] D.2 Example bootstrap script
 - [ ] D.3 `wv exec` passthrough
 - [ ] E.1 Backend parity test extension
 - [ ] E.2 Script-driven integration test
