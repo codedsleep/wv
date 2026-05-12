@@ -205,6 +205,9 @@ async fn main() -> anyhow::Result<()> {
     init_tracing()?;
     let app = match launch_args {
         weave::app::LaunchArgs::ListSessions => return weave::app::print_weave_sessions(),
+        weave::app::LaunchArgs::Bare(args) => {
+            return weave::app::App::create_bare(args).await;
+        }
         weave::app::LaunchArgs::Run(args) => {
             install_panic_hook();
             let (width, height) = crossterm::terminal::size()?;

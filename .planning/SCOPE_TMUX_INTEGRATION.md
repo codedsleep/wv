@@ -83,7 +83,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - `wv ls` filter loosens to "any session weave created" via a marker `@weave-instance` tmux user option set at spawn (`set -t <name> -g @weave-instance 1`).
   - **Accept:** `wv --session foo` starts; `wv ls` lists it even though name lacks `weave-` prefix; `wv --session "foo;rm -rf /"` rejects with a typed error (no shell-out); `wv --session foo` while one runs errors clearly.
 
-- [ ] **A.2 `--bare` / `--no-attach` mode** — *Codex* — `src/main.rs`, `src/app.rs`
+- [x] **A.2 `--bare` / `--no-attach` mode** — *Codex* — `src/main.rs`, `src/app.rs`
   - `wv --session foo --bare` creates the tmux session, sets `@weave-instance`, disables tmux chrome, **does not spawn a default pane**, and exits — leaving the session ready for a script to populate.
   - `wv attach foo` then attaches and reconciles whatever the script built.
   - **Accept:** `wv --session demo --bare && tmux split-window -t demo && tmux split-window -h -t demo && wv attach demo` shows the script-built layout.
@@ -332,7 +332,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 ## Quick checklist (flat view)
 
 - [x] A.1 `--session <name>` flag
-- [ ] A.2 `--bare` / `--no-attach` mode
+- [x] A.2 `--bare` / `--no-attach` mode
 - [ ] A.3 Tmux layout-string parser
 - [ ] A.4 LayoutChange / WindowAdd / WindowClose payload decode
 - [ ] A.5 Property tests for layout parser

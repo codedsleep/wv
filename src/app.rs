@@ -159,6 +159,7 @@ pub struct Args {
     pub debug: bool,
     pub backend: BackendKind,
     pub session_name: Option<String>,
+    pub bare: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -169,6 +170,7 @@ pub struct AttachArgs {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LaunchArgs {
     Run(Args),
+    Bare(Args),
     Attach(AttachArgs),
     ListSessions,
 }
@@ -198,6 +200,12 @@ impl Args {
 
             if arg == "--debug" {
                 parsed.debug = true;
+            } else if arg == "--bare" || arg == "--no-attach" {
+                parsed.bare = true;
+            } else if arg.starts_with("--bare=") {
+                bail!("`--bare` does not accept a value");
+            } else if arg.starts_with("--no-attach=") {
+                bail!("`--no-attach` does not accept a value");
             } else if arg == "--backend" {
                 let Some(value) = args.next() else {
                     bail!("missing value for `--backend`; expected `native` or `tmux`");
@@ -222,6 +230,18 @@ impl Args {
             } else {
                 bail!("unknown argument `{arg}`");
             }
+        }
+
+        if parsed.bare && parsed.backend == BackendKind::Native {
+            bail!(
+                "--bare requires --backend tmux; native backend has no persistent session to leave behind"
+            );
+        }
+
+        if parsed.bare && parsed.session_name.is_none() {
+            bail!(
+                "--bare requires an explicit --session <name>; auto-generated names defeat the purpose of bare mode"
+            );
         }
 
         Ok(parsed)
@@ -297,7 +317,12 @@ impl LaunchArgs {
             _ => {}
         }
 
-        Ok(Self::Run(Args::parse(args)?))
+        let args = Args::parse(args)?;
+        if args.bare {
+            Ok(Self::Bare(args))
+        } else {
+            Ok(Self::Run(args))
+        }
     }
 }
 
@@ -319,6 +344,21 @@ impl App {
 
         app.resize_attached_panes(&pane_ids).await?;
         Ok(app)
+    }
+
+    pub async fn create_bare(args: Args) -> anyhow::Result<()> {
+        if args.backend != BackendKind::Tmux {
+            bail!("--bare requires --backend tmux; native backend has no persistent session to leave behind");
+        }
+
+        let session_name = args.session_name.clone().with_context(|| {
+            "--bare requires an explicit --session <name>; auto-generated names defeat the purpose of bare mode"
+        })?;
+        let mut backend_parts = build_backend(args.backend, args.session_name).await?;
+        backend_parts.backend.detach().await?;
+        println!("{session_name}");
+
+        Ok(())
     }
 
     fn from_backend(
@@ -1902,6 +1942,7 @@ mod tests {
                 debug: false,
                 backend: BackendKind::Native,
                 session_name: None,
+                bare: false,
             }
         );
     }
@@ -1914,6 +1955,7 @@ mod tests {
                 debug: true,
                 backend: BackendKind::Tmux,
                 session_name: None,
+                bare: false,
             }
         );
         assert_eq!(
@@ -1966,6 +2008,49 @@ mod tests {
     }
 
     #[test]
+    fn args_parse_bare_mode() {
+        let args =
+            Args::parse(["--bare", "--session", "foo", "--backend", "tmux"]).expect("args parse");
+
+        assert!(args.bare);
+        assert_eq!(args.session_name, Some("foo".to_owned()));
+        assert_eq!(args.backend, BackendKind::Tmux);
+    }
+
+    #[test]
+    fn args_parse_no_attach_alias() {
+        let args = Args::parse(["--no-attach", "--session", "foo", "--backend", "tmux"])
+            .expect("args parse");
+
+        assert!(args.bare);
+        assert_eq!(args.session_name, Some("foo".to_owned()));
+        assert_eq!(args.backend, BackendKind::Tmux);
+    }
+
+    #[test]
+    fn args_reject_bare_with_native_backend() {
+        let error = Args::parse(["--bare", "--session", "foo"])
+            .expect_err("bare native should fail")
+            .to_string();
+
+        assert!(error.contains("requires --backend tmux"));
+    }
+
+    #[test]
+    fn args_reject_bare_without_session() {
+        let error = Args::parse(["--bare", "--backend", "tmux"])
+            .expect_err("bare without session should fail")
+            .to_string();
+
+        assert!(error.contains("requires an explicit --session"));
+    }
+
+    #[test]
+    fn args_reject_bare_value() {
+        assert!(Args::parse(["--bare=true", "--session", "foo", "--backend", "tmux"]).is_err());
+    }
+
+    #[test]
     fn launch_args_parse_attach_subcommand() {
         assert_eq!(
             LaunchArgs::parse(["attach", "weave-test"]).expect("launch args parse"),
@@ -1973,6 +2058,20 @@ mod tests {
                 session_name: Some("weave-test".to_owned()),
             })
         );
+    }
+
+    #[test]
+    fn launch_args_parse_bare_variant() {
+        match LaunchArgs::parse(["--bare", "--session", "foo", "--backend", "tmux"])
+            .expect("launch args parse")
+        {
+            LaunchArgs::Bare(args) => {
+                assert!(args.bare);
+                assert_eq!(args.session_name, Some("foo".to_owned()));
+                assert_eq!(args.backend, BackendKind::Tmux);
+            }
+            other => panic!("expected bare launch args, got {other:?}"),
+        }
     }
 
     #[test]
