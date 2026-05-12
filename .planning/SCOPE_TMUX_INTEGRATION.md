@@ -162,7 +162,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - On `%window-close`: free the slot; if it was the current workspace, fall back to lowest non-empty workspace.
   - **Accept:** unit tests for the mapping table; integration test — `tmux new-window -t <session>:2` populates workspace 1 (zero-indexed).
 
-- [ ] **C.2 `SwitchWorkspace` → `select-window`** — *Codex* — `src/app.rs:394` (extend existing `switch_workspace`)
+- [x] **C.2 `SwitchWorkspace` → `select-window`** — *Codex* — `src/app.rs:394` (extend existing `switch_workspace`)
   - When tmux backend active: emit `tmux select-window -t <session>:<index+1>` instead of in-memory toggle alone; the workspace switch completes when the resulting `%session-changed` / `%window-changed` arrives.
   - Native backend keeps its existing path unchanged.
   - **Accept:** `Alt+3` and `tmux select-window -t :3` produce identical user-observable state; external `prev-window` cycles through weave workspaces.
@@ -348,7 +348,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] B.5 Full re-attach reconciliation
 - [x] B.6 Conflict resolution policy
 - [x] C.1 Window-index ↔ workspace-index mapping
-- [ ] C.2 `SwitchWorkspace` → `select-window`
+- [x] C.2 `SwitchWorkspace` → `select-window`
 - [ ] C.3 `%session-changed` / window-active tracking
 - [ ] C.4 Overflow handling (windows 10+)
 - [ ] D.1 Document safe-command contract

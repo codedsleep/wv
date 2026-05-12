@@ -18,6 +18,7 @@ use crate::anim::tween::Easing;
 use crate::backend::native::NativeBackend;
 use crate::backend::tmux::layout::LayoutAst;
 use crate::backend::tmux::reconcile::{self, LayoutDelta, StructuralPath};
+use crate::backend::tmux::windows::{AddOutcome, WindowMap};
 use crate::backend::tmux::{TmuxBackend, TmuxInitialState};
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::Command;
@@ -118,7 +119,7 @@ pub struct App {
     panes: Vec<Pane>,
     workspaces: Vec<Workspace>,
     current_workspace: usize,
-    tmux_window_workspaces: HashMap<u64, usize>,
+    tmux_windows: WindowMap,
     external_in_flight: HashSet<usize>,
     external_animation_panes: HashMap<usize, HashSet<PaneId>>,
     pending_internal_commands: VecDeque<(usize, Command)>,
@@ -410,7 +411,7 @@ impl App {
                 .collect(),
             workspaces,
             current_workspace: 0,
-            tmux_window_workspaces: HashMap::new(),
+            tmux_windows: WindowMap::new(),
             external_in_flight: HashSet::new(),
             external_animation_panes: HashMap::new(),
             pending_internal_commands: VecDeque::new(),
@@ -483,6 +484,10 @@ impl App {
         let target = usize::from(number) - 1;
         if target == self.current_workspace {
             return Ok(());
+        }
+
+        if self.backend_kind == BackendKind::Tmux {
+            self.backend.select_window(target).await?;
         }
 
         // Snap any inflight animations on the outgoing workspace so its layout
@@ -721,7 +726,7 @@ impl App {
             self.ensure_pane_registered(pane_id);
         }
 
-        self.tmux_window_workspaces.clear();
+        self.tmux_windows = WindowMap::new();
         for workspace in &mut self.workspaces {
             workspace.root = None;
             workspace.focused = None;
@@ -729,22 +734,25 @@ impl App {
         }
 
         for window in initial_state.windows {
-            let Some(workspace_idx) = workspace_index_from_tmux_window_index(window.window_index)
-            else {
-                tracing::debug!(
-                    window_id = window.window_id,
-                    window_index = window.window_index,
-                    "skipping tmux window outside workspace range"
-                );
-                continue;
+            let workspace_idx = match self
+                .tmux_windows
+                .on_window_add(window.window_id, usize::from(window.window_index))
+            {
+                AddOutcome::Assigned(workspace_idx) => workspace_idx,
+                AddOutcome::Overflow => {
+                    tracing::debug!(
+                        window_id = window.window_id,
+                        window_index = window.window_index,
+                        "skipping tmux window outside workspace range"
+                    );
+                    continue;
+                }
             };
 
             let layout = self.translate_external_layout_panes(window.layout).await?;
             let normalized = reconcile::normalize(layout);
             let root = node_from_layout_ast(&normalized, None, &mut Vec::new());
 
-            self.tmux_window_workspaces
-                .insert(window.window_id, workspace_idx);
             let ws = &mut self.workspaces[workspace_idx];
             ws.focused = first_leaf_pane(&root);
             ws.root = Some(root);
@@ -819,9 +827,8 @@ impl App {
     }
 
     fn workspace_for_tmux_window(&self, window_id: u64) -> usize {
-        self.tmux_window_workspaces
-            .get(&window_id)
-            .copied()
+        self.tmux_windows
+            .workspace_for_window(window_id)
             .unwrap_or(0)
     }
 
@@ -1584,7 +1591,7 @@ impl App {
             panes: vec![Pane::new(pane_id, width, height)],
             workspaces,
             current_workspace: 0,
-            tmux_window_workspaces: HashMap::new(),
+            tmux_windows: WindowMap::new(),
             external_in_flight: HashSet::new(),
             external_animation_panes: HashMap::new(),
             pending_internal_commands: VecDeque::new(),
@@ -1982,11 +1989,6 @@ fn rewrite_layout_pane_ids(ast: LayoutAst, pane_ids: &HashMap<u64, u64>) -> Layo
     }
 }
 
-fn workspace_index_from_tmux_window_index(window_index: u8) -> Option<usize> {
-    let workspace_idx = usize::from(window_index.saturating_sub(1));
-    (workspace_idx < WORKSPACE_COUNT).then_some(workspace_idx)
-}
-
 fn is_layout_mutating_command(command: Command) -> bool {
     matches!(command, Command::SplitH | Command::SplitV | Command::Close)
 }
@@ -2240,16 +2242,22 @@ mod tests {
         external_next_id: u64,
         external_panes: HashMap<u64, PaneId>,
         resized: Arc<Mutex<Vec<(PaneId, u16, u16)>>>,
+        selected_windows: Arc<Mutex<Vec<usize>>>,
     }
 
     #[derive(Clone, Default)]
     struct MockBackendHandle {
         resized: Arc<Mutex<Vec<(PaneId, u16, u16)>>>,
+        selected_windows: Arc<Mutex<Vec<usize>>>,
     }
 
     impl MockBackendHandle {
         fn resized(&self) -> Vec<(PaneId, u16, u16)> {
             lock_resized(&self.resized).clone()
+        }
+
+        fn selected_windows(&self) -> Vec<usize> {
+            lock_selected_windows(&self.selected_windows).clone()
         }
 
         fn clear_resized(&self) {
@@ -2273,6 +2281,7 @@ mod tests {
                 external_next_id,
                 external_panes,
                 resized: Arc::clone(&handle.resized),
+                selected_windows: Arc::clone(&handle.selected_windows),
             }),
             handle,
         )
@@ -2282,6 +2291,14 @@ mod tests {
         resized: &Mutex<Vec<(PaneId, u16, u16)>>,
     ) -> std::sync::MutexGuard<'_, Vec<(PaneId, u16, u16)>> {
         resized
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_selected_windows(
+        selected_windows: &Mutex<Vec<usize>>,
+    ) -> std::sync::MutexGuard<'_, Vec<usize>> {
+        selected_windows
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -2312,6 +2329,11 @@ mod tests {
         }
 
         async fn kill(&mut self, _id: PaneId) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn select_window(&mut self, workspace_idx: usize) -> Result<(), Error> {
+            lock_selected_windows(&self.selected_windows).push(workspace_idx);
             Ok(())
         }
 
@@ -2714,9 +2736,9 @@ mod tests {
             app.pane_ids(),
             vec![PaneId(1), PaneId(2), PaneId(3), PaneId(4), PaneId(5)]
         );
-        assert_eq!(app.tmux_window_workspaces.get(&101), Some(&0));
-        assert_eq!(app.tmux_window_workspaces.get(&102), Some(&1));
-        assert_eq!(app.tmux_window_workspaces.get(&103), Some(&2));
+        assert_eq!(app.tmux_windows.workspace_for_window(101), Some(0));
+        assert_eq!(app.tmux_windows.workspace_for_window(102), Some(1));
+        assert_eq!(app.tmux_windows.workspace_for_window(103), Some(2));
         assert!(app.timeline.is_idle());
         assert!(handle.resized().is_empty());
 
@@ -2809,6 +2831,20 @@ mod tests {
         // Workspace 1 (the original) keeps its pane.
         assert!(app.workspaces[0].root.is_some());
         assert!(app.workspaces[0].focused.is_some());
+    }
+
+    #[tokio::test]
+    async fn switch_workspace_on_tmux_backend_selects_tmux_window() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.backend_kind = BackendKind::Tmux;
+
+        app.execute(Command::SwitchWorkspace(3))
+            .await
+            .expect("switch succeeds");
+
+        assert_eq!(handle.selected_windows(), vec![2]);
+        assert_eq!(app.current_workspace, 2);
     }
 
     #[tokio::test]

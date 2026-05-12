@@ -55,6 +55,10 @@ pub trait PaneBackend: Send {
         Ok(())
     }
 
+    async fn select_window(&mut self, _workspace_idx: usize) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+
     /// Query the current working directory of a pane.
     ///
     /// Default: returns `Ok(None)` for backends that can't introspect their child shell.

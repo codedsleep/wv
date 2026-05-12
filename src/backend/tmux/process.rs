@@ -351,6 +351,15 @@ impl TmuxBackend {
         maps.tmux_for_pane(pane_id)
             .with_context(|| format!("unknown pane id {pane_id:?}"))
     }
+
+    pub async fn select_window(&mut self, workspace_idx: usize) -> Result<(), Error> {
+        let command = format!(
+            "select-window -t {}",
+            quote_tmux_arg(&format!("{}:{}", self.session_name, workspace_idx + 1))
+        );
+        let response = self.send_command(&command).await?;
+        ensure_success(&response)
+    }
 }
 
 #[async_trait::async_trait]
@@ -420,6 +429,10 @@ impl PaneBackend for TmuxBackend {
         self.write_command("detach-client")?;
         self.detached = true;
         Ok(())
+    }
+
+    async fn select_window(&mut self, workspace_idx: usize) -> Result<(), Error> {
+        TmuxBackend::select_window(self, workspace_idx).await
     }
 
     async fn ingest_external_pane(&mut self, tmux_pane_id: u64) -> Result<PaneId, Error> {
