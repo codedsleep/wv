@@ -42,11 +42,12 @@ pub enum LayoutDelta {
 }
 
 pub fn diff(old: &layout::tree::Node, new: &LayoutAst) -> Vec<LayoutDelta> {
+    let new = normalize(new.clone());
     let mut deltas = Vec::new();
     let old_leaves = old_leaf_infos(old);
-    let new_leaves = new_leaf_infos(new);
+    let new_leaves = new_leaf_infos(&new);
 
-    diff_shape(old, new, &mut Vec::new(), &mut deltas);
+    diff_shape(old, &new, &mut Vec::new(), &mut deltas);
     diff_swaps(&old_leaves, &new_leaves, &mut deltas);
 
     for old_leaf in &old_leaves {
@@ -75,6 +76,87 @@ pub fn diff(old: &layout::tree::Node, new: &LayoutAst) -> Vec<LayoutDelta> {
     }
 
     deltas
+}
+
+pub fn normalize(ast: LayoutAst) -> LayoutAst {
+    match ast {
+        LayoutAst::Leaf { .. } => ast,
+        LayoutAst::Horizontal { rect, children } => {
+            normalize_group(rect, children, LayoutAstKind::Horizontal)
+        }
+        LayoutAst::Vertical { rect, children } => {
+            normalize_group(rect, children, LayoutAstKind::Vertical)
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+enum LayoutAstKind {
+    Horizontal,
+    Vertical,
+}
+
+fn normalize_group(rect: Rect, children: Vec<LayoutAst>, kind: LayoutAstKind) -> LayoutAst {
+    let children: Vec<_> = children.into_iter().map(normalize).collect();
+    if children.len() <= 2 {
+        return group(kind, rect, children);
+    }
+
+    let mut iter = children.into_iter();
+    let first = iter
+        .next()
+        .expect("len checked above; N-ary group has a first child");
+    let rest: Vec<_> = iter.collect();
+    let rest_rect = cumulative_rect(kind, &rest);
+    group(
+        kind,
+        rect,
+        vec![first, normalize_group(rest_rect, rest, kind)],
+    )
+}
+
+fn group(kind: LayoutAstKind, rect: Rect, children: Vec<LayoutAst>) -> LayoutAst {
+    match kind {
+        LayoutAstKind::Horizontal => LayoutAst::Horizontal { rect, children },
+        LayoutAstKind::Vertical => LayoutAst::Vertical { rect, children },
+    }
+}
+
+fn cumulative_rect(kind: LayoutAstKind, children: &[LayoutAst]) -> Rect {
+    let mut rect = children
+        .first()
+        .expect("right-leaning normalization only builds non-empty rest groups")
+        .rect();
+
+    for child in &children[1..] {
+        let child_rect = child.rect();
+        match kind {
+            LayoutAstKind::Horizontal => {
+                let right = rect_right(rect).max(rect_right(child_rect));
+                rect.x = rect.x.min(child_rect.x);
+                rect.w = right.saturating_sub(rect.x);
+                rect.y = rect.y.min(child_rect.y);
+                rect.h = rect.h.max(child_rect.h);
+            }
+            LayoutAstKind::Vertical => {
+                let bottom = rect_bottom(rect).max(rect_bottom(child_rect));
+                rect.y = rect.y.min(child_rect.y);
+                rect.h = bottom.saturating_sub(rect.y);
+                rect.x = rect.x.min(child_rect.x);
+                rect.w = rect.w.max(child_rect.w);
+            }
+        }
+    }
+
+    rect
+}
+
+fn rect_right(rect: Rect) -> u16 {
+    rect.x.saturating_add(rect.w)
+}
+
+fn rect_bottom(rect: Rect) -> u16 {
+    rect.y.saturating_add(rect.h)
 }
 
 fn diff_shape(
@@ -286,7 +368,7 @@ impl LayoutAstExt for LayoutAst {
 
 #[cfg(test)]
 mod tests {
-    use super::{diff, LayoutDelta};
+    use super::{diff, normalize, split_ratio, LayoutAstExt, LayoutDelta};
     use crate::backend::tmux::layout::LayoutAst;
     use crate::backend::PaneId;
     use crate::layout::geometry::{FRect, Rect, Split};
@@ -326,6 +408,42 @@ mod tests {
         LayoutAst::Leaf { pane_id: id, rect }
     }
 
+    fn pane_ids(ast: &LayoutAst, out: &mut Vec<u64>) {
+        match ast {
+            LayoutAst::Leaf { pane_id, .. } => out.push(*pane_id),
+            LayoutAst::Horizontal { children, .. } | LayoutAst::Vertical { children, .. } => {
+                for child in children {
+                    pane_ids(child, out);
+                }
+            }
+        }
+    }
+
+    fn assert_rect_within_one_cell(left: Rect, right: Rect) {
+        assert!(left.x.abs_diff(right.x) <= 1, "{left:?} != {right:?}");
+        assert!(left.y.abs_diff(right.y) <= 1, "{left:?} != {right:?}");
+        assert!(left.w.abs_diff(right.w) <= 1, "{left:?} != {right:?}");
+        assert!(left.h.abs_diff(right.h) <= 1, "{left:?} != {right:?}");
+    }
+
+    fn assert_ratio_rects_match_children(ast: &LayoutAst) {
+        match ast {
+            LayoutAst::Leaf { .. } => {}
+            LayoutAst::Horizontal { children, .. } | LayoutAst::Vertical { children, .. } => {
+                let [first, second] = children.as_slice() else {
+                    panic!("normalized groups should be binary");
+                };
+                let (split, ratio) = split_ratio(ast).expect("group has a ratio");
+                let (first_rect, second_rect) = ast.rect().split(split, ratio);
+
+                assert_rect_within_one_cell(first_rect, first.rect());
+                assert_rect_within_one_cell(second_rect, second.rect());
+                assert_ratio_rects_match_children(first);
+                assert_ratio_rects_match_children(second);
+            }
+        }
+    }
+
     #[test]
     fn pure_split_from_one_leaf_to_two() {
         let old = old_leaf(1, ROOT);
@@ -352,6 +470,46 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn four_pane_horizontal_layout_normalizes_to_right_leaning_bsp() {
+        let raw = LayoutAst::Horizontal {
+            rect: ROOT,
+            children: vec![
+                new_leaf(1, rect(0, 0, 20, 24)),
+                new_leaf(2, rect(20, 0, 20, 24)),
+                new_leaf(3, rect(40, 0, 20, 24)),
+                new_leaf(4, rect(60, 0, 20, 24)),
+            ],
+        };
+        let expected = LayoutAst::Horizontal {
+            rect: ROOT,
+            children: vec![
+                new_leaf(1, rect(0, 0, 20, 24)),
+                LayoutAst::Horizontal {
+                    rect: rect(20, 0, 60, 24),
+                    children: vec![
+                        new_leaf(2, rect(20, 0, 20, 24)),
+                        LayoutAst::Horizontal {
+                            rect: rect(40, 0, 40, 24),
+                            children: vec![
+                                new_leaf(3, rect(40, 0, 20, 24)),
+                                new_leaf(4, rect(60, 0, 20, 24)),
+                            ],
+                        },
+                    ],
+                },
+            ],
+        };
+
+        let normalized = normalize(raw);
+        let mut ids = Vec::new();
+        pane_ids(&normalized, &mut ids);
+
+        assert_eq!(normalized, expected);
+        assert_eq!(ids, vec![1, 2, 3, 4]);
+        assert_ratio_rects_match_children(&normalized);
     }
 
     #[test]
