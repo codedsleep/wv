@@ -14,6 +14,7 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
+use super::layout::{parse_layout, LayoutAst};
 use super::parser::{CommandResponse, CommandResponseStatus, Parser, TmuxNotification};
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 
@@ -93,6 +94,25 @@ pub struct TmuxBackend {
     owns_session: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TmuxInitialState {
+    pub windows: Vec<TmuxInitialWindow>,
+    pub panes: Vec<TmuxInitialPane>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TmuxInitialWindow {
+    pub window_id: u64,
+    pub window_index: u8,
+    pub layout: LayoutAst,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TmuxInitialPane {
+    pub tmux_id: TmuxPaneId,
+    pub pid: u32,
+}
+
 impl TmuxBackend {
     pub async fn new(
         session_name: Option<String>,
@@ -154,19 +174,6 @@ impl TmuxBackend {
         let mut backend = Self::from_child(session_name, child, output_tx, event_tx, false)?;
         backend.configure_session().await?;
 
-        let tmux_ids = backend.list_session_panes().await?;
-        if tmux_ids.is_empty() {
-            bail!(
-                "tmux session `{}` has no panes to attach",
-                backend.session_name
-            );
-        }
-
-        for tmux_id in tmux_ids {
-            let pane_id = backend.allocate_id();
-            backend.register_mapping(pane_id, tmux_id).await;
-        }
-
         Ok(backend)
     }
 
@@ -181,6 +188,20 @@ impl TmuxBackend {
         };
         pane_ids.sort_by_key(|pane| pane.0);
         pane_ids
+    }
+
+    pub async fn initial_state(&mut self) -> Result<TmuxInitialState, Error> {
+        let windows = self.list_session_windows().await?;
+        let panes = self.list_session_pane_details().await?;
+
+        if panes.is_empty() {
+            bail!(
+                "tmux session `{}` has no panes to attach",
+                self.session_name
+            );
+        }
+
+        Ok(TmuxInitialState { windows, panes })
     }
 
     fn from_child(
@@ -267,6 +288,30 @@ impl TmuxBackend {
             }
             ensure_success(&response)?;
         }
+    }
+
+    async fn list_session_windows(&mut self) -> Result<Vec<TmuxInitialWindow>, Error> {
+        let response = self
+            .send_command(&format!(
+                "list-windows -t {} -F {}",
+                quote_tmux_arg(&self.session_name),
+                quote_tmux_arg("#{window_id}\t#{window_index}\t#{window_layout}")
+            ))
+            .await?;
+        ensure_success(&response)?;
+        parse_initial_windows(&response_message(&response))
+    }
+
+    async fn list_session_pane_details(&mut self) -> Result<Vec<TmuxInitialPane>, Error> {
+        let response = self
+            .send_command(&format!(
+                "list-panes -s -t {} -F {}",
+                quote_tmux_arg(&self.session_name),
+                quote_tmux_arg("#{pane_id}\t#{pane_pid}")
+            ))
+            .await?;
+        ensure_success(&response)?;
+        parse_initial_panes(&response_message(&response))
     }
 
     fn allocate_id(&mut self) -> PaneId {
@@ -678,6 +723,59 @@ fn parse_tmux_pane_id(line: &str) -> Option<TmuxPaneId> {
     let raw = line.trim();
     let id = raw.strip_prefix('%')?.parse().ok()?;
     Some(TmuxPaneId(id))
+}
+
+fn parse_initial_windows(output: &str) -> Result<Vec<TmuxInitialWindow>, Error> {
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(parse_initial_window_row)
+        .collect()
+}
+
+fn parse_initial_window_row(line: &str) -> Result<TmuxInitialWindow, Error> {
+    let fields: Vec<_> = line.splitn(3, '\t').collect();
+    let [window_id, window_index, raw_layout] = fields.as_slice() else {
+        bail!("malformed tmux list-windows row: {line:?}");
+    };
+    let window_id = window_id
+        .strip_prefix('@')
+        .with_context(|| format!("malformed tmux window id in row: {line:?}"))?
+        .parse::<u64>()
+        .with_context(|| format!("invalid tmux window id in row: {line:?}"))?;
+    let window_index = window_index
+        .parse::<u8>()
+        .with_context(|| format!("invalid tmux window index in row: {line:?}"))?;
+    let layout = parse_layout(raw_layout)
+        .with_context(|| format!("invalid tmux layout in row: {line:?}"))?;
+
+    Ok(TmuxInitialWindow {
+        window_id,
+        window_index,
+        layout,
+    })
+}
+
+fn parse_initial_panes(output: &str) -> Result<Vec<TmuxInitialPane>, Error> {
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(parse_initial_pane_row)
+        .collect()
+}
+
+fn parse_initial_pane_row(line: &str) -> Result<TmuxInitialPane, Error> {
+    let fields: Vec<_> = line.splitn(2, '\t').collect();
+    let [pane_id, pid] = fields.as_slice() else {
+        bail!("malformed tmux list-panes row: {line:?}");
+    };
+    let tmux_id = parse_tmux_pane_id(pane_id)
+        .with_context(|| format!("invalid tmux pane id in row: {line:?}"))?;
+    let pid = pid
+        .parse::<u32>()
+        .with_context(|| format!("invalid tmux pane pid in row: {line:?}"))?;
+
+    Ok(TmuxInitialPane { tmux_id, pid })
 }
 
 fn split_window_command(cmd: &PaneCommand) -> String {

@@ -18,7 +18,7 @@ use crate::anim::tween::Easing;
 use crate::backend::native::NativeBackend;
 use crate::backend::tmux::layout::LayoutAst;
 use crate::backend::tmux::reconcile::{self, LayoutDelta, StructuralPath};
-use crate::backend::tmux::TmuxBackend;
+use crate::backend::tmux::{TmuxBackend, TmuxInitialState};
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::Command;
 use crate::config::{Config, ThemeConfig};
@@ -118,6 +118,7 @@ pub struct App {
     panes: Vec<Pane>,
     workspaces: Vec<Workspace>,
     current_workspace: usize,
+    tmux_window_workspaces: HashMap<u64, usize>,
     resize_mode: ResizeMode,
     backend_kind: BackendKind,
     backend: BoxedBackend,
@@ -341,9 +342,11 @@ impl App {
     }
 
     pub async fn attach(width: u16, height: u16, args: AttachArgs) -> anyhow::Result<Self> {
-        let (backend_parts, pane_ids) = build_attach_backend(args.session_name).await?;
-        let mut app = Self::from_backend(width, height, false, backend_parts, pane_ids.clone());
+        let (backend_parts, initial_state) = build_attach_backend(args.session_name).await?;
+        let mut app = Self::from_backend(width, height, false, backend_parts, Vec::new());
 
+        app.hydrate_attached_tmux_state(initial_state).await?;
+        let pane_ids = app.pane_ids();
         app.resize_attached_panes(&pane_ids).await?;
         Ok(app)
     }
@@ -404,6 +407,7 @@ impl App {
                 .collect(),
             workspaces,
             current_workspace: 0,
+            tmux_window_workspaces: HashMap::new(),
             resize_mode: ResizeMode::Normal,
             backend_kind: backend_parts.kind,
             backend: backend_parts.backend,
@@ -680,6 +684,61 @@ impl App {
         Ok(())
     }
 
+    async fn hydrate_attached_tmux_state(
+        &mut self,
+        initial_state: TmuxInitialState,
+    ) -> anyhow::Result<()> {
+        for pane in &initial_state.panes {
+            let pane_id = self.backend.ingest_external_pane(pane.tmux_id.0).await?;
+            self.ensure_pane_registered(pane_id);
+        }
+
+        self.tmux_window_workspaces.clear();
+        for workspace in &mut self.workspaces {
+            workspace.root = None;
+            workspace.focused = None;
+            workspace.closing.clear();
+        }
+
+        for window in initial_state.windows {
+            let Some(workspace_idx) = workspace_index_from_tmux_window_index(window.window_index)
+            else {
+                tracing::debug!(
+                    window_id = window.window_id,
+                    window_index = window.window_index,
+                    "skipping tmux window outside workspace range"
+                );
+                continue;
+            };
+
+            let layout = self.translate_external_layout_panes(window.layout).await?;
+            let normalized = reconcile::normalize(layout);
+            let root = node_from_layout_ast(&normalized, None, &mut Vec::new());
+
+            self.tmux_window_workspaces
+                .insert(window.window_id, workspace_idx);
+            let ws = &mut self.workspaces[workspace_idx];
+            ws.focused = first_leaf_pane(&root);
+            ws.root = Some(root);
+        }
+
+        if self.workspaces[self.current_workspace].root.is_none() {
+            self.current_workspace = self
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.root.is_some())
+                .unwrap_or(0);
+        }
+
+        self.timeline.clear_internal_ratio_tweens();
+        for pane in self.pane_ids() {
+            self.timeline.clear_pane_tweens(pane);
+        }
+        self.dirty = true;
+
+        Ok(())
+    }
+
     pub async fn apply_external_layout_change(
         &mut self,
         window_id: u64,
@@ -722,9 +781,11 @@ impl App {
         Ok(())
     }
 
-    fn workspace_for_tmux_window(&self, _window_id: u64) -> usize {
-        // TODO(C.1): replace this with tmux window id -> workspace mapping.
-        0
+    fn workspace_for_tmux_window(&self, window_id: u64) -> usize {
+        self.tmux_window_workspaces
+            .get(&window_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn install_external_layout_without_diff(&mut self, workspace_idx: usize, layout: &LayoutAst) {
@@ -1423,6 +1484,7 @@ impl App {
             panes: vec![Pane::new(pane_id, width, height)],
             workspaces,
             current_workspace: 0,
+            tmux_window_workspaces: HashMap::new(),
             resize_mode: ResizeMode::Normal,
             backend_kind: BackendKind::Native,
             backend,
@@ -1471,14 +1533,14 @@ async fn build_backend(
 
 async fn build_attach_backend(
     requested_session: Option<String>,
-) -> anyhow::Result<(BackendParts, Vec<PaneId>)> {
+) -> anyhow::Result<(BackendParts, TmuxInitialState)> {
     ensure_tmux_available()?;
 
     let session_name = resolve_attach_session(requested_session.as_deref())?;
     let (output_tx, output_rx) = mpsc::channel(OUTPUT_CHANNEL_CAPACITY);
     let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
-    let backend = TmuxBackend::attach(session_name, output_tx, event_tx).await?;
-    let pane_ids = backend.pane_ids();
+    let mut backend = TmuxBackend::attach(session_name, output_tx, event_tx).await?;
+    let initial_state = backend.initial_state().await?;
 
     Ok((
         BackendParts {
@@ -1487,7 +1549,7 @@ async fn build_attach_backend(
             output_rx,
             event_rx,
         },
-        pane_ids,
+        initial_state,
     ))
 }
 
@@ -1817,6 +1879,11 @@ fn rewrite_layout_pane_ids(ast: LayoutAst, pane_ids: &HashMap<u64, u64>) -> Layo
     }
 }
 
+fn workspace_index_from_tmux_window_index(window_index: u8) -> Option<usize> {
+    let workspace_idx = usize::from(window_index.saturating_sub(1));
+    (workspace_idx < WORKSPACE_COUNT).then_some(workspace_idx)
+}
+
 fn leaf_current_in(node: &Node, pane: PaneId) -> Option<FRect> {
     match node.find_leaf(pane)? {
         Node::Leaf { rect_current, .. } => Some(*rect_current),
@@ -2052,6 +2119,8 @@ mod tests {
     };
     use crate::anim::tween::Easing;
     use crate::backend::tmux::layout::LayoutAst;
+    use crate::backend::tmux::process::TmuxPaneId;
+    use crate::backend::tmux::{TmuxInitialPane, TmuxInitialState, TmuxInitialWindow};
     use crate::backend::{PaneBackend, PaneCommand, PaneId};
     use crate::command::Command;
     use crate::layout::geometry::{FRect, Rect, Split};
@@ -2400,6 +2469,101 @@ mod tests {
         assert!(app.panes.iter().any(|pane| pane.id() == PaneId(1)));
         assert!(!app.panes.iter().any(|pane| pane.id() == PaneId(2)));
         assert!(app.timeline.has_leaf_rect_tween(PaneId(1)));
+    }
+
+    #[tokio::test]
+    async fn hydrate_attached_tmux_state_builds_workspace_forest_without_animations() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let initial_state = TmuxInitialState {
+            windows: vec![
+                TmuxInitialWindow {
+                    window_id: 101,
+                    window_index: 1,
+                    layout: LayoutAst::Horizontal {
+                        rect: rect(0, 0, 80, 24),
+                        children: vec![
+                            layout_leaf(1, rect(0, 0, 40, 24)),
+                            layout_leaf(2, rect(40, 0, 40, 24)),
+                        ],
+                    },
+                },
+                TmuxInitialWindow {
+                    window_id: 102,
+                    window_index: 2,
+                    layout: LayoutAst::Vertical {
+                        rect: rect(0, 0, 80, 24),
+                        children: vec![
+                            layout_leaf(3, rect(0, 0, 80, 12)),
+                            layout_leaf(4, rect(0, 12, 80, 12)),
+                        ],
+                    },
+                },
+                TmuxInitialWindow {
+                    window_id: 103,
+                    window_index: 3,
+                    layout: layout_leaf(5, rect(0, 0, 80, 24)),
+                },
+            ],
+            panes: (1..=5)
+                .map(|tmux_id| TmuxInitialPane {
+                    tmux_id: TmuxPaneId(tmux_id),
+                    pid: 10_000 + u32::try_from(tmux_id).expect("test id fits"),
+                })
+                .collect(),
+        };
+
+        app.hydrate_attached_tmux_state(initial_state)
+            .await
+            .expect("hydrate succeeds");
+
+        assert_eq!(
+            app.pane_ids(),
+            vec![PaneId(1), PaneId(2), PaneId(3), PaneId(4), PaneId(5)]
+        );
+        assert_eq!(app.tmux_window_workspaces.get(&101), Some(&0));
+        assert_eq!(app.tmux_window_workspaces.get(&102), Some(&1));
+        assert_eq!(app.tmux_window_workspaces.get(&103), Some(&2));
+        assert!(app.timeline.is_idle());
+        assert!(handle.resized().is_empty());
+
+        assert!(matches!(
+            app.workspaces[0].root.as_ref().expect("workspace 1 root"),
+            Node::Internal {
+                split: Split::Vertical,
+                ..
+            }
+        ));
+        assert!(matches!(
+            app.workspaces[1].root.as_ref().expect("workspace 2 root"),
+            Node::Internal {
+                split: Split::Horizontal,
+                ..
+            }
+        ));
+        assert!(matches!(
+            app.workspaces[2].root.as_ref().expect("workspace 3 root"),
+            Node::Leaf {
+                pane: PaneId(5),
+                ..
+            }
+        ));
+
+        app.apply_external_layout_change(102, layout_leaf(3, rect(0, 0, 80, 24)))
+            .await
+            .expect("external update applies to mapped workspace");
+
+        assert!(matches!(
+            app.workspaces[1].root.as_ref().expect("workspace 2 root"),
+            Node::Leaf {
+                pane: PaneId(3),
+                ..
+            }
+        ));
+        assert!(matches!(
+            app.workspaces[0].root.as_ref().expect("workspace 1 root"),
+            Node::Internal { .. }
+        ));
     }
 
     #[tokio::test]

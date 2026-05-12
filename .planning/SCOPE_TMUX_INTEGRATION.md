@@ -138,7 +138,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - On unknown `%N` in a decoded layout: query `tmux display-message -p -t %N '#{pane_pid}'` to confirm the pane is real, allocate a fresh `PaneId`, register the mapping. Then subscribe to its `%output` stream (already automatic in `-CC` mode — verify with a test).
   - **Accept:** integration test — externally spawned pane echoes text, weave renders it without `wv` ever calling `PaneBackend::spawn` for that pane.
 
-- [ ] **B.5 Full re-attach reconciliation** — *Codex* — `src/app.rs`
+- [x] **B.5 Full re-attach reconciliation** — *Codex* — `src/app.rs`
   - On `wv attach <name>`: before entering the event loop, run `tmux list-windows -t <name> -F '#{window_id}\t#{window_index}\t#{window_layout}'` and `tmux list-panes -s -t <name> -F '#{pane_id}\t#{pane_pid}'`.
   - Build initial BSP forest from the parsed layouts; populate BiMap; spawn no open-animations on initial attach (jump-cut to current state).
   - **Accept:** detach mid-session with 5 panes across 3 workspaces; modify externally; `wv attach` shows the new state correctly without animations on first frame.
@@ -345,7 +345,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] B.2 Non-BSP normalization
 - [x] B.3 Apply LayoutDelta + animate
 - [x] B.4 Ingest externally-spawned pane IDs
-- [ ] B.5 Full re-attach reconciliation
+- [x] B.5 Full re-attach reconciliation
 - [ ] B.6 Conflict resolution policy
 - [ ] C.1 Window-index ↔ workspace-index mapping
 - [ ] C.2 `SwitchWorkspace` → `select-window`

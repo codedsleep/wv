@@ -7,4 +7,4 @@ pub mod process;
 pub mod reconcile;
 
 #[allow(unused_imports)]
-pub use process::TmuxBackend;
+pub use process::{TmuxBackend, TmuxInitialPane, TmuxInitialState, TmuxInitialWindow};
