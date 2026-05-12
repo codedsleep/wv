@@ -143,7 +143,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - Build initial BSP forest from the parsed layouts; populate BiMap; spawn no open-animations on initial attach (jump-cut to current state).
   - **Accept:** detach mid-session with 5 panes across 3 workspaces; modify externally; `wv attach` shows the new state correctly without animations on first frame.
 
-- [ ] **B.6 Conflict resolution policy** — *Codex* — `src/app.rs`
+- [x] **B.6 Conflict resolution policy** — *Codex* — `src/app.rs`
   - If user issues internal `Command::SplitH` while a `%layout-change` from a prior external command is mid-animation, the internal command is queued (not applied) until the animation completes. Reason: tmux is the source of truth; sending another `split-window` mid-flight risks ordering bugs.
   - User-visible: brief status-bar indicator (`⟳` glyph) when external changes are in flight.
   - **Accept:** integration test — fire internal split during external resize; final state is consistent with tmux's `list-panes`.
@@ -346,7 +346,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] B.3 Apply LayoutDelta + animate
 - [x] B.4 Ingest externally-spawned pane IDs
 - [x] B.5 Full re-attach reconciliation
-- [ ] B.6 Conflict resolution policy
+- [x] B.6 Conflict resolution policy
 - [ ] C.1 Window-index ↔ workspace-index mapping
 - [ ] C.2 `SwitchWorkspace` → `select-window`
 - [ ] C.3 `%session-changed` / window-active tracking

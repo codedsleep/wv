@@ -41,6 +41,10 @@ impl Timeline {
         self.active_count() == 0
     }
 
+    pub fn has_internal_ratio_tweens(&self) -> bool {
+        !self.internal_ratios.is_empty()
+    }
+
     pub fn has_leaf_rect_tween(&self, pane: PaneId) -> bool {
         self.leaf_rects.contains_key(&pane)
     }

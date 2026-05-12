@@ -1,6 +1,6 @@
 //! `App`: event loop + state owner.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::process::{Command as ProcessCommand, Stdio};
 
@@ -119,6 +119,9 @@ pub struct App {
     workspaces: Vec<Workspace>,
     current_workspace: usize,
     tmux_window_workspaces: HashMap<u64, usize>,
+    external_in_flight: HashSet<usize>,
+    external_animation_panes: HashMap<usize, HashSet<PaneId>>,
+    pending_internal_commands: VecDeque<(usize, Command)>,
     resize_mode: ResizeMode,
     backend_kind: BackendKind,
     backend: BoxedBackend,
@@ -408,6 +411,9 @@ impl App {
             workspaces,
             current_workspace: 0,
             tmux_window_workspaces: HashMap::new(),
+            external_in_flight: HashSet::new(),
+            external_animation_panes: HashMap::new(),
+            pending_internal_commands: VecDeque::new(),
             resize_mode: ResizeMode::Normal,
             backend_kind: backend_parts.kind,
             backend: backend_parts.backend,
@@ -464,6 +470,7 @@ impl App {
                     number: u8::try_from(idx + 1).unwrap_or(u8::MAX),
                     is_current,
                     pane_count: ws.pane_count(),
+                    external_in_flight: self.has_external_changes_in_flight(idx),
                 })
             })
             .collect()
@@ -481,6 +488,7 @@ impl App {
         // Snap any inflight animations on the outgoing workspace so its layout
         // is at rest when we return to it later.
         self.snap_workspace_tweens(self.current_workspace).await?;
+        self.clear_external_tracking_for_workspace(self.current_workspace);
 
         self.current_workspace = target;
         if self.current().is_empty() {
@@ -612,6 +620,17 @@ impl App {
     }
 
     pub async fn execute(&mut self, cmd: Command) -> anyhow::Result<()> {
+        if self.should_queue_internal_command(cmd) {
+            self.pending_internal_commands
+                .push_back((self.current_workspace, cmd));
+            self.dirty = true;
+            return Ok(());
+        }
+
+        self.execute_now(cmd).await
+    }
+
+    async fn execute_now(&mut self, cmd: Command) -> anyhow::Result<()> {
         match cmd {
             Command::SplitH => self.split_focused(Split::Horizontal).await?,
             Command::SplitV => self.split_focused(Split::Vertical).await?,
@@ -626,6 +645,15 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn should_queue_internal_command(&self, cmd: Command) -> bool {
+        is_layout_mutating_command(cmd)
+            && self.has_external_changes_in_flight(self.current_workspace)
+    }
+
+    fn has_external_changes_in_flight(&self, workspace_idx: usize) -> bool {
+        self.external_in_flight.contains(&workspace_idx)
     }
 
     async fn spawn_shell_pane(&mut self, resize_immediately: bool) -> anyhow::Result<PaneId> {
@@ -734,6 +762,9 @@ impl App {
         for pane in self.pane_ids() {
             self.timeline.clear_pane_tweens(pane);
         }
+        self.external_in_flight.clear();
+        self.external_animation_panes.clear();
+        self.pending_internal_commands.clear();
         self.dirty = true;
 
         Ok(())
@@ -746,6 +777,7 @@ impl App {
     ) -> anyhow::Result<()> {
         let workspace_idx = self.workspace_for_tmux_window(window_id);
         self.snap_workspace_tweens(workspace_idx).await?;
+        self.clear_external_tracking_for_workspace(workspace_idx);
 
         let layout = self.translate_external_layout_panes(layout).await?;
         let normalized = reconcile::normalize(layout);
@@ -762,7 +794,12 @@ impl App {
         self.workspaces[workspace_idx].root = Some(new_root);
 
         self.ensure_external_panes(&deltas);
-        self.queue_external_layout_tweens(workspace_idx, &old_root, &deltas);
+        let animated_panes = self.queue_external_layout_tweens(workspace_idx, &old_root, &deltas);
+        if !animated_panes.is_empty() || self.timeline.has_internal_ratio_tweens() {
+            self.external_in_flight.insert(workspace_idx);
+            self.external_animation_panes
+                .insert(workspace_idx, animated_panes);
+        }
         self.remove_external_panes(&deltas);
 
         let ws = &mut self.workspaces[workspace_idx];
@@ -844,7 +881,7 @@ impl App {
         workspace_idx: usize,
         old_root: &Node,
         deltas: &[LayoutDelta],
-    ) {
+    ) -> HashSet<PaneId> {
         let Some((new_targets, ratio_tweens)) =
             self.workspaces[workspace_idx]
                 .root
@@ -865,8 +902,9 @@ impl App {
                     (new_targets, ratio_tweens)
                 })
         else {
-            return;
+            return HashSet::new();
         };
+        let mut animated_panes = HashSet::new();
         let added = deltas
             .iter()
             .filter_map(|delta| match delta {
@@ -896,12 +934,14 @@ impl App {
                 OPEN_SIBLING_DURATION,
                 Easing::EaseOutCubic,
             );
+            animated_panes.insert(pane);
         }
 
         for delta in deltas {
             match delta {
                 LayoutDelta::AddPane { path, pane, rect } => {
                     self.queue_external_add_tween(workspace_idx, old_root, path, *pane, *rect);
+                    animated_panes.insert(*pane);
                 }
                 LayoutDelta::RemovePane { pane, .. } => {
                     if let Some(from) = leaf_current_in(old_root, *pane) {
@@ -915,6 +955,7 @@ impl App {
                             CLOSE_PANE_DURATION,
                             Easing::EaseOutCubic,
                         );
+                        animated_panes.insert(*pane);
                     }
                 }
                 LayoutDelta::ResizeRatio { .. } => {}
@@ -933,6 +974,8 @@ impl App {
                 Easing::EaseOutCubic,
             );
         }
+
+        animated_panes
     }
 
     fn queue_external_add_tween(
@@ -1323,8 +1366,65 @@ impl App {
         self.resize_completed_leaf_tweens(&completed_leaf_rects)
             .await?;
         self.finish_completed_closings(&completed_closings).await?;
+        self.refresh_external_in_flight().await?;
 
         Ok(())
+    }
+
+    async fn refresh_external_in_flight(&mut self) -> anyhow::Result<()> {
+        let completed = self
+            .external_in_flight
+            .iter()
+            .copied()
+            .filter(|workspace_idx| self.external_workspace_is_idle(*workspace_idx))
+            .collect::<Vec<_>>();
+
+        if completed.is_empty() {
+            return Ok(());
+        }
+
+        for workspace_idx in completed {
+            self.clear_external_tracking_for_workspace(workspace_idx);
+        }
+        self.dirty = true;
+        self.drain_pending_internal_commands().await
+    }
+
+    fn external_workspace_is_idle(&self, workspace_idx: usize) -> bool {
+        let panes_idle = self
+            .external_animation_panes
+            .get(&workspace_idx)
+            .is_none_or(|panes| {
+                panes
+                    .iter()
+                    .all(|pane| !self.timeline.has_leaf_rect_tween(*pane))
+            });
+
+        panes_idle && !self.timeline.has_internal_ratio_tweens()
+    }
+
+    async fn drain_pending_internal_commands(&mut self) -> anyhow::Result<()> {
+        let mut deferred = VecDeque::new();
+        while let Some((workspace_idx, command)) = self.pending_internal_commands.pop_front() {
+            if self.has_external_changes_in_flight(workspace_idx) {
+                deferred.push_back((workspace_idx, command));
+                continue;
+            }
+
+            let previous_workspace = self.current_workspace;
+            self.current_workspace = workspace_idx;
+            let result = self.execute_now(command).await;
+            self.current_workspace = previous_workspace;
+            result?;
+        }
+
+        self.pending_internal_commands = deferred;
+        Ok(())
+    }
+
+    fn clear_external_tracking_for_workspace(&mut self, workspace_idx: usize) {
+        self.external_in_flight.remove(&workspace_idx);
+        self.external_animation_panes.remove(&workspace_idx);
     }
 
     async fn resize_completed_leaf_tweens(&mut self, completed: &[PaneId]) -> anyhow::Result<()> {
@@ -1485,6 +1585,9 @@ impl App {
             workspaces,
             current_workspace: 0,
             tmux_window_workspaces: HashMap::new(),
+            external_in_flight: HashSet::new(),
+            external_animation_panes: HashMap::new(),
+            pending_internal_commands: VecDeque::new(),
             resize_mode: ResizeMode::Normal,
             backend_kind: BackendKind::Native,
             backend,
@@ -1884,6 +1987,10 @@ fn workspace_index_from_tmux_window_index(window_index: u8) -> Option<usize> {
     (workspace_idx < WORKSPACE_COUNT).then_some(workspace_idx)
 }
 
+fn is_layout_mutating_command(command: Command) -> bool {
+    matches!(command, Command::SplitH | Command::SplitV | Command::Close)
+}
+
 fn leaf_current_in(node: &Node, pane: PaneId) -> Option<FRect> {
     match node.find_leaf(pane)? {
         Node::Leaf { rect_current, .. } => Some(*rect_current),
@@ -2116,6 +2223,7 @@ mod tests {
         frame_interval, parse_weave_tmux_session, parse_weave_tmux_session_for_display,
         validate_session_name, App, Args, AttachArgs, BackendKind, ExitState, LaunchArgs,
         CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION, OPEN_NEW_PANE_DURATION,
+        OPEN_SIBLING_DURATION,
     };
     use crate::anim::tween::Easing;
     use crate::backend::tmux::layout::LayoutAst;
@@ -2150,12 +2258,20 @@ mod tests {
     }
 
     fn mock_backend(next_id: PaneId) -> (Box<dyn PaneBackend>, MockBackendHandle) {
+        mock_backend_with_external(next_id, next_id.0, HashMap::from([(1, PaneId(1))]))
+    }
+
+    fn mock_backend_with_external(
+        next_id: PaneId,
+        external_next_id: u64,
+        external_panes: HashMap<u64, PaneId>,
+    ) -> (Box<dyn PaneBackend>, MockBackendHandle) {
         let handle = MockBackendHandle::default();
         (
             Box::new(MockBackend {
                 next_id,
-                external_next_id: next_id.0,
-                external_panes: HashMap::from([(1, PaneId(1))]),
+                external_next_id,
+                external_panes,
                 resized: Arc::clone(&handle.resized),
             }),
             handle,
@@ -2181,7 +2297,9 @@ mod tests {
     #[async_trait::async_trait]
     impl PaneBackend for MockBackend {
         async fn spawn(&mut self, _cmd: PaneCommand) -> Result<PaneId, Error> {
-            Ok(self.next_id)
+            let pane_id = self.next_id;
+            self.next_id = PaneId(self.next_id.0.saturating_add(1));
+            Ok(pane_id)
         }
 
         async fn write(&mut self, _id: PaneId, _data: &[u8]) -> Result<(), Error> {
@@ -2469,6 +2587,81 @@ mod tests {
         assert!(app.panes.iter().any(|pane| pane.id() == PaneId(1)));
         assert!(!app.panes.iter().any(|pane| pane.id() == PaneId(2)));
         assert!(app.timeline.has_leaf_rect_tween(PaneId(1)));
+    }
+
+    #[tokio::test]
+    async fn internal_split_during_external_resize_waits_until_external_animation_completes() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.execute(Command::SplitH).await.expect("initial split");
+        app.advance_animations(OPEN_NEW_PANE_DURATION)
+            .await
+            .expect("initial split animation completes");
+
+        let resized_layout = LayoutAst::Vertical {
+            rect: rect(0, 0, 80, 23),
+            children: vec![
+                layout_leaf(1, rect(0, 0, 80, 8)),
+                layout_leaf(2, rect(0, 8, 80, 15)),
+            ],
+        };
+        app.apply_external_layout_change(1, resized_layout)
+            .await
+            .expect("external resize applies");
+        assert!(app.has_external_changes_in_flight(0));
+
+        app.execute(Command::SplitH)
+            .await
+            .expect("internal split is queued");
+
+        assert_eq!(app.pending_internal_commands.len(), 1);
+        assert_eq!(app.pane_ids(), vec![PaneId(1), PaneId(2)]);
+
+        app.advance_animations(OPEN_SIBLING_DURATION)
+            .await
+            .expect("external animation completes and queued split drains");
+
+        assert!(!app.has_external_changes_in_flight(0));
+        assert!(app.pending_internal_commands.is_empty());
+        assert_eq!(app.pane_ids(), vec![PaneId(1), PaneId(2), PaneId(3)]);
+        match app.workspaces[0].root.as_ref().expect("root exists") {
+            Node::Internal { split, a, b, .. } => {
+                assert_eq!(*split, Split::Horizontal);
+                assert!(matches!(
+                    **a,
+                    Node::Leaf {
+                        pane: PaneId(1),
+                        ..
+                    }
+                ));
+                match &**b {
+                    Node::Internal {
+                        split: nested_split,
+                        a: nested_a,
+                        b: nested_b,
+                        ..
+                    } => {
+                        assert_eq!(*nested_split, Split::Horizontal);
+                        assert!(matches!(
+                            **nested_a,
+                            Node::Leaf {
+                                pane: PaneId(2),
+                                ..
+                            }
+                        ));
+                        assert!(matches!(
+                            **nested_b,
+                            Node::Leaf {
+                                pane: PaneId(3),
+                                ..
+                            }
+                        ));
+                    }
+                    Node::Leaf { .. } => panic!("expected queued split to split focused pane"),
+                }
+            }
+            Node::Leaf { .. } => panic!("expected split root"),
+        }
     }
 
     #[tokio::test]
