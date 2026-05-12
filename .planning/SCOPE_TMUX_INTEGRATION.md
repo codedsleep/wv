@@ -280,7 +280,7 @@ The Tilerm project (`/home/zzz/Documents/react/tilerm/src-tauri/src/tmux/`) ship
   - Reason from `manager.rs:423-436`: under tmux, `/proc/<pid>/cwd` returns the `tmux` process's cwd, not the shell's. `pane_current_path` is what tmux itself tracks and is authoritative.
   - **Accept:** `cd /tmp` in a pane, internal `Command::SplitH`-with-same-cwd opens at `/tmp`, not at weave's launch directory.
 
-- [ ] **A.9 Pipe-delimited `-F` format parsing** — *Codex* — `src/backend/tmux/process.rs`
+- [x] **A.9 Pipe-delimited `-F` format parsing** — *Codex* — `src/backend/tmux/process.rs`
   - When weave issues queries like `list-windows` / `list-panes` (used in B.5 re-attach reconciliation), use Tilerm's `#{a}|#{b}|#{c}` format-string pattern (`manager.rs:222-256`).
   - Cheap to parse, robust against window names containing spaces, no shell quoting issues.
   - Centralize the parser in a small `format::parse_rows(output: &str, expected_fields: usize)` helper so all `-F` callers go through it.
@@ -339,7 +339,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] A.6 Apply Tilerm-proven session options (`prefix None`, `allow-passthrough on`, `aggressive-resize on`)
 - [x] A.7 Stale-session cleanup on startup
 - [x] A.8 CWD discovery via `pane_current_path`
-- [ ] A.9 Pipe-delimited `-F` format parsing
+- [x] A.9 Pipe-delimited `-F` format parsing
 - [ ] A.10 Best-effort shutdown cleanup
 - [ ] B.1 LayoutAst → BSP tree diff
 - [ ] B.2 Non-BSP normalization

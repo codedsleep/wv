@@ -1332,7 +1332,7 @@ fn list_weave_tmux_sessions_for_display() -> anyhow::Result<Vec<DisplayTmuxSessi
         .args([
             "list-sessions",
             "-F",
-            "#{@weave-instance}\t#{session_name}\t#{session_created}\t#{?session_attached,attached,detached}",
+            "#{@weave-instance}|#{session_name}|#{session_created}|#{?session_attached,attached,detached}",
         ])
         .stdin(Stdio::null())
         .output()
@@ -1348,26 +1348,25 @@ fn list_weave_tmux_sessions_for_display() -> anyhow::Result<Vec<DisplayTmuxSessi
         return Ok(Vec::new());
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(parse_weave_tmux_session_for_display)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(crate::backend::tmux::format::parse_rows(&stdout, 4)
+        .iter()
+        .filter_map(|row| parse_weave_tmux_session_for_display(row))
         .collect())
 }
 
-fn parse_weave_tmux_session_for_display(line: &str) -> Option<DisplayTmuxSession> {
-    let mut parts = line.split('\t');
-    let marker = parts.next()?;
-    let name = parts.next()?;
-    let created = parts.next()?;
-    let state = parts.next()?;
-    if parts.next().is_some() || marker != "1" {
+fn parse_weave_tmux_session_for_display(row: &[&str]) -> Option<DisplayTmuxSession> {
+    let [marker, name, created, state] = row else {
+        return None;
+    };
+    if *marker != "1" {
         return None;
     }
 
     Some(DisplayTmuxSession {
-        name: name.to_owned(),
+        name: (*name).to_owned(),
         created: created.parse().unwrap_or_default(),
-        state: state.to_owned(),
+        state: (*state).to_owned(),
     })
 }
 
@@ -1401,7 +1400,7 @@ fn list_weave_tmux_sessions() -> anyhow::Result<Vec<TmuxSession>> {
         .args([
             "list-sessions",
             "-F",
-            "#{@weave-instance}\t#{session_name}\t#{session_activity}",
+            "#{@weave-instance}|#{session_name}|#{session_activity}",
         ])
         .stdin(Stdio::null())
         .output()
@@ -1411,23 +1410,23 @@ fn list_weave_tmux_sessions() -> anyhow::Result<Vec<TmuxSession>> {
         return Ok(Vec::new());
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(parse_weave_tmux_session)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(crate::backend::tmux::format::parse_rows(&stdout, 3)
+        .iter()
+        .filter_map(|row| parse_weave_tmux_session(row))
         .collect())
 }
 
-fn parse_weave_tmux_session(line: &str) -> Option<TmuxSession> {
-    let mut parts = line.split('\t');
-    let marker = parts.next()?;
-    let name = parts.next()?;
-    let activity = parts.next()?;
-    if parts.next().is_some() || marker != "1" {
+fn parse_weave_tmux_session(row: &[&str]) -> Option<TmuxSession> {
+    let [marker, name, activity] = row else {
+        return None;
+    };
+    if *marker != "1" {
         return None;
     }
 
     Some(TmuxSession {
-        name: name.to_owned(),
+        name: (*name).to_owned(),
         activity: activity.parse().unwrap_or_default(),
     })
 }
@@ -2116,22 +2115,24 @@ mod tests {
 
     #[test]
     fn parse_weave_tmux_session_requires_marker() {
-        let session = parse_weave_tmux_session("1\tcustom\t123").expect("marked session");
+        let session = parse_weave_tmux_session(&["1", "custom", "123"]).expect("marked session");
         assert_eq!(session.name, "custom");
         assert_eq!(session.activity, 123);
 
-        assert!(parse_weave_tmux_session("\tweave-old\t123").is_none());
-        assert!(parse_weave_tmux_session("0\tweave-old\t123").is_none());
+        assert!(parse_weave_tmux_session(&["", "weave-old", "123"]).is_none());
+        assert!(parse_weave_tmux_session(&["0", "weave-old", "123"]).is_none());
     }
 
     #[test]
     fn parse_weave_tmux_session_for_display_requires_marker() {
-        let session = parse_weave_tmux_session_for_display("1\tcustom\t123\tdetached")
+        let session = parse_weave_tmux_session_for_display(&["1", "custom", "123", "detached"])
             .expect("marked session");
         assert_eq!(session.name, "custom");
         assert_eq!(session.created, 123);
         assert_eq!(session.state, "detached");
 
-        assert!(parse_weave_tmux_session_for_display("0\tweave-old\t123\tdetached").is_none());
+        assert!(
+            parse_weave_tmux_session_for_display(&["0", "weave-old", "123", "detached"]).is_none()
+        );
     }
 }

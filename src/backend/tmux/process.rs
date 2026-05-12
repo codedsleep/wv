@@ -678,13 +678,11 @@ fn cleanup_orphaned_weave_sessions() -> usize {
         return 0;
     }
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let mut killed = 0;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut fields = line.splitn(2, '|');
-        let Some(name) = fields.next() else {
-            continue;
-        };
-        let marker = fields.next().unwrap_or("");
+    for row in super::format::parse_rows(&stdout, 2) {
+        let name = row[0];
+        let marker = row[1];
 
         if !name.starts_with("weave-") || marker == "1" {
             continue;
