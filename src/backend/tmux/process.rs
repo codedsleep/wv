@@ -96,6 +96,13 @@ impl TmuxBackend {
         event_tx: EventSender,
     ) -> anyhow::Result<Self> {
         let explicit_session_name = session_name.is_some();
+        if !explicit_session_name {
+            let killed = cleanup_orphaned_weave_sessions();
+            if killed > 0 {
+                tracing::info!(killed, "cleaned up orphaned weave-* tmux sessions");
+            }
+        }
+
         let session_name = session_name.unwrap_or_else(new_session_name);
         if explicit_session_name && tmux_session_exists(&session_name)? {
             bail!(
@@ -629,4 +636,57 @@ fn tmux_session_exists(session_name: &str) -> anyhow::Result<bool> {
         .context("failed to check tmux session")?;
 
     Ok(status.success())
+}
+
+/// List `weave-*` sessions and kill those lacking the `@weave-instance` marker.
+/// Best-effort: any failure is logged and ignored.
+/// Returns the count of sessions actually killed.
+fn cleanup_orphaned_weave_sessions() -> usize {
+    let output = match Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}|#{@weave-instance}"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => {
+            tracing::debug!(?error, "failed to list tmux sessions for orphan cleanup");
+            return 0;
+        }
+    };
+
+    if !output.status.success() {
+        tracing::debug!("tmux list-sessions failed during orphan cleanup");
+        return 0;
+    }
+
+    let mut killed = 0;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.splitn(2, '|');
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        let marker = fields.next().unwrap_or("");
+
+        if !name.starts_with("weave-") || marker == "1" {
+            continue;
+        }
+
+        let killed_ok = Command::new("tmux")
+            .args(["kill-session", "-t", name])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+
+        if killed_ok {
+            killed += 1;
+        } else {
+            tracing::debug!(session = name, "failed to kill orphaned tmux session");
+        }
+    }
+
+    killed
 }

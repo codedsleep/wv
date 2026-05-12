@@ -116,3 +116,57 @@ fn show_global_option(session: &str, option: &str) -> anyhow::Result<String> {
 
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
+
+#[tokio::test]
+#[ignore = "requires tmux on PATH"]
+async fn auto_named_startup_cleans_unmarked_weave_orphan() -> anyhow::Result<()> {
+    if Command::new("tmux").arg("-V").output().is_err() {
+        return Ok(());
+    }
+
+    let orphan = "weave-zzz-orphan-test";
+    let _ = Command::new("tmux")
+        .args(["kill-session", "-t", orphan])
+        .status();
+
+    let created = Command::new("tmux")
+        .args(["new-session", "-d", "-s", orphan, "sleep 60"])
+        .status()?;
+    if !created.success() {
+        return Ok(());
+    }
+
+    let (output_tx, _output_rx) = mpsc::channel::<(_, Bytes)>(256);
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let backend = match TmuxBackend::new(None, output_tx, event_tx).await {
+        Ok(backend) => backend,
+        Err(error) => {
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", orphan])
+                .status();
+            return Err(error);
+        }
+    };
+
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if !tmux_has_session(orphan)? {
+                return Ok::<(), anyhow::Error>(());
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await??;
+
+    drop(backend);
+    Ok(())
+}
+
+fn tmux_has_session(session: &str) -> anyhow::Result<bool> {
+    let status = Command::new("tmux")
+        .args(["has-session", "-t", session])
+        .status()?;
+
+    Ok(status.success())
+}

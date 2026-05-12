@@ -269,7 +269,7 @@ The Tilerm project (`/home/zzz/Documents/react/tilerm/src-tauri/src/tmux/`) ship
   - `aggressive-resize on` — when multiple clients (e.g. `wv attach` + an external `tmux attach`) hold different dimensions, tmux resizes the window to the smaller current client rather than the smallest historical client. Avoids "frozen at smallest size" bug.
   - **Accept:** integration test — connect with `tmux attach-session -t <name>` from a 200×60 terminal while `wv` is attached at 80×24; resizing the tmux client doesn't shrink weave's view permanently.
 
-- [ ] **A.7 Stale-session cleanup on startup** — *Codex* — `src/backend/tmux/process.rs`, `src/main.rs`
+- [x] **A.7 Stale-session cleanup on startup** — *Codex* — `src/backend/tmux/process.rs`, `src/main.rs`
   - Port `cleanup_orphaned_sessions` (`manager.rs:370-390`): on `wv` startup with auto-named `weave-<uid>`, kill any pre-existing `weave-*` session that lacks the `@weave-instance` marker option, since those are orphans from crashes.
   - Named sessions (`--session foo`) are exempt — user-named state is preserved across crashes.
   - Best-effort: if a kill fails (server gone), proceed without error.
@@ -337,7 +337,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] A.4 LayoutChange / WindowAdd / WindowClose payload decode
 - [x] A.5 Property tests for layout parser
 - [x] A.6 Apply Tilerm-proven session options (`prefix None`, `allow-passthrough on`, `aggressive-resize on`)
-- [ ] A.7 Stale-session cleanup on startup
+- [x] A.7 Stale-session cleanup on startup
 - [ ] A.8 CWD discovery via `pane_current_path`
 - [ ] A.9 Pipe-delimited `-F` format parsing
 - [ ] A.10 Best-effort shutdown cleanup
