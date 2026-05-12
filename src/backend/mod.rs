@@ -62,6 +62,10 @@ pub trait PaneBackend: Send {
     async fn pane_cwd(&mut self, _pane: PaneId) -> Result<Option<PathBuf>, anyhow::Error> {
         Ok(None)
     }
+
+    async fn ingest_external_pane(&mut self, _tmux_pane_id: u64) -> Result<PaneId, anyhow::Error> {
+        anyhow::bail!("external tmux pane ingest is not supported by this backend")
+    }
 }
 
 #[cfg(test)]

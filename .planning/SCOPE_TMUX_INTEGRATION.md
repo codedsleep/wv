@@ -133,7 +133,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - Block: if a tween is in flight from a *prior* external change for the same window, snap it before applying (consistent with master 4.5 detach behavior).
   - **Accept:** integration test — start `wv --session t1 --bare`; from another shell run `tmux split-window -h -t t1`; attach with `wv attach t1`; observe two panes with the open animation completing.
 
-- [ ] **B.4 Ingest externally-spawned pane IDs** — *Codex* — `src/backend/tmux/process.rs`
+- [x] **B.4 Ingest externally-spawned pane IDs** — *Codex* — `src/backend/tmux/process.rs`
   - Today `spawn` is the only path that registers `(tmux %N ↔ weave PaneId)` in the BiMap. External `split-window` produces a new `%N` that arrives via `%layout-change` with no prior `spawn` call.
   - On unknown `%N` in a decoded layout: query `tmux display-message -p -t %N '#{pane_pid}'` to confirm the pane is real, allocate a fresh `PaneId`, register the mapping. Then subscribe to its `%output` stream (already automatic in `-CC` mode — verify with a test).
   - **Accept:** integration test — externally spawned pane echoes text, weave renders it without `wv` ever calling `PaneBackend::spawn` for that pane.
@@ -344,7 +344,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] B.1 LayoutAst → BSP tree diff
 - [x] B.2 Non-BSP normalization
 - [x] B.3 Apply LayoutDelta + animate
-- [ ] B.4 Ingest externally-spawned pane IDs
+- [x] B.4 Ingest externally-spawned pane IDs
 - [ ] B.5 Full re-attach reconciliation
 - [ ] B.6 Conflict resolution policy
 - [ ] C.1 Window-index ↔ workspace-index mapping

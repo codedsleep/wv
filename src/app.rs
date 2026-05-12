@@ -1,6 +1,6 @@
 //! `App`: event loop + state owner.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::process::{Command as ProcessCommand, Stdio};
 
@@ -688,6 +688,7 @@ impl App {
         let workspace_idx = self.workspace_for_tmux_window(window_id);
         self.snap_workspace_tweens(workspace_idx).await?;
 
+        let layout = self.translate_external_layout_panes(layout).await?;
         let normalized = reconcile::normalize(layout);
         let Some(old_root) = self.workspaces[workspace_idx].root.clone() else {
             self.install_external_layout_without_diff(workspace_idx, &normalized);
@@ -755,11 +756,26 @@ impl App {
             return;
         }
 
-        // TODO(C.1): allocate a weave PaneId and register it with TmuxBackend's
-        // tmux pane BiMap. Until that API exists, B.3 treats tmux pane ids as
-        // backend PaneIds so diff -> apply can be exercised end-to-end.
         self.panes
             .push(Pane::new(pane, self.back.width, self.back.height));
+    }
+
+    async fn translate_external_layout_panes(
+        &mut self,
+        layout: LayoutAst,
+    ) -> anyhow::Result<LayoutAst> {
+        let mut tmux_ids = Vec::new();
+        collect_layout_tmux_panes(&layout, &mut tmux_ids);
+        tmux_ids.sort_unstable();
+        tmux_ids.dedup();
+
+        let mut pane_ids = HashMap::with_capacity(tmux_ids.len());
+        for tmux_id in tmux_ids {
+            let pane_id = self.backend.ingest_external_pane(tmux_id).await?;
+            pane_ids.insert(tmux_id, pane_id.0);
+        }
+
+        Ok(rewrite_layout_pane_ids(layout, &pane_ids))
     }
 
     fn queue_external_layout_tweens(
@@ -1765,6 +1781,42 @@ fn collect_layout_panes(ast: &LayoutAst, panes: &mut Vec<PaneId>) {
     }
 }
 
+fn collect_layout_tmux_panes(ast: &LayoutAst, panes: &mut Vec<u64>) {
+    match ast {
+        LayoutAst::Leaf { pane_id, .. } => panes.push(*pane_id),
+        LayoutAst::Horizontal { children, .. } | LayoutAst::Vertical { children, .. } => {
+            for child in children {
+                collect_layout_tmux_panes(child, panes);
+            }
+        }
+    }
+}
+
+fn rewrite_layout_pane_ids(ast: LayoutAst, pane_ids: &HashMap<u64, u64>) -> LayoutAst {
+    match ast {
+        LayoutAst::Leaf { pane_id, rect } => LayoutAst::Leaf {
+            pane_id: *pane_ids
+                .get(&pane_id)
+                .expect("all tmux layout pane ids should be ingested before rewrite"),
+            rect,
+        },
+        LayoutAst::Horizontal { rect, children } => LayoutAst::Horizontal {
+            rect,
+            children: children
+                .into_iter()
+                .map(|child| rewrite_layout_pane_ids(child, pane_ids))
+                .collect(),
+        },
+        LayoutAst::Vertical { rect, children } => LayoutAst::Vertical {
+            rect,
+            children: children
+                .into_iter()
+                .map(|child| rewrite_layout_pane_ids(child, pane_ids))
+                .collect(),
+        },
+    }
+}
+
 fn leaf_current_in(node: &Node, pane: PaneId) -> Option<FRect> {
     match node.find_leaf(pane)? {
         Node::Leaf { rect_current, .. } => Some(*rect_current),
@@ -1990,6 +2042,7 @@ fn collapsed_close_rect(split: Split, closing_is_a: bool, current: FRect) -> FRe
 mod tests {
     use anyhow::Error;
     use crossterm::style::Color;
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     use super::{
@@ -2007,6 +2060,8 @@ mod tests {
 
     struct MockBackend {
         next_id: PaneId,
+        external_next_id: u64,
+        external_panes: HashMap<u64, PaneId>,
         resized: Arc<Mutex<Vec<(PaneId, u16, u16)>>>,
     }
 
@@ -2030,6 +2085,8 @@ mod tests {
         (
             Box::new(MockBackend {
                 next_id,
+                external_next_id: next_id.0,
+                external_panes: HashMap::from([(1, PaneId(1))]),
                 resized: Arc::clone(&handle.resized),
             }),
             handle,
@@ -2069,6 +2126,17 @@ mod tests {
 
         async fn kill(&mut self, _id: PaneId) -> Result<(), Error> {
             Ok(())
+        }
+
+        async fn ingest_external_pane(&mut self, tmux_pane_id: u64) -> Result<PaneId, Error> {
+            if let Some(pane_id) = self.external_panes.get(&tmux_pane_id).copied() {
+                return Ok(pane_id);
+            }
+
+            let pane_id = PaneId(self.external_next_id);
+            self.external_next_id = self.external_next_id.saturating_add(1);
+            self.external_panes.insert(tmux_pane_id, pane_id);
+            Ok(pane_id)
         }
     }
 

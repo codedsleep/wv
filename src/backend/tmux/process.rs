@@ -270,20 +270,11 @@ impl TmuxBackend {
     }
 
     fn allocate_id(&mut self) -> PaneId {
-        let id = PaneId(self.next_id);
-        self.next_id = self.next_id.saturating_add(1);
-        id
+        allocate_pane_id(&mut self.next_id)
     }
 
     fn write_command(&mut self, command: &str) -> Result<(), Error> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .with_context(|| "tmux stdin is closed")?;
-        stdin.write_all(command.as_bytes())?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()?;
-        Ok(())
+        write_command_to(&mut self.stdin, command)
     }
 
     async fn send_command(&mut self, command: &str) -> Result<CommandResponse, Error> {
@@ -292,10 +283,7 @@ impl TmuxBackend {
     }
 
     async fn next_response(&mut self) -> Result<CommandResponse, Error> {
-        timeout(COMMAND_TIMEOUT, self.response_rx.recv())
-            .await
-            .with_context(|| "timed out waiting for tmux command response")?
-            .with_context(|| "tmux command response channel closed")
+        next_response_from(&mut self.response_rx).await
     }
 
     async fn register_mapping(&self, pane_id: PaneId, tmux_id: TmuxPaneId) {
@@ -388,6 +376,109 @@ impl PaneBackend for TmuxBackend {
         self.detached = true;
         Ok(())
     }
+
+    async fn ingest_external_pane(&mut self, tmux_pane_id: u64) -> Result<PaneId, Error> {
+        let mut verifier = TmuxCommandPaneVerifier {
+            stdin: &mut self.stdin,
+            response_rx: &mut self.response_rx,
+        };
+        ingest_external_pane_with_verifier(
+            &self.maps,
+            &self.output_tx,
+            &self.event_tx,
+            &mut self.next_id,
+            &mut verifier,
+            TmuxPaneId(tmux_pane_id),
+        )
+        .await
+    }
+}
+
+fn allocate_pane_id(next_id: &mut u64) -> PaneId {
+    let id = PaneId(*next_id);
+    *next_id = (*next_id).saturating_add(1);
+    id
+}
+
+fn write_command_to(stdin: &mut Option<ChildStdin>, command: &str) -> Result<(), Error> {
+    let stdin = stdin.as_mut().with_context(|| "tmux stdin is closed")?;
+    stdin.write_all(command.as_bytes())?;
+    stdin.write_all(b"\n")?;
+    stdin.flush()?;
+    Ok(())
+}
+
+async fn next_response_from(response_rx: &mut ResponseReceiver) -> Result<CommandResponse, Error> {
+    timeout(COMMAND_TIMEOUT, response_rx.recv())
+        .await
+        .with_context(|| "timed out waiting for tmux command response")?
+        .with_context(|| "tmux command response channel closed")
+}
+
+#[async_trait::async_trait]
+trait ExternalPaneVerifier {
+    async fn verify_external_pane(&mut self, tmux_id: TmuxPaneId) -> Result<(), Error>;
+}
+
+struct TmuxCommandPaneVerifier<'a> {
+    stdin: &'a mut Option<ChildStdin>,
+    response_rx: &'a mut ResponseReceiver,
+}
+
+#[async_trait::async_trait]
+impl ExternalPaneVerifier for TmuxCommandPaneVerifier<'_> {
+    async fn verify_external_pane(&mut self, tmux_id: TmuxPaneId) -> Result<(), Error> {
+        let command = format!(
+            "display-message -p -t %{} {}",
+            tmux_id.0,
+            quote_tmux_arg("#{pane_pid}")
+        );
+        write_command_to(self.stdin, &command)?;
+        let response = next_response_from(self.response_rx).await?;
+        ensure_success(&response)?;
+        ensure_pane_pid_response(&response, tmux_id)
+    }
+}
+
+async fn ingest_external_pane_with_verifier(
+    maps: &Arc<Mutex<PaneMaps>>,
+    output_tx: &OutputSender,
+    event_tx: &EventSender,
+    next_id: &mut u64,
+    verifier: &mut impl ExternalPaneVerifier,
+    tmux_id: TmuxPaneId,
+) -> Result<PaneId, Error> {
+    if let Some(pane_id) = {
+        let maps = lock_maps(maps);
+        maps.pane_for_tmux(tmux_id)
+    } {
+        return Ok(pane_id);
+    }
+
+    verifier.verify_external_pane(tmux_id).await?;
+
+    if let Some(pane_id) = {
+        let maps = lock_maps(maps);
+        maps.pane_for_tmux(tmux_id)
+    } {
+        return Ok(pane_id);
+    }
+
+    let pane_id = allocate_pane_id(next_id);
+    let (pending_output, pending_event) = {
+        let mut maps = lock_maps(maps);
+        maps.register(pane_id, tmux_id)
+    };
+
+    for output in pending_output {
+        let _ = output_tx.send((pane_id, output)).await;
+    }
+
+    if let Some(event) = pending_event {
+        let _ = event_tx.send(event).await;
+    }
+
+    Ok(pane_id)
 }
 
 impl Drop for TmuxBackend {
@@ -548,6 +639,19 @@ fn ensure_success(response: &CommandResponse) -> Result<(), Error> {
             bail!("tmux command failed: {}", response_message(response))
         }
     }
+}
+
+fn ensure_pane_pid_response(response: &CommandResponse, tmux_id: TmuxPaneId) -> Result<(), Error> {
+    let pid = response.lines.first().map_or("", |line| line.trim());
+    if pid.parse::<u32>().is_ok_and(|value| value > 0) {
+        return Ok(());
+    }
+
+    bail!(
+        "tmux pane %{} did not report a valid pane pid: {}",
+        tmux_id.0,
+        response_message(response)
+    )
 }
 
 fn response_message(response: &CommandResponse) -> String {
@@ -716,4 +820,125 @@ fn cleanup_orphaned_weave_sessions() -> usize {
     }
 
     killed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ensure_pane_pid_response, ingest_external_pane_with_verifier, CommandResponse,
+        CommandResponseStatus, ExternalPaneVerifier, PaneMaps, TmuxPaneId,
+    };
+    use crate::backend::tmux::parser::BlockMarker;
+    use crate::backend::PaneId;
+    use anyhow::Error;
+    use bytes::Bytes;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+
+    #[derive(Default)]
+    struct MockVerifier {
+        verified: Vec<TmuxPaneId>,
+    }
+
+    #[async_trait::async_trait]
+    impl ExternalPaneVerifier for MockVerifier {
+        async fn verify_external_pane(&mut self, tmux_id: TmuxPaneId) -> Result<(), Error> {
+            self.verified.push(tmux_id);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_external_pane_registers_unknown_tmux_id_and_flushes_pending_output() {
+        let maps = Arc::new(Mutex::new(PaneMaps::default()));
+        let (output_tx, mut output_rx) = mpsc::channel(4);
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let tmux_id = TmuxPaneId(42);
+        let mut next_id = 7;
+        let mut verifier = MockVerifier::default();
+
+        maps.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_output
+            .insert(tmux_id, vec![Bytes::from_static(b"pending")]);
+        assert!(output_rx.try_recv().is_err());
+
+        let pane_id = ingest_external_pane_with_verifier(
+            &maps,
+            &output_tx,
+            &event_tx,
+            &mut next_id,
+            &mut verifier,
+            tmux_id,
+        )
+        .await
+        .expect("ingest succeeds");
+
+        assert_eq!(pane_id, PaneId(7));
+        assert_eq!(next_id, 8);
+        assert_eq!(verifier.verified, vec![tmux_id]);
+        {
+            let maps = maps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(maps.pane_for_tmux(tmux_id), Some(PaneId(7)));
+            assert_eq!(maps.tmux_for_pane(PaneId(7)), Some(tmux_id));
+        }
+        assert_eq!(
+            output_rx.recv().await,
+            Some((PaneId(7), Bytes::from_static(b"pending")))
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_external_pane_reuses_existing_mapping_without_verifying() {
+        let maps = Arc::new(Mutex::new(PaneMaps::default()));
+        let (output_tx, _output_rx) = mpsc::channel(4);
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let tmux_id = TmuxPaneId(42);
+        let mut next_id = 7;
+        let mut verifier = MockVerifier::default();
+
+        maps.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register(PaneId(3), tmux_id);
+
+        let pane_id = ingest_external_pane_with_verifier(
+            &maps,
+            &output_tx,
+            &event_tx,
+            &mut next_id,
+            &mut verifier,
+            tmux_id,
+        )
+        .await
+        .expect("ingest succeeds");
+
+        assert_eq!(pane_id, PaneId(3));
+        assert_eq!(next_id, 7);
+        assert!(verifier.verified.is_empty());
+    }
+
+    #[test]
+    fn pane_pid_response_requires_positive_integer_pid() {
+        let marker = BlockMarker {
+            raw: "%end 1".to_owned(),
+            timestamp: Some(1),
+            command_number: None,
+            flags: None,
+        };
+        let ok = CommandResponse {
+            begin: marker.clone(),
+            status: CommandResponseStatus::End(marker.clone()),
+            lines: vec!["12345".to_owned()],
+        };
+        let bad = CommandResponse {
+            begin: marker.clone(),
+            status: CommandResponseStatus::End(marker),
+            lines: vec!["not-a-pid".to_owned()],
+        };
+
+        assert!(ensure_pane_pid_response(&ok, TmuxPaneId(9)).is_ok());
+        assert!(ensure_pane_pid_response(&bad, TmuxPaneId(9)).is_err());
+    }
 }
