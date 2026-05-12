@@ -622,7 +622,18 @@ impl App {
     }
 
     async fn spawn_shell_pane(&mut self, resize_immediately: bool) -> anyhow::Result<PaneId> {
-        let pane_id = self.backend.spawn(default_pane_command()).await?;
+        let mut cmd = default_pane_command();
+        if let Some(focused) = self.current().focused {
+            match self.backend.pane_cwd(focused).await {
+                Ok(Some(cwd)) => cmd.cwd = Some(cwd),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(?error, ?focused, "failed to query pane cwd before spawn");
+                }
+            }
+        }
+
+        let pane_id = self.backend.spawn(cmd).await?;
 
         if resize_immediately {
             self.resize_pane(pane_id, self.back.width, self.back.height)

@@ -163,6 +163,55 @@ async fn auto_named_startup_cleans_unmarked_weave_orphan() -> anyhow::Result<()>
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires tmux on PATH"]
+async fn pane_cwd_returns_focused_shell_path() -> anyhow::Result<()> {
+    if Command::new("tmux").arg("-V").output().is_err() {
+        return Ok(());
+    }
+
+    let (output_tx, _output_rx) = mpsc::channel::<(_, Bytes)>(256);
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut backend = TmuxBackend::new(None, output_tx, event_tx).await?;
+    let pane = backend
+        .pane_ids()
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("tmux backend did not expose a default pane"))?;
+    let session = backend.session_name().to_owned();
+
+    let sent = Command::new("tmux")
+        .args([
+            "send-keys",
+            "-t",
+            &format!("{session}:0.0"),
+            "cd /tmp",
+            "Enter",
+        ])
+        .status()?;
+    if !sent.success() {
+        drop(backend);
+        return Ok(());
+    }
+
+    let expected = std::fs::canonicalize("/tmp")?;
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(cwd) = backend.pane_cwd(pane).await? {
+                if std::fs::canonicalize(cwd)? == expected {
+                    return Ok::<(), anyhow::Error>(());
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await??;
+
+    drop(backend);
+    Ok(())
+}
+
 fn tmux_has_session(session: &str) -> anyhow::Result<bool> {
     let status = Command::new("tmux")
         .args(["has-session", "-t", session])

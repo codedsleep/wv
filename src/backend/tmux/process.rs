@@ -337,6 +337,24 @@ impl PaneBackend for TmuxBackend {
         Ok(pane_id)
     }
 
+    async fn pane_cwd(&mut self, id: PaneId) -> Result<Option<std::path::PathBuf>, Error> {
+        let tmux_id = self.tmux_pane_id(id)?;
+        let command = format!(
+            "display-message -p -t %{} {}",
+            tmux_id.0,
+            quote_tmux_arg("#{pane_current_path}")
+        );
+        let response = self.send_command(&command).await?;
+        ensure_success(&response)?;
+
+        let path_line = response.lines.first().map_or("", |line| line.trim());
+        if path_line.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(std::path::PathBuf::from(path_line)))
+        }
+    }
+
     async fn write(&mut self, id: PaneId, data: &[u8]) -> Result<(), Error> {
         let tmux_id = self.tmux_pane_id(id)?;
         let command = format!("send-keys -t %{} -l {}", tmux_id.0, quote_tmux_bytes(data));

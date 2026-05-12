@@ -54,4 +54,50 @@ pub trait PaneBackend: Send {
     async fn detach(&mut self) -> Result<(), anyhow::Error> {
         Ok(())
     }
+
+    /// Query the current working directory of a pane.
+    ///
+    /// Default: returns `Ok(None)` for backends that can't introspect their child shell.
+    /// Tmux overrides this to return `#{pane_current_path}` for the given pane.
+    async fn pane_cwd(&mut self, _pane: PaneId) -> Result<Option<PathBuf>, anyhow::Error> {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PaneBackend, PaneCommand, PaneId};
+
+    struct DefaultCwdBackend;
+
+    #[async_trait::async_trait]
+    impl PaneBackend for DefaultCwdBackend {
+        async fn spawn(&mut self, _cmd: PaneCommand) -> Result<PaneId, anyhow::Error> {
+            Ok(PaneId(1))
+        }
+
+        async fn write(&mut self, _id: PaneId, _data: &[u8]) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+
+        async fn resize(
+            &mut self,
+            _id: PaneId,
+            _cols: u16,
+            _rows: u16,
+        ) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+
+        async fn kill(&mut self, _id: PaneId) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn default_pane_cwd_returns_none() {
+        let mut backend = DefaultCwdBackend;
+
+        assert_eq!(backend.pane_cwd(PaneId(1)).await.unwrap(), None);
+    }
 }

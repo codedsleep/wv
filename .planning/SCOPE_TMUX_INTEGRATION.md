@@ -275,7 +275,7 @@ The Tilerm project (`/home/zzz/Documents/react/tilerm/src-tauri/src/tmux/`) ship
   - Best-effort: if a kill fails (server gone), proceed without error.
   - **Accept:** kill `-9` a running `wv`; subsequent `wv` startup cleans up the orphaned auto-named session and reports the count.
 
-- [ ] **A.8 CWD discovery via `pane_current_path`** — *Codex* — `src/backend/tmux/process.rs`
+- [x] **A.8 CWD discovery via `pane_current_path`** — *Codex* — `src/backend/tmux/process.rs`
   - When weave needs a pane's CWD (e.g. for "split with same CWD" semantics), query `tmux display-message -p -t %N '#{pane_current_path}'` instead of reading `/proc/<pid>/cwd`.
   - Reason from `manager.rs:423-436`: under tmux, `/proc/<pid>/cwd` returns the `tmux` process's cwd, not the shell's. `pane_current_path` is what tmux itself tracks and is authoritative.
   - **Accept:** `cd /tmp` in a pane, internal `Command::SplitH`-with-same-cwd opens at `/tmp`, not at weave's launch directory.
@@ -338,7 +338,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] A.5 Property tests for layout parser
 - [x] A.6 Apply Tilerm-proven session options (`prefix None`, `allow-passthrough on`, `aggressive-resize on`)
 - [x] A.7 Stale-session cleanup on startup
-- [ ] A.8 CWD discovery via `pane_current_path`
+- [x] A.8 CWD discovery via `pane_current_path`
 - [ ] A.9 Pipe-delimited `-F` format parsing
 - [ ] A.10 Best-effort shutdown cleanup
 - [ ] B.1 LayoutAst → BSP tree diff
