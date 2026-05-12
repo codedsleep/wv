@@ -429,7 +429,8 @@ fn handle_notification(
         TmuxNotification::WindowAdd { .. }
         | TmuxNotification::WindowClose { .. }
         | TmuxNotification::SessionChanged { .. }
-        | TmuxNotification::LayoutChange { .. } => {}
+        | TmuxNotification::LayoutChange { .. }
+        | TmuxNotification::NotificationParseError { .. } => {}
     }
 }
 

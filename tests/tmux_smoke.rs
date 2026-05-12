@@ -1,7 +1,7 @@
-#[path = "../src/layout/mod.rs"]
-mod layout;
 #[path = "../src/backend/mod.rs"]
 mod backend;
+#[path = "../src/layout/mod.rs"]
+mod layout;
 
 use std::process::Command;
 use std::time::Duration;

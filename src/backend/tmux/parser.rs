@@ -1,15 +1,44 @@
 //! Streaming parser for tmux control mode notifications.
 
+use super::layout::{parse_layout, LayoutAst};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TmuxNotification {
-    Output { pane_id: u64, data: Vec<u8> },
-    WindowAdd { window_id: Option<u64>, raw: String },
-    WindowClose { window_id: Option<u64>, raw: String },
-    PaneDied { pane_id: u64 },
-    SessionChanged { raw: String },
-    LayoutChange { raw: String },
+    Output {
+        pane_id: u64,
+        data: Vec<u8>,
+    },
+    WindowAdd {
+        window_id: u64,
+    },
+    WindowClose {
+        window_id: u64,
+    },
+    PaneDied {
+        pane_id: u64,
+    },
+    SessionChanged {
+        raw: String,
+    },
+    LayoutChange {
+        window_id: u64,
+        layout: LayoutAst,
+        raw: String,
+    },
+    NotificationParseError {
+        kind: NotificationKind,
+        raw: String,
+        error: String,
+    },
     Exit,
     CommandResponse(CommandResponse),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationKind {
+    WindowAdd,
+    WindowClose,
+    LayoutChange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,19 +123,24 @@ impl Parser {
         let text = text.as_ref();
 
         if text.starts_with("%window-add") {
-            let raw = raw_args(text, "%window-add");
-            return Some(TmuxNotification::WindowAdd {
-                window_id: first_id(raw, '@'),
-                raw: raw.to_owned(),
-            });
+            return Some(parse_window_notification(
+                raw_args(text, "%window-add"),
+                NotificationKind::WindowAdd,
+            ));
+        }
+
+        if text.starts_with("%unlinked-window-add") {
+            return Some(parse_window_notification(
+                raw_args(text, "%unlinked-window-add"),
+                NotificationKind::WindowAdd,
+            ));
         }
 
         if text.starts_with("%window-close") {
-            let raw = raw_args(text, "%window-close");
-            return Some(TmuxNotification::WindowClose {
-                window_id: first_id(raw, '@'),
-                raw: raw.to_owned(),
-            });
+            return Some(parse_window_notification(
+                raw_args(text, "%window-close"),
+                NotificationKind::WindowClose,
+            ));
         }
 
         if text.starts_with("%pane-died") {
@@ -134,9 +168,7 @@ impl Parser {
         }
 
         if text.starts_with("%layout-change") {
-            return Some(TmuxNotification::LayoutChange {
-                raw: raw_args(text, "%layout-change").to_owned(),
-            });
+            return Some(parse_layout_change(raw_args(text, "%layout-change")));
         }
 
         if text.trim() == "%exit" {
@@ -280,19 +312,78 @@ fn raw_args<'a>(line: &'a str, command: &str) -> &'a str {
     line.strip_prefix(command).map_or("", str::trim_start)
 }
 
-fn first_id(raw: &str, prefix: char) -> Option<u64> {
-    raw.split_whitespace()
-        .next()
-        .and_then(|token| parse_id(token, prefix))
-}
-
 fn parse_id(token: &str, prefix: char) -> Option<u64> {
     token.strip_prefix(prefix)?.parse().ok()
 }
 
+fn parse_window_notification(raw: &str, kind: NotificationKind) -> TmuxNotification {
+    match parse_window_id(raw) {
+        Ok(window_id) => match kind {
+            NotificationKind::WindowAdd => TmuxNotification::WindowAdd { window_id },
+            NotificationKind::WindowClose => TmuxNotification::WindowClose { window_id },
+            NotificationKind::LayoutChange => unreachable!("layout-change is parsed separately"),
+        },
+        Err(error) => TmuxNotification::NotificationParseError {
+            kind,
+            raw: raw.to_owned(),
+            error,
+        },
+    }
+}
+
+fn parse_layout_change(raw: &str) -> TmuxNotification {
+    match parse_layout_change_fields(raw) {
+        Ok((window_id, layout)) => TmuxNotification::LayoutChange {
+            window_id,
+            layout,
+            raw: raw.to_owned(),
+        },
+        Err(error) => TmuxNotification::NotificationParseError {
+            kind: NotificationKind::LayoutChange,
+            raw: raw.to_owned(),
+            error,
+        },
+    }
+}
+
+fn parse_layout_change_fields(raw: &str) -> Result<(u64, LayoutAst), String> {
+    let mut fields = raw.split_whitespace();
+    let window_token = fields
+        .next()
+        .ok_or_else(|| "missing window id".to_owned())?;
+    let window_id = parse_window_id_token(window_token)?;
+    let layout_token = fields
+        .next()
+        .ok_or_else(|| "missing visible layout".to_owned())?;
+    let layout = parse_layout(layout_token).map_err(|error| error.to_string())?;
+
+    Ok((window_id, layout))
+}
+
+fn parse_window_id(raw: &str) -> Result<u64, String> {
+    let token = raw
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| "missing window id".to_owned())?;
+    parse_window_id_token(token)
+}
+
+fn parse_window_id_token(token: &str) -> Result<u64, String> {
+    let id = token
+        .strip_prefix('@')
+        .ok_or_else(|| format!("missing @ prefix in window id `{token}`"))?;
+    id.parse::<u64>()
+        .map_err(|error| format!("invalid window id `{token}`: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BlockMarker, CommandResponse, CommandResponseStatus, Parser, TmuxNotification};
+    use crate::layout::geometry::Rect;
+
+    use super::{
+        BlockMarker, CommandResponse, CommandResponseStatus, LayoutAst, NotificationKind, Parser,
+        TmuxNotification,
+    };
 
     #[test]
     fn parses_output_and_unescapes_octal_payload() {
@@ -328,16 +419,10 @@ mod tests {
         let mut parser = Parser::new();
 
         assert_eq!(
-            parser.feed(b"%window-add @7 created\n%window-close @8 closed\n"),
+            parser.feed(b"%window-add @7\n%window-close @8\n"),
             vec![
-                TmuxNotification::WindowAdd {
-                    window_id: Some(7),
-                    raw: "@7 created".to_owned(),
-                },
-                TmuxNotification::WindowClose {
-                    window_id: Some(8),
-                    raw: "@8 closed".to_owned(),
-                },
+                TmuxNotification::WindowAdd { window_id: 7 },
+                TmuxNotification::WindowClose { window_id: 8 },
             ]
         );
     }
@@ -345,16 +430,18 @@ mod tests {
     #[test]
     fn parses_pane_session_layout_and_exit_notifications() {
         let mut parser = Parser::new();
-
-        assert_eq!(
-            parser.feed(
-                b"%pane-died %9
+        let layout = render_layout(&leaf(2, rect(0, 0, 80, 24)));
+        let input = format!(
+            "%pane-died %9
 %message weave-pane-exited %10
 %session-changed $1 0
-%layout-change @2 layout-string visible
+%layout-change @2 {layout} {layout} *
 %exit
-",
-            ),
+"
+        );
+
+        assert_eq!(
+            parser.feed(input.as_bytes()),
             vec![
                 TmuxNotification::PaneDied { pane_id: 9 },
                 TmuxNotification::PaneDied { pane_id: 10 },
@@ -362,10 +449,125 @@ mod tests {
                     raw: "$1 0".to_owned(),
                 },
                 TmuxNotification::LayoutChange {
-                    raw: "@2 layout-string visible".to_owned(),
+                    window_id: 2,
+                    layout: leaf(2, rect(0, 0, 80, 24)),
+                    raw: format!("@2 {layout} {layout} *"),
                 },
                 TmuxNotification::Exit,
             ]
+        );
+    }
+
+    #[test]
+    fn decodes_window_add() {
+        let mut parser = Parser::new();
+
+        assert_eq!(
+            parser.feed(b"%window-add @42\n"),
+            vec![TmuxNotification::WindowAdd { window_id: 42 }]
+        );
+    }
+
+    #[test]
+    fn decodes_unlinked_window_add_as_window_add() {
+        let mut parser = Parser::new();
+
+        assert_eq!(
+            parser.feed(b"%unlinked-window-add @5\n"),
+            vec![TmuxNotification::WindowAdd { window_id: 5 }]
+        );
+    }
+
+    #[test]
+    fn decodes_window_close() {
+        let mut parser = Parser::new();
+
+        assert_eq!(
+            parser.feed(b"%window-close @99\n"),
+            vec![TmuxNotification::WindowClose { window_id: 99 }]
+        );
+    }
+
+    #[test]
+    fn reports_window_add_without_id_as_parse_error() {
+        let mut parser = Parser::new();
+
+        assert_eq!(
+            parser.feed(b"%window-add\n"),
+            vec![TmuxNotification::NotificationParseError {
+                kind: NotificationKind::WindowAdd,
+                raw: String::new(),
+                error: "missing window id".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn reports_window_add_with_non_numeric_id_as_parse_error() {
+        let mut parser = Parser::new();
+
+        let notifications = parser.feed(b"%window-add @notanumber\n");
+
+        assert_eq!(notifications.len(), 1);
+        assert!(matches!(
+            &notifications[0],
+            TmuxNotification::NotificationParseError {
+                kind: NotificationKind::WindowAdd,
+                raw,
+                ..
+            } if raw == "@notanumber"
+        ));
+    }
+
+    #[test]
+    fn decodes_layout_change_visible_layout() {
+        let mut parser = Parser::new();
+        let ast = LayoutAst::Horizontal {
+            rect: rect(0, 0, 80, 24),
+            children: vec![leaf(0, rect(0, 0, 40, 24)), leaf(1, rect(40, 0, 40, 24))],
+        };
+        let visible = render_layout(&ast);
+        let window = render_layout(&leaf(9, rect(0, 0, 80, 24)));
+        let input = format!("%layout-change @0 {visible} {window} *\n");
+
+        assert_eq!(
+            parser.feed(input.as_bytes()),
+            vec![TmuxNotification::LayoutChange {
+                window_id: 0,
+                layout: ast,
+                raw: format!("@0 {visible} {window} *"),
+            }]
+        );
+    }
+
+    #[test]
+    fn reports_layout_change_with_malformed_layout_as_parse_error() {
+        let mut parser = Parser::new();
+
+        let notifications = parser.feed(b"%layout-change @0 malformed-layout same-layout *\n");
+
+        assert_eq!(notifications.len(), 1);
+        assert!(matches!(
+            &notifications[0],
+            TmuxNotification::NotificationParseError {
+                kind: NotificationKind::LayoutChange,
+                raw,
+                ..
+            } if raw == "@0 malformed-layout same-layout *"
+        ));
+    }
+
+    #[test]
+    fn reports_layout_change_with_missing_window_id_as_parse_error() {
+        let mut parser = Parser::new();
+
+        assert_eq!(
+            parser.feed(b"%layout-change\n"),
+            vec![TmuxNotification::NotificationParseError {
+                kind: NotificationKind::LayoutChange,
+                raw: String::new(),
+                error: "missing window id".to_owned(),
+            }]
         );
     }
 
@@ -471,6 +673,70 @@ outer after
             command_number: fields.next().and_then(|field| field.parse().ok()),
             flags: fields.next().and_then(|field| field.parse().ok()),
         }
+    }
+
+    fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    fn leaf(pane_id: u64, rect: Rect) -> LayoutAst {
+        LayoutAst::Leaf { pane_id, rect }
+    }
+
+    fn render_layout(ast: &LayoutAst) -> String {
+        let mut body = String::new();
+        render_node(ast, &mut body);
+        format!("{:04x},{body}", layout_checksum(body.as_bytes()))
+    }
+
+    fn render_node(ast: &LayoutAst, out: &mut String) {
+        match ast {
+            LayoutAst::Leaf { pane_id, rect } => {
+                push_rect(*rect, out);
+                out.push(',');
+                out.push_str(&pane_id.to_string());
+            }
+            LayoutAst::Horizontal { rect, children } => {
+                push_rect(*rect, out);
+                out.push('{');
+                render_children(children, out);
+                out.push('}');
+            }
+            LayoutAst::Vertical { rect, children } => {
+                push_rect(*rect, out);
+                out.push('[');
+                render_children(children, out);
+                out.push(']');
+            }
+        }
+    }
+
+    fn render_children(children: &[LayoutAst], out: &mut String) {
+        for (idx, child) in children.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            render_node(child, out);
+        }
+    }
+
+    fn push_rect(rect: Rect, out: &mut String) {
+        out.push_str(&rect.w.to_string());
+        out.push('x');
+        out.push_str(&rect.h.to_string());
+        out.push(',');
+        out.push_str(&rect.x.to_string());
+        out.push(',');
+        out.push_str(&rect.y.to_string());
+    }
+
+    fn layout_checksum(bytes: &[u8]) -> u16 {
+        let mut csum: u16 = 0;
+        for &byte in bytes {
+            csum = (csum >> 1) | ((csum & 1) << 15);
+            csum = csum.wrapping_add(u16::from(byte));
+        }
+        csum
     }
 }
 

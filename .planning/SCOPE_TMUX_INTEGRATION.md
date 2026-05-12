@@ -94,7 +94,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - Verify checksum on parse; reject malformed strings with a typed error (do not panic — feeds into the streaming parser).
   - **Accept:** unit tests for: single pane; one h-split; one v-split; nested 4-pane grid; pathological inputs (truncated, bad checksum, missing pane-id) return `Err`, not panic.
 
-- [ ] **A.4 LayoutChange / WindowAdd / WindowClose payload decode** — *Codex* — `src/backend/tmux/parser.rs`
+- [x] **A.4 LayoutChange / WindowAdd / WindowClose payload decode** — *Codex* — `src/backend/tmux/parser.rs`
   - `LayoutChange { window_id: u64, layout: LayoutAst, raw: String }` — keep `raw` for logging/debug, add decoded fields.
   - `WindowAdd { window_id: u64, name: Option<String> }`, `WindowClose { window_id: u64 }` — promote from `Option<u64>` to required, with a parse-error variant for malformed input.
   - Update all existing call sites + tests.
@@ -334,7 +334,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] A.1 `--session <name>` flag
 - [x] A.2 `--bare` / `--no-attach` mode
 - [x] A.3 Tmux layout-string parser
-- [ ] A.4 LayoutChange / WindowAdd / WindowClose payload decode
+- [x] A.4 LayoutChange / WindowAdd / WindowClose payload decode
 - [ ] A.5 Property tests for layout parser
 - [ ] A.6 Apply Tilerm-proven session options (`prefix None`, `allow-passthrough on`, `aggressive-resize on`)
 - [ ] A.7 Stale-session cleanup on startup
