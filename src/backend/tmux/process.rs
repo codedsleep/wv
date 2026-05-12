@@ -87,6 +87,10 @@ pub struct TmuxBackend {
     response_rx: ResponseReceiver,
     next_id: u64,
     detached: bool,
+    /// True when weave owns this session (auto-named, fresh `new-session`).
+    /// False for user-named sessions and attach backends. Drop only kills the
+    /// session when this is true.
+    owns_session: bool,
 }
 
 impl TmuxBackend {
@@ -118,7 +122,8 @@ impl TmuxBackend {
             .spawn()
             .with_context(|| "failed to spawn tmux -C")?;
 
-        let mut backend = Self::from_child(session_name, child, output_tx, event_tx)?;
+        let owns_session = !explicit_session_name;
+        let mut backend = Self::from_child(session_name, child, output_tx, event_tx, owns_session)?;
         backend.configure_session().await?;
 
         let tmux_id = backend
@@ -146,7 +151,7 @@ impl TmuxBackend {
             .spawn()
             .with_context(|| format!("failed to spawn tmux -CC attach -t {session_name}"))?;
 
-        let mut backend = Self::from_child(session_name, child, output_tx, event_tx)?;
+        let mut backend = Self::from_child(session_name, child, output_tx, event_tx, false)?;
         backend.configure_session().await?;
 
         let tmux_ids = backend.list_session_panes().await?;
@@ -183,6 +188,7 @@ impl TmuxBackend {
         child: Child,
         output_tx: OutputSender,
         event_tx: EventSender,
+        owns_session: bool,
     ) -> anyhow::Result<Self> {
         let mut child = child;
         let stdin = child
@@ -217,6 +223,7 @@ impl TmuxBackend {
             response_rx,
             next_id: 1,
             detached: false,
+            owns_session,
         })
     }
 
@@ -385,7 +392,9 @@ impl PaneBackend for TmuxBackend {
 
 impl Drop for TmuxBackend {
     fn drop(&mut self) {
-        if !self.detached {
+        if self.owns_session && !self.detached {
+            // Auto-named transient session: send kill via control-mode stdin
+            // first, then use a direct kill-session as a best-effort fallback.
             if let Some(stdin) = self.stdin.as_mut() {
                 let _ = writeln!(
                     stdin,
@@ -402,6 +411,8 @@ impl Drop for TmuxBackend {
                 .stderr(Stdio::null())
                 .status();
         }
+        // User-named or attached sessions are intentionally left alive; only
+        // the control-mode child needs to be released here.
 
         let _ = self.child.kill();
         let _ = self.child.wait();

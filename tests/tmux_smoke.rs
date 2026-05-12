@@ -212,6 +212,53 @@ async fn pane_cwd_returns_focused_shell_path() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires tmux on PATH"]
+async fn drop_kills_auto_named_session_but_preserves_user_named() -> anyhow::Result<()> {
+    if Command::new("tmux").arg("-V").output().is_err() {
+        return Ok(());
+    }
+
+    {
+        let (output_tx, _output_rx) = mpsc::channel::<(_, Bytes)>(256);
+        let (event_tx, _event_rx) = mpsc::channel(64);
+        let backend = TmuxBackend::new(None, output_tx, event_tx).await?;
+        let session = backend.session_name().to_owned();
+        drop(backend);
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let status = Command::new("tmux")
+            .args(["has-session", "-t", &session])
+            .status()?;
+        assert!(
+            !status.success(),
+            "auto-named session {session} should be killed by Drop"
+        );
+    }
+
+    let user_named = format!("weave-test-a10-{}", std::process::id());
+    let _ = Command::new("tmux")
+        .args(["kill-session", "-t", &user_named])
+        .status();
+    {
+        let (output_tx, _output_rx) = mpsc::channel::<(_, Bytes)>(256);
+        let (event_tx, _event_rx) = mpsc::channel(64);
+        let backend = TmuxBackend::new(Some(user_named.clone()), output_tx, event_tx).await?;
+        drop(backend);
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let alive = Command::new("tmux")
+        .args(["has-session", "-t", &user_named])
+        .status()?
+        .success();
+    let _ = Command::new("tmux")
+        .args(["kill-session", "-t", &user_named])
+        .status();
+    assert!(alive, "user-named session {user_named} must survive Drop");
+
+    Ok(())
+}
+
 fn tmux_has_session(session: &str) -> anyhow::Result<bool> {
     let status = Command::new("tmux")
         .args(["has-session", "-t", session])

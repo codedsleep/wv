@@ -286,7 +286,7 @@ The Tilerm project (`/home/zzz/Documents/react/tilerm/src-tauri/src/tmux/`) ship
   - Centralize the parser in a small `format::parse_rows(output: &str, expected_fields: usize)` helper so all `-F` callers go through it.
   - **Accept:** parse a window name containing `|` correctly using `splitn(expected_fields, '|')` (matches `manager.rs:239`).
 
-- [ ] **A.10 Best-effort shutdown cleanup** — *Codex* — `src/app.rs`, `src/backend/tmux/process.rs`
+- [x] **A.10 Best-effort shutdown cleanup** — *Codex* — `src/app.rs`, `src/backend/tmux/process.rs`
   - On `wv` quit (clean or signal): attempt to kill the session (auto-named only) and ignore "can't find session" / "no server running" errors (port `kill_tab_session` logic at `manager.rs:160-172`).
   - For `--session <name>`: leave the session alive (user explicitly named it = wants persistence).
   - **Accept:** Ctrl+C an auto-named `wv`; `tmux ls` shows no orphan; SIGKILL is caught by A.7 cleanup on next launch.
@@ -340,7 +340,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] A.7 Stale-session cleanup on startup
 - [x] A.8 CWD discovery via `pane_current_path`
 - [x] A.9 Pipe-delimited `-F` format parsing
-- [ ] A.10 Best-effort shutdown cleanup
+- [x] A.10 Best-effort shutdown cleanup
 - [ ] B.1 LayoutAst → BSP tree diff
 - [ ] B.2 Non-BSP normalization
 - [ ] B.3 Apply LayoutDelta + animate
