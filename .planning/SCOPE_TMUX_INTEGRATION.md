@@ -113,7 +113,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
 
 **Goal.** External `tmux split-window`, `select-layout`, `swap-pane`, `kill-pane` are reflected in weave's BSP tree and animated like internal commands.
 
-- [ ] **B.1 LayoutAst → weave BSP tree diff** — *Codex* — `src/backend/tmux/reconcile.rs` (new)
+- [x] **B.1 LayoutAst → weave BSP tree diff** — *Codex* — `src/backend/tmux/reconcile.rs` (new)
   - Pure function: `fn diff(old: &layout::tree::Node, new: &LayoutAst) -> Vec<LayoutDelta>` where `LayoutDelta` ∈ { `AddPane`, `RemovePane`, `SplitInternal`, `MergeInternal`, `ResizeRatio`, `SwapLeaves` }.
   - Match leaves by `pane_id` (stable across layout changes); shape-match internals by structural index.
   - **Accept:** unit tests for: pure split (1→2), pure resize, pane death (2→1), swap (2 leaves trade positions), full rebuild (no leaf matches).
@@ -341,7 +341,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] A.8 CWD discovery via `pane_current_path`
 - [x] A.9 Pipe-delimited `-F` format parsing
 - [x] A.10 Best-effort shutdown cleanup
-- [ ] B.1 LayoutAst → BSP tree diff
+- [x] B.1 LayoutAst → BSP tree diff
 - [ ] B.2 Non-BSP normalization
 - [ ] B.3 Apply LayoutDelta + animate
 - [ ] B.4 Ingest externally-spawned pane IDs
