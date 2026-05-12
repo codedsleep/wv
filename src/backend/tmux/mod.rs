@@ -1,5 +1,6 @@
 //! tmux -CC backed `TmuxBackend`.
 
+pub mod layout;
 pub mod parser;
 pub mod process;
 

@@ -88,7 +88,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - `wv attach foo` then attaches and reconciles whatever the script built.
   - **Accept:** `wv --session demo --bare && tmux split-window -t demo && tmux split-window -h -t demo && wv attach demo` shows the script-built layout.
 
-- [ ] **A.3 Tmux layout-string parser** — *Codex* — `src/backend/tmux/layout.rs` (new)
+- [x] **A.3 Tmux layout-string parser** — *Codex* — `src/backend/tmux/layout.rs` (new)
   - Parse the format documented in tmux source `layout-custom.c`: `<checksum>,<width>x<height>,<x>,<y>[{...}|[...]|,<pane-id>]`.
   - Output: `pub enum LayoutAst { Leaf { pane_id: u64, rect: Rect }, Horizontal(Vec<LayoutAst>), Vertical(Vec<LayoutAst>) }` (tmux uses `{}` for horizontal-split groups, `[]` for vertical).
   - Verify checksum on parse; reject malformed strings with a typed error (do not panic — feeds into the streaming parser).
@@ -333,7 +333,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 
 - [x] A.1 `--session <name>` flag
 - [x] A.2 `--bare` / `--no-attach` mode
-- [ ] A.3 Tmux layout-string parser
+- [x] A.3 Tmux layout-string parser
 - [ ] A.4 LayoutChange / WindowAdd / WindowClose payload decode
 - [ ] A.5 Property tests for layout parser
 - [ ] A.6 Apply Tilerm-proven session options (`prefix None`, `allow-passthrough on`, `aggressive-resize on`)

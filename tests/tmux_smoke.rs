@@ -1,3 +1,5 @@
+#[path = "../src/layout/mod.rs"]
+mod layout;
 #[path = "../src/backend/mod.rs"]
 mod backend;
 
