@@ -53,6 +53,10 @@ harness = false
 name = "compose"
 harness = false
 
+[[bench]]
+name = "script_storm"
+harness = false
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

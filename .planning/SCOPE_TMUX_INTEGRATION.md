@@ -213,7 +213,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - End-to-end: spawn `wv --session test --bare`, run a deterministic sequence of `tmux` commands as a subprocess, attach with `wv attach test`, sample frames at fixed intervals, assert final frame matches a golden snapshot.
   - **Accept:** snapshot stable across local + CI runs.
 
-- [ ] **E.3 Animation budget under script load** — *Codex* — `benches/script_storm.rs` (new)
+- [x] **E.3 Animation budget under script load** — *Codex* — `benches/script_storm.rs` (new)
   - Bench: fire 50 `tmux split-window` commands in 2 seconds; assert weave maintains the 6.25ms frame budget (master `Locked decisions`).
   - **Accept:** p99 frame time ≤ 6.25ms on the reference machine.
 
@@ -356,6 +356,6 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] D.3 `wv exec` passthrough
 - [x] E.1 Backend parity test extension
 - [x] E.2 Script-driven integration test
-- [ ] E.3 Animation budget under script load
+- [x] E.3 Animation budget under script load
 - [x] E.4 README + SCOPE.md update
 - [ ] E.99 commit & tag `phase-4.5`
