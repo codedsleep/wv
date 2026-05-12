@@ -184,7 +184,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
 
 **Goal.** A user can port a `tmux.sh`-style script to weave with minimal changes and have it work reliably.
 
-- [ ] **D.1 Document the safe-command contract** — *Claude* — `README.md`, new `docs/tmux-scripting.md`
+- [x] **D.1 Document the safe-command contract** — *Claude* — `README.md`, new `docs/tmux-scripting.md`
   - **Safe** (reconciled): `new-window`, `kill-window`, `select-window`, `rename-window`, `split-window`, `kill-pane`, `select-pane`, `swap-pane`, `resize-pane`, `select-layout`, `send-keys`, `respawn-pane`.
   - **Unsafe / undefined**: `set-hook`, `bind-key`, `source-file`, `copy-mode`, custom user-options outside the `@weave-*` namespace, `set -g status on` (weave forces it off).
   - **Forbidden**: renaming or killing the session weave is attached to.
@@ -351,7 +351,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] C.2 `SwitchWorkspace` → `select-window`
 - [x] C.3 `%session-window-changed` / window-active tracking
 - [x] C.4 Overflow handling (windows 10+)
-- [ ] D.1 Document safe-command contract
+- [x] D.1 Document safe-command contract
 - [ ] D.2 Example bootstrap script
 - [ ] D.3 `wv exec` passthrough
 - [ ] E.1 Backend parity test extension
