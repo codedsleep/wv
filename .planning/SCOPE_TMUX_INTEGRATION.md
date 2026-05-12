@@ -222,7 +222,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - `SCOPE.md`: add a `Phase 4.5 — Script integration` block that references this file as its detail.
   - **Accept:** docs build clean; cross-links resolve.
 
-- [ ] **E.99 commit & tag** — *Kimi* — per-task commits, then `git tag phase-4.5`
+- [x] **E.99 commit & tag** — *Kimi* — per-task commits, then `git tag phase-4.5`
 
 **Phase E acceptance:** Tests green. Frame budget held. README and SCOPE.md cross-reference this doc. Tag `phase-4.5` exists.
 
@@ -358,4 +358,4 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] E.2 Script-driven integration test
 - [x] E.3 Animation budget under script load
 - [x] E.4 README + SCOPE.md update
-- [ ] E.99 commit & tag `phase-4.5`
+- [x] E.99 commit & tag `phase-4.5`
