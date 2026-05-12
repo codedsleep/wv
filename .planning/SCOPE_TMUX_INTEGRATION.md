@@ -78,10 +78,10 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
 
 - [ ] **A.1 `--session <name>` flag** — *Codex* — `src/main.rs`, `src/backend/tmux/process.rs`
   - Add `--session <name>` to `wv` CLI. Default: keep `weave-<uid>` for backwards compat.
-  - Validation: `[a-zA-Z0-9_-]+`, max 64 chars, must not contain `.` or `:` (tmux session-name rules).
+  - Validation: alphanumeric + `-` + `_` only, max 64 chars (port `validate_session_name` from `/home/zzz/Documents/react/tilerm/src-tauri/src/tmux/manager.rs:495-509` — prevents command injection through shell-quoting).
   - On collision with an existing session: error with `wv attach <name>` hint.
   - `wv ls` filter loosens to "any session weave created" via a marker `@weave-instance` tmux user option set at spawn (`set -t <name> -g @weave-instance 1`).
-  - **Accept:** `wv --session foo` starts; `wv ls` lists it even though name lacks `weave-` prefix; `wv --session foo` while one runs errors clearly.
+  - **Accept:** `wv --session foo` starts; `wv ls` lists it even though name lacks `weave-` prefix; `wv --session "foo;rm -rf /"` rejects with a typed error (no shell-out); `wv --session foo` while one runs errors clearly.
 
 - [ ] **A.2 `--bare` / `--no-attach` mode** — *Codex* — `src/main.rs`, `src/app.rs`
   - `wv --session foo --bare` creates the tmux session, sets `@weave-instance`, disables tmux chrome, **does not spawn a default pane**, and exits — leaving the session ready for a script to populate.
@@ -256,6 +256,68 @@ A.2 ─┼─► A.3 ─► A.4 ─► A.5 ─┐
 4. **Detach during script execution** — if the user runs `wv attach foo` while a script is still issuing tmux commands, partial states may flicker. Mitigation: B.5 jump-cuts on attach, then animations resume for *new* changes only.
 5. **`wv exec` ambiguity** when multiple weave sessions exist — error out and require explicit `--session`.
 
+## Lessons from Tilerm
+
+The Tilerm project (`/home/zzz/Documents/react/tilerm/src-tauri/src/tmux/`) ships a working tmux-driven tiling terminal using a *different* architecture than weave's current `-CC` model. Concrete patterns worth lifting verbatim, plus one architectural alternative to consider.
+
+### Pattern transplants (add to Phase A)
+
+- [ ] **A.6 Apply Tilerm-proven session options** — *Codex* — `src/backend/tmux/process.rs`
+  - On session create, set: `prefix None`, `prefix2 None`, `allow-passthrough on`, `aggressive-resize on` (mirrors `apply_session_config` at `manager.rs:207-220`).
+  - `prefix None` / `prefix2 None` — disables tmux's own prefix key entirely so all keystrokes pass through to weave's input layer. **Critical** for the script-driven model: external scripts that `send-keys` won't accidentally trigger tmux bindings inside weave's view.
+  - `allow-passthrough on` — lets DCS / OSC sequences (OSC 52 clipboard, OSC 0/2 titles already used by master 5.2) reach the outer terminal. Without this, pane-title updates from inside `wv` workspaces break.
+  - `aggressive-resize on` — when multiple clients (e.g. `wv attach` + an external `tmux attach`) hold different dimensions, tmux resizes the window to the smaller current client rather than the smallest historical client. Avoids "frozen at smallest size" bug.
+  - **Accept:** integration test — connect with `tmux attach-session -t <name>` from a 200×60 terminal while `wv` is attached at 80×24; resizing the tmux client doesn't shrink weave's view permanently.
+
+- [ ] **A.7 Stale-session cleanup on startup** — *Codex* — `src/backend/tmux/process.rs`, `src/main.rs`
+  - Port `cleanup_orphaned_sessions` (`manager.rs:370-390`): on `wv` startup with auto-named `weave-<uid>`, kill any pre-existing `weave-*` session that lacks the `@weave-instance` marker option, since those are orphans from crashes.
+  - Named sessions (`--session foo`) are exempt — user-named state is preserved across crashes.
+  - Best-effort: if a kill fails (server gone), proceed without error.
+  - **Accept:** kill `-9` a running `wv`; subsequent `wv` startup cleans up the orphaned auto-named session and reports the count.
+
+- [ ] **A.8 CWD discovery via `pane_current_path`** — *Codex* — `src/backend/tmux/process.rs`
+  - When weave needs a pane's CWD (e.g. for "split with same CWD" semantics), query `tmux display-message -p -t %N '#{pane_current_path}'` instead of reading `/proc/<pid>/cwd`.
+  - Reason from `manager.rs:423-436`: under tmux, `/proc/<pid>/cwd` returns the `tmux` process's cwd, not the shell's. `pane_current_path` is what tmux itself tracks and is authoritative.
+  - **Accept:** `cd /tmp` in a pane, internal `Command::SplitH`-with-same-cwd opens at `/tmp`, not at weave's launch directory.
+
+- [ ] **A.9 Pipe-delimited `-F` format parsing** — *Codex* — `src/backend/tmux/process.rs`
+  - When weave issues queries like `list-windows` / `list-panes` (used in B.5 re-attach reconciliation), use Tilerm's `#{a}|#{b}|#{c}` format-string pattern (`manager.rs:222-256`).
+  - Cheap to parse, robust against window names containing spaces, no shell quoting issues.
+  - Centralize the parser in a small `format::parse_rows(output: &str, expected_fields: usize)` helper so all `-F` callers go through it.
+  - **Accept:** parse a window name containing `|` correctly using `splitn(expected_fields, '|')` (matches `manager.rs:239`).
+
+- [ ] **A.10 Best-effort shutdown cleanup** — *Codex* — `src/app.rs`, `src/backend/tmux/process.rs`
+  - On `wv` quit (clean or signal): attempt to kill the session (auto-named only) and ignore "can't find session" / "no server running" errors (port `kill_tab_session` logic at `manager.rs:160-172`).
+  - For `--session <name>`: leave the session alive (user explicitly named it = wants persistence).
+  - **Accept:** Ctrl+C an auto-named `wv`; `tmux ls` shows no orphan; SIGKILL is caught by A.7 cleanup on next launch.
+
+### Architectural alternative: grouped-session model (consider for v2)
+
+Tilerm avoids `-CC` control mode entirely. Its model:
+
+1. **Master session per workspace** — one `weave-<workspace-id>` tmux session owns the windows.
+2. **Per-pane grouped sessions** — each pane spawns a *grouped* session via `tmux new-session -t <master> -s <pane-uuid>`. Grouped sessions share windows but have independent active-window pointers.
+3. **Each pane's PTY runs `tmux attach-session -t <pane-uuid>`** — the PTY *is* a tmux client. Weave doesn't parse `%output` streams; it just owns the PTY bytes.
+4. **No layout-string parsing required** — weave owns the geometry/animation layer; tmux owns the persistence layer; they don't fight over BSP shape because tmux's own layout is irrelevant (one window per grouped session view).
+
+This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler subprocess-shelling layer (Tilerm's `manager.rs` is 550 lines and covers *more* surface area). Trade-offs:
+
+| dimension                       | current weave (`-CC` control mode)                          | tilerm-style (grouped sessions + PTYs)                          |
+|---------------------------------|-------------------------------------------------------------|------------------------------------------------------------------|
+| protocol parsing                | own `%output`/`%layout-change`/etc. parser                  | none — tmux speaks PTY to each pane natively                     |
+| structured events               | `%window-add`, `%pane-died`, `%layout-change` for free      | must poll `list-*` or use `set-hook` for change detection        |
+| script-driven layout            | reconcile `%layout-change` (Phase B work)                   | re-poll `list-windows` on tick or hook; simpler diff             |
+| animations                      | weave owns geometry; backend just owns PTY contents         | same — weave owns geometry; cleaner separation                   |
+| latency                         | direct binary stream from tmux                              | one extra `tmux attach` process per pane (overhead per pane)     |
+| OSC / clipboard / titles        | requires careful passthrough plumbing                       | `allow-passthrough on` makes it transparent (A.6)                |
+| multi-client (external attach)  | hard — `-CC` doesn't compose well with regular clients      | trivial — just another tmux client                               |
+
+**Recommendation:** keep `-CC` as the v1 path (everything in Phase A–E is built on top of it). But if Phase B reconciliation proves painful — especially non-BSP normalization (B.2) and the diff/animate machinery (B.3) — fall back to the grouped-session architecture as a v2 redesign. Treat the `-CC` parser as a debt that we'd cut if reconciliation cost balloons.
+
+> **Open question:** Tilerm caps at tmux ≥ 3.0 (`manager.rs:108-111`); weave currently aims at ≥ 3.3 for `-CC` reliability. If we ever do the grouped-session pivot, the floor drops to 3.0 and unlocks more user installations.
+
+---
+
 ## Locked decisions for this feature
 
 - **Source of truth:** tmux session state. Internal commands round-trip through tmux.
@@ -274,6 +336,11 @@ A.2 ─┼─► A.3 ─► A.4 ─► A.5 ─┐
 - [ ] A.3 Tmux layout-string parser
 - [ ] A.4 LayoutChange / WindowAdd / WindowClose payload decode
 - [ ] A.5 Property tests for layout parser
+- [ ] A.6 Apply Tilerm-proven session options (`prefix None`, `allow-passthrough on`, `aggressive-resize on`)
+- [ ] A.7 Stale-session cleanup on startup
+- [ ] A.8 CWD discovery via `pane_current_path`
+- [ ] A.9 Pipe-delimited `-F` format parsing
+- [ ] A.10 Best-effort shutdown cleanup
 - [ ] B.1 LayoutAst → BSP tree diff
 - [ ] B.2 Non-BSP normalization
 - [ ] B.3 Apply LayoutDelta + animate
