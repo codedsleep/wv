@@ -305,8 +305,8 @@ mod tests {
                 ..
             } => {
                 assert_eq!(split, Split::Vertical);
-                assert_eq!(ratio, 0.5);
-                assert_eq!(ratio_target, 0.5);
+                assert!((ratio - 0.5).abs() < f32::EPSILON);
+                assert!((ratio_target - 0.5).abs() < f32::EPSILON);
                 assert!(matches!(
                     **a,
                     Node::Leaf {

@@ -21,7 +21,7 @@ async fn tmux_spawn_reads_output_and_reports_death() -> anyhow::Result<()> {
 
     let (output_tx, mut output_rx) = mpsc::channel::<(_, Bytes)>(256);
     let (event_tx, mut event_rx) = mpsc::channel(64);
-    let mut backend = TmuxBackend::new(output_tx, event_tx).await?;
+    let mut backend = TmuxBackend::new(None, output_tx, event_tx).await?;
 
     let id = backend
         .spawn(PaneCommand {

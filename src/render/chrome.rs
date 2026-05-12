@@ -90,7 +90,15 @@ pub fn draw_status_bar(
     let max_x = surface.width;
 
     let prefix = format!("[{mode_label}] ");
-    x = write_status_text(surface, x, y, max_x, &prefix, theme.status_fg, theme.status_bg);
+    x = write_status_text(
+        surface,
+        x,
+        y,
+        max_x,
+        &prefix,
+        theme.status_fg,
+        theme.status_bg,
+    );
 
     for ws in workspaces {
         if x >= max_x {
@@ -108,8 +116,7 @@ pub fn draw_status_bar(
     }
 
     let clock = now.format("%H:%M:%S").to_string();
-    let clock_width =
-        u16::try_from(UnicodeWidthStr::width(clock.as_str())).unwrap_or(u16::MAX);
+    let clock_width = u16::try_from(UnicodeWidthStr::width(clock.as_str())).unwrap_or(u16::MAX);
     if clock_width < max_x {
         let clock_start = max_x - clock_width;
         if clock_start >= x {
@@ -441,10 +448,7 @@ mod tests {
         // its background uses the accent color.
         let one_idx = bottom.find(" 1 ").expect("workspace 1 present") + 1;
         let cell = surface
-            .get(
-                u16::try_from(one_idx).expect("fits"),
-                surface.height - 1,
-            )
+            .get(u16::try_from(one_idx).expect("fits"), surface.height - 1)
             .expect("cell exists");
         assert_eq!(cell.bg, Color::Red);
     }

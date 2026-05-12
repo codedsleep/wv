@@ -316,8 +316,8 @@ mod tests {
         assert_eq!(advance.changed_panes, vec![PaneId(1)]);
         match root {
             Node::Leaf { rect_current, .. } => {
-                assert_eq!(rect_current.x, 5.0);
-                assert_eq!(rect_current.w, 75.0);
+                assert!((rect_current.x - 5.0).abs() < f32::EPSILON);
+                assert!((rect_current.w - 75.0).abs() < f32::EPSILON);
             }
             Node::Internal { .. } => panic!("expected leaf"),
         }
@@ -364,7 +364,7 @@ mod tests {
 
         assert_eq!(advance.changed_panes, vec![PaneId(1), PaneId(2)]);
         match root {
-            Node::Internal { ratio, .. } => assert_eq!(ratio, 0.625),
+            Node::Internal { ratio, .. } => assert!((ratio - 0.625).abs() < f32::EPSILON),
             Node::Leaf { .. } => panic!("expected internal"),
         }
     }

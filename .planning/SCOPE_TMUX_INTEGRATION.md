@@ -76,7 +76,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
 
 **Goal.** A stable, scriptable session name and a working tmux-layout parser. No reconciliation yet — just decode and unit-test.
 
-- [ ] **A.1 `--session <name>` flag** — *Codex* — `src/main.rs`, `src/backend/tmux/process.rs`
+- [x] **A.1 `--session <name>` flag** — *Codex* — `src/main.rs`, `src/backend/tmux/process.rs`
   - Add `--session <name>` to `wv` CLI. Default: keep `weave-<uid>` for backwards compat.
   - Validation: alphanumeric + `-` + `_` only, max 64 chars (port `validate_session_name` from `/home/zzz/Documents/react/tilerm/src-tauri/src/tmux/manager.rs:495-509` — prevents command injection through shell-quoting).
   - On collision with an existing session: error with `wv attach <name>` hint.
@@ -331,7 +331,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 
 ## Quick checklist (flat view)
 
-- [ ] A.1 `--session <name>` flag
+- [x] A.1 `--session <name>` flag
 - [ ] A.2 `--bare` / `--no-attach` mode
 - [ ] A.3 Tmux layout-string parser
 - [ ] A.4 LayoutChange / WindowAdd / WindowClose payload decode

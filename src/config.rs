@@ -418,10 +418,10 @@ mod tests {
     fn pane_titles_default_enabled_and_can_be_disabled() {
         let default = Config::from_toml_str("").expect("empty config parses");
         let disabled = Config::from_toml_str(
-            r#"
+            r"
             [ui]
             pane_titles = false
-            "#,
+            ",
         )
         .expect("pane titles config parses");
 
@@ -603,17 +603,17 @@ mod tests {
     #[test]
     fn target_fps_clamps_to_supported_range() {
         let low = Config::from_toml_str(
-            r#"
+            r"
             [ui]
             target_fps = 1
-            "#,
+            ",
         )
         .expect("low fps config parses");
         let high = Config::from_toml_str(
-            r#"
+            r"
             [ui]
             target_fps = 999
-            "#,
+            ",
         )
         .expect("high fps config parses");
 

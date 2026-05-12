@@ -285,7 +285,7 @@ mod tests {
 
         assert!(tween.advance(Duration::from_millis(50)));
 
-        assert_eq!(tween.value(), 15.0);
+        assert!((tween.value() - 15.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -356,8 +356,8 @@ mod tests {
 
         tween.retarget(200.0);
 
-        assert_eq!(tween.from, 25.0);
-        assert_eq!(tween.to, 200.0);
+        assert!((tween.from - 25.0).abs() < f32::EPSILON);
+        assert!((tween.to - 200.0).abs() < f32::EPSILON);
         assert_eq!(tween.elapsed, Duration::ZERO);
         assert_eq!(tween.easing, Easing::Linear);
     }

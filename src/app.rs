@@ -154,10 +154,11 @@ impl BackendKind {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Args {
     pub debug: bool,
     pub backend: BackendKind,
+    pub session_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -204,6 +205,16 @@ impl Args {
                 parsed.backend = BackendKind::from_cli_value(value.as_ref())?;
             } else if let Some(value) = arg.strip_prefix("--backend=") {
                 parsed.backend = BackendKind::from_cli_value(value)?;
+            } else if arg == "--session" {
+                let Some(value) = args.next() else {
+                    bail!("missing value for `--session`; expected a tmux session name");
+                };
+                let value = value.as_ref();
+                validate_session_name(value)?;
+                parsed.session_name = Some(value.to_owned());
+            } else if let Some(value) = arg.strip_prefix("--session=") {
+                validate_session_name(value)?;
+                parsed.session_name = Some(value.to_owned());
             } else if arg == "attach" {
                 bail!(
                     "`attach` reconnects to tmux sessions only; use `wv attach [name]`, not `--backend native attach`"
@@ -215,6 +226,27 @@ impl Args {
 
         Ok(parsed)
     }
+}
+
+pub(crate) fn validate_session_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        bail!("invalid tmux session name `{name}`: cannot be empty");
+    }
+
+    if name.len() > 64 {
+        bail!("invalid tmux session name `{name}`: maximum length is 64 characters");
+    }
+
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        bail!(
+            "invalid tmux session name `{name}`: only ASCII letters, digits, hyphens, and underscores are allowed"
+        );
+    }
+
+    Ok(())
 }
 
 impl AttachArgs {
@@ -271,7 +303,7 @@ impl LaunchArgs {
 
 impl App {
     pub async fn new(width: u16, height: u16, args: Args) -> anyhow::Result<Self> {
-        let backend_parts = build_backend(args.backend).await?;
+        let backend_parts = build_backend(args.backend, args.session_name).await?;
         Ok(Self::from_backend(
             width,
             height,
@@ -785,10 +817,7 @@ impl App {
                 if let Some(ws_idx) = owning_ws {
                     let ws = &mut self.workspaces[ws_idx];
                     let was_focused = ws.focused == Some(id);
-                    let closed = ws
-                        .root
-                        .as_mut()
-                        .is_some_and(|root| root.close(id));
+                    let closed = ws.root.as_mut().is_some_and(|root| root.close(id));
                     if closed {
                         let new_focus = ws.root.as_ref().and_then(first_leaf_pane);
                         ws.focused = new_focus;
@@ -1135,7 +1164,10 @@ impl App {
     }
 }
 
-async fn build_backend(backend: BackendKind) -> anyhow::Result<BackendParts> {
+async fn build_backend(
+    backend: BackendKind,
+    session_name: Option<String>,
+) -> anyhow::Result<BackendParts> {
     let (output_tx, output_rx) = mpsc::channel(OUTPUT_CHANNEL_CAPACITY);
     let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
 
@@ -1143,7 +1175,7 @@ async fn build_backend(backend: BackendKind) -> anyhow::Result<BackendParts> {
         BackendKind::Native => Box::new(NativeBackend::with_senders(output_tx, event_tx)),
         BackendKind::Tmux => {
             ensure_tmux_available()?;
-            Box::new(TmuxBackend::new(output_tx, event_tx).await?)
+            Box::new(TmuxBackend::new(session_name, output_tx, event_tx).await?)
         }
     };
 
@@ -1249,7 +1281,7 @@ fn list_weave_tmux_sessions_for_display() -> anyhow::Result<Vec<DisplayTmuxSessi
         .args([
             "list-sessions",
             "-F",
-            "#{session_name}\t#{session_created}\t#{?session_attached,attached,detached}",
+            "#{@weave-instance}\t#{session_name}\t#{session_created}\t#{?session_attached,attached,detached}",
         ])
         .stdin(Stdio::null())
         .output()
@@ -1273,10 +1305,11 @@ fn list_weave_tmux_sessions_for_display() -> anyhow::Result<Vec<DisplayTmuxSessi
 
 fn parse_weave_tmux_session_for_display(line: &str) -> Option<DisplayTmuxSession> {
     let mut parts = line.split('\t');
+    let marker = parts.next()?;
     let name = parts.next()?;
     let created = parts.next()?;
     let state = parts.next()?;
-    if parts.next().is_some() || !name.starts_with("weave-") {
+    if parts.next().is_some() || marker != "1" {
         return None;
     }
 
@@ -1317,7 +1350,7 @@ fn list_weave_tmux_sessions() -> anyhow::Result<Vec<TmuxSession>> {
         .args([
             "list-sessions",
             "-F",
-            "#{session_name}\t#{session_activity}",
+            "#{@weave-instance}\t#{session_name}\t#{session_activity}",
         ])
         .stdin(Stdio::null())
         .output()
@@ -1334,8 +1367,11 @@ fn list_weave_tmux_sessions() -> anyhow::Result<Vec<TmuxSession>> {
 }
 
 fn parse_weave_tmux_session(line: &str) -> Option<TmuxSession> {
-    let (name, activity) = line.split_once('\t')?;
-    if !name.starts_with("weave-") {
+    let mut parts = line.split('\t');
+    let marker = parts.next()?;
+    let name = parts.next()?;
+    let activity = parts.next()?;
+    if parts.next().is_some() || marker != "1" {
         return None;
     }
 
@@ -1504,7 +1540,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        frame_interval, App, Args, AttachArgs, BackendKind, ExitState, LaunchArgs,
+        frame_interval, parse_weave_tmux_session, parse_weave_tmux_session_for_display,
+        validate_session_name, App, Args, AttachArgs, BackendKind, ExitState, LaunchArgs,
         CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION, OPEN_NEW_PANE_DURATION,
     };
     use crate::anim::tween::Easing;
@@ -1644,8 +1681,8 @@ mod tests {
             .expect("root exists")
         {
             Node::Leaf { rect_current, .. } => {
-                assert_eq!(rect_current.x, 5.0);
-                assert_eq!(rect_current.w, 75.0);
+                assert!((rect_current.x - 5.0).abs() < f32::EPSILON);
+                assert!((rect_current.w - 75.0).abs() < f32::EPSILON);
             }
             Node::Internal { .. } => panic!("expected leaf root"),
         }
@@ -1656,7 +1693,10 @@ mod tests {
         let (backend, _handle) = mock_backend(PaneId(2));
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.execute(Command::SplitH).await.expect("split succeeds");
-        assert_eq!(app.workspaces[app.current_workspace].focused, Some(PaneId(2)));
+        assert_eq!(
+            app.workspaces[app.current_workspace].focused,
+            Some(PaneId(2))
+        );
 
         app.execute(Command::FocusUp).await.expect("focus succeeds");
 
@@ -1725,10 +1765,10 @@ mod tests {
             .expect("new pane exists")
         {
             Node::Leaf { rect_current, .. } => {
-                assert_eq!(rect_current.x, f32::from(new_target.x));
-                assert_eq!(rect_current.y, 0.0);
-                assert_eq!(rect_current.w, 0.0);
-                assert_eq!(rect_current.h, 24.0);
+                assert!((rect_current.x - f32::from(new_target.x)).abs() < f32::EPSILON);
+                assert!(rect_current.y.abs() < f32::EPSILON);
+                assert!(rect_current.w.abs() < f32::EPSILON);
+                assert!((rect_current.h - 24.0).abs() < f32::EPSILON);
             }
             Node::Internal { .. } => panic!("expected new leaf"),
         }
@@ -1861,6 +1901,7 @@ mod tests {
             Args {
                 debug: false,
                 backend: BackendKind::Native,
+                session_name: None,
             }
         );
     }
@@ -1872,6 +1913,7 @@ mod tests {
             Args {
                 debug: true,
                 backend: BackendKind::Tmux,
+                session_name: None,
             }
         );
         assert_eq!(
@@ -1888,6 +1930,42 @@ mod tests {
     }
 
     #[test]
+    fn args_parse_session_flag() {
+        assert_eq!(
+            Args::parse(["--session", "foo"])
+                .expect("args parse")
+                .session_name,
+            Some("foo".to_owned())
+        );
+    }
+
+    #[test]
+    fn args_parse_session_equals_flag() {
+        assert_eq!(
+            Args::parse(["--session=foo"])
+                .expect("args parse")
+                .session_name,
+            Some("foo".to_owned())
+        );
+    }
+
+    #[test]
+    fn args_reject_invalid_session_name_characters() {
+        assert!(Args::parse(["--session", "foo;rm -rf /"]).is_err());
+    }
+
+    #[test]
+    fn args_reject_too_long_session_name() {
+        let too_long = "a".repeat(65);
+        assert!(Args::parse(["--session", &too_long]).is_err());
+    }
+
+    #[test]
+    fn args_reject_empty_session_name() {
+        assert!(Args::parse(["--session", ""]).is_err());
+    }
+
+    #[test]
     fn launch_args_parse_attach_subcommand() {
         assert_eq!(
             LaunchArgs::parse(["attach", "weave-test"]).expect("launch args parse"),
@@ -1898,11 +1976,52 @@ mod tests {
     }
 
     #[test]
+    fn launch_args_reject_attach_session_flag() {
+        assert!(LaunchArgs::parse(["attach", "weave-test", "--session", "x"]).is_err());
+    }
+
+    #[test]
     fn launch_args_reject_native_attach() {
         let error = LaunchArgs::parse(["--backend", "native", "attach"])
             .expect_err("native attach should fail")
             .to_string();
 
         assert!(error.contains("wv attach [name]"));
+    }
+
+    #[test]
+    fn validate_session_name_accepts_safe_names() {
+        assert!(validate_session_name("foo").is_ok());
+        assert!(validate_session_name("foo_bar-123").is_ok());
+    }
+
+    #[test]
+    fn validate_session_name_rejects_empty_too_long_and_bad_chars() {
+        assert!(validate_session_name("").is_err());
+        assert!(validate_session_name(&"a".repeat(65)).is_err());
+        assert!(validate_session_name("foo;rm").is_err());
+        assert!(validate_session_name("foo bar").is_err());
+        assert!(validate_session_name("foo/bar").is_err());
+    }
+
+    #[test]
+    fn parse_weave_tmux_session_requires_marker() {
+        let session = parse_weave_tmux_session("1\tcustom\t123").expect("marked session");
+        assert_eq!(session.name, "custom");
+        assert_eq!(session.activity, 123);
+
+        assert!(parse_weave_tmux_session("\tweave-old\t123").is_none());
+        assert!(parse_weave_tmux_session("0\tweave-old\t123").is_none());
+    }
+
+    #[test]
+    fn parse_weave_tmux_session_for_display_requires_marker() {
+        let session = parse_weave_tmux_session_for_display("1\tcustom\t123\tdetached")
+            .expect("marked session");
+        assert_eq!(session.name, "custom");
+        assert_eq!(session.created, 123);
+        assert_eq!(session.state, "detached");
+
+        assert!(parse_weave_tmux_session_for_display("0\tweave-old\t123\tdetached").is_none());
     }
 }

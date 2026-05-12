@@ -90,8 +90,19 @@ pub struct TmuxBackend {
 }
 
 impl TmuxBackend {
-    pub async fn new(output_tx: OutputSender, event_tx: EventSender) -> anyhow::Result<Self> {
-        let session_name = new_session_name();
+    pub async fn new(
+        session_name: Option<String>,
+        output_tx: OutputSender,
+        event_tx: EventSender,
+    ) -> anyhow::Result<Self> {
+        let explicit_session_name = session_name.is_some();
+        let session_name = session_name.unwrap_or_else(new_session_name);
+        if explicit_session_name && tmux_session_exists(&session_name)? {
+            bail!(
+                "tmux session `{session_name}` already exists; attach with `wv attach {session_name}`"
+            );
+        }
+
         let child = Command::new("tmux")
             .args(["-C", "new-session", "-s", &session_name])
             .stdin(Stdio::piped())
@@ -203,6 +214,8 @@ impl TmuxBackend {
     }
 
     async fn configure_session(&mut self) -> Result<(), Error> {
+        let response = self.send_command("set -g @weave-instance 1").await?;
+        ensure_success(&response)?;
         let response = self.send_command("set -g status off").await?;
         ensure_success(&response)?;
         let response = self.send_command("set -g pane-border-status off").await?;
@@ -595,4 +608,16 @@ fn new_session_name() -> String {
         ^ u64::from(std::process::id())
         ^ counter;
     format!("weave-{:08x}", uid & 0xffff_ffff)
+}
+
+fn tmux_session_exists(session_name: &str) -> anyhow::Result<bool> {
+    let status = Command::new("tmux")
+        .args(["has-session", "-t", session_name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("failed to check tmux session")?;
+
+    Ok(status.success())
 }

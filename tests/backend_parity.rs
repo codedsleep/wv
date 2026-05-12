@@ -40,7 +40,7 @@ async fn run_native_scenario() -> anyhow::Result<Surface> {
 async fn run_tmux_scenario() -> anyhow::Result<Surface> {
     let (output_tx, output_rx) = mpsc::channel::<(_, Bytes)>(256);
     let (event_tx, event_rx) = mpsc::channel(64);
-    let backend = TmuxBackend::new(output_tx, event_tx).await?;
+    let backend = TmuxBackend::new(None, output_tx, event_tx).await?;
 
     run_scenario(backend, output_rx, event_rx).await
 }
