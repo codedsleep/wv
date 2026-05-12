@@ -765,6 +765,23 @@ impl App {
         self.current().root.as_ref()
     }
 
+    #[doc(hidden)]
+    pub fn compose_current_surface(&self) -> Surface {
+        let mut surface = Surface::new(self.front.width, self.front.height);
+        let root = self.workspaces[self.current_workspace].root.as_ref();
+        let focused = self.workspaces[self.current_workspace].focused;
+        compositor::compose(
+            root,
+            &self.panes,
+            focused,
+            self.theme,
+            &self.timeline,
+            &mut surface,
+            self.pane_titles,
+        );
+        surface
+    }
+
     pub async fn advance_animations_by(&mut self, dt: Duration) -> anyhow::Result<()> {
         self.advance_animations(dt).await
     }

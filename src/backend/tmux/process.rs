@@ -164,14 +164,16 @@ impl TmuxBackend {
         event_tx: EventSender,
     ) -> anyhow::Result<Self> {
         let child = Command::new("tmux")
-            .args(["-CC", "attach", "-t", &session_name])
+            .args(["-C", "attach", "-t", &session_name])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| format!("failed to spawn tmux -CC attach -t {session_name}"))?;
+            .with_context(|| format!("failed to spawn tmux -C attach -t {session_name}"))?;
 
         let mut backend = Self::from_child(session_name, child, output_tx, event_tx, false)?;
+        let response = backend.next_response().await?;
+        ensure_success(&response)?;
         backend.configure_session().await?;
 
         Ok(backend)
