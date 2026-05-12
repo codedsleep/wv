@@ -5,6 +5,7 @@ pub mod layout;
 pub mod parser;
 pub mod process;
 pub mod reconcile;
+pub mod windows;
 
 #[allow(unused_imports)]
 pub use process::{TmuxBackend, TmuxInitialPane, TmuxInitialState, TmuxInitialWindow};

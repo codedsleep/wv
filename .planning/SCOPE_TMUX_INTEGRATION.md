@@ -156,7 +156,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
 
 **Goal.** tmux window switching (`tmux select-window -t :2`) is synchronized with weave workspace switching (`Alt+2`), and vice versa.
 
-- [ ] **C.1 Window-index ↔ workspace-index mapping** — *Codex* — `src/backend/tmux/windows.rs` (new)
+- [x] **C.1 Window-index ↔ workspace-index mapping** — *Codex* — `src/backend/tmux/windows.rs` (new)
   - Owns a `HashMap<u64 /* tmux window-id */, usize /* weave workspace 0..8 */>` plus the inverse.
   - On `%window-add`: if tmux's `window_index` is 1..=9, claim that weave workspace slot; else mark "overflow" (out-of-band, listed in `wv ls --windows` but no digit binding).
   - On `%window-close`: free the slot; if it was the current workspace, fall back to lowest non-empty workspace.
@@ -347,7 +347,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] B.4 Ingest externally-spawned pane IDs
 - [x] B.5 Full re-attach reconciliation
 - [x] B.6 Conflict resolution policy
-- [ ] C.1 Window-index ↔ workspace-index mapping
+- [x] C.1 Window-index ↔ workspace-index mapping
 - [ ] C.2 `SwitchWorkspace` → `select-window`
 - [ ] C.3 `%session-changed` / window-active tracking
 - [ ] C.4 Overflow handling (windows 10+)
