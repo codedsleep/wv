@@ -216,6 +216,14 @@ impl TmuxBackend {
     async fn configure_session(&mut self) -> Result<(), Error> {
         let response = self.send_command("set -g @weave-instance 1").await?;
         ensure_success(&response)?;
+        let response = self.send_command("set -g prefix None").await?;
+        ensure_success(&response)?;
+        let response = self.send_command("set -g prefix2 None").await?;
+        ensure_success(&response)?;
+        let response = self.send_command("set -g allow-passthrough on").await?;
+        ensure_success(&response)?;
+        let response = self.send_command("set -g aggressive-resize on").await?;
+        ensure_success(&response)?;
         let response = self.send_command("set -g status off").await?;
         ensure_success(&response)?;
         let response = self.send_command("set -g pane-border-status off").await?;

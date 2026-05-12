@@ -75,3 +75,44 @@ async fn tmux_spawn_reads_output_and_reports_death() -> anyhow::Result<()> {
     drop(backend);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires tmux on PATH"]
+async fn applies_tilerm_session_options() -> anyhow::Result<()> {
+    if Command::new("tmux").arg("-V").output().is_err() {
+        return Ok(());
+    }
+
+    let (output_tx, _output_rx) = mpsc::channel::<(_, Bytes)>(256);
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let backend = TmuxBackend::new(None, output_tx, event_tx).await?;
+    let session = backend.session_name();
+
+    assert_eq!(show_global_option(session, "prefix")?, "prefix None");
+    assert_eq!(show_global_option(session, "prefix2")?, "prefix2 None");
+    assert_eq!(
+        show_global_option(session, "allow-passthrough")?,
+        "allow-passthrough on"
+    );
+    assert_eq!(
+        show_global_option(session, "aggressive-resize")?,
+        "aggressive-resize on"
+    );
+
+    drop(backend);
+    Ok(())
+}
+
+fn show_global_option(session: &str, option: &str) -> anyhow::Result<String> {
+    let output = Command::new("tmux")
+        .args(["show-options", "-g", "-t", session, option])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "tmux show-options failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}

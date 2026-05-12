@@ -262,7 +262,7 @@ The Tilerm project (`/home/zzz/Documents/react/tilerm/src-tauri/src/tmux/`) ship
 
 ### Pattern transplants (add to Phase A)
 
-- [ ] **A.6 Apply Tilerm-proven session options** — *Codex* — `src/backend/tmux/process.rs`
+- [x] **A.6 Apply Tilerm-proven session options** — *Codex* — `src/backend/tmux/process.rs`
   - On session create, set: `prefix None`, `prefix2 None`, `allow-passthrough on`, `aggressive-resize on` (mirrors `apply_session_config` at `manager.rs:207-220`).
   - `prefix None` / `prefix2 None` — disables tmux's own prefix key entirely so all keystrokes pass through to weave's input layer. **Critical** for the script-driven model: external scripts that `send-keys` won't accidentally trigger tmux bindings inside weave's view.
   - `allow-passthrough on` — lets DCS / OSC sequences (OSC 52 clipboard, OSC 0/2 titles already used by master 5.2) reach the outer terminal. Without this, pane-title updates from inside `wv` workspaces break.
@@ -336,7 +336,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] A.3 Tmux layout-string parser
 - [x] A.4 LayoutChange / WindowAdd / WindowClose payload decode
 - [x] A.5 Property tests for layout parser
-- [ ] A.6 Apply Tilerm-proven session options (`prefix None`, `allow-passthrough on`, `aggressive-resize on`)
+- [x] A.6 Apply Tilerm-proven session options (`prefix None`, `allow-passthrough on`, `aggressive-resize on`)
 - [ ] A.7 Stale-session cleanup on startup
 - [ ] A.8 CWD discovery via `pane_current_path`
 - [ ] A.9 Pipe-delimited `-F` format parsing
