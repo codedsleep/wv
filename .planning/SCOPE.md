@@ -381,6 +381,20 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 
 ---
 
+# Phase 4.5 — Script integration (tmux backend)
+
+**Goal:** External `tmux` commands and shell scripts drive a running `wv --backend tmux` session's layout, panes, and workspaces. tmux is the source of truth; weave reconciles and animates. Detail: [SCOPE_TMUX_INTEGRATION.md](./SCOPE_TMUX_INTEGRATION.md).
+
+- Phase A — Foundation: `--session <name>`, `--bare`, layout-string parser, payload decode, property tests, Tilerm-proven session options, stale-session cleanup, CWD via `pane_current_path`, pipe-delimited `-F` format helper, best-effort shutdown cleanup.
+- Phase B — Reconciliation: `LayoutAst → BSP` diff, non-BSP normalization, apply + animate, ingest externally-spawned panes, full re-attach reconciliation, conflict resolution policy.
+- Phase C — Windows ↔ Workspaces: tmux window-index ↔ weave workspace mapping, `SwitchWorkspace` → `select-window`, `%session-window-changed` tracking, overflow handling for windows 10+.
+- Phase D — Script ergonomics: safe-command contract doc, example bootstrap script, `wv exec` passthrough.
+- Phase E — Tests + release gating: backend parity extension, script-driven integration test, animation budget bench, README + SCOPE.md update, tag `phase-4.5`.
+
+**Phase 4.5 acceptance:** External `tmux split-window`, `kill-pane`, `select-window`, etc. drive weave's BSP tree and animate uniformly with internal commands. `wv --session <name>` and `wv --bare` let scripts pre-build a layout before attach. Documented in [`docs/tmux-scripting.md`](../docs/tmux-scripting.md). Tag `phase-4.5` exists.
+
+---
+
 # Phase 5 — Polish + release
 
 **Goal:** v0.1.0 ship: themes, titles, debug, prebuilt binaries, contributor docs.

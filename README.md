@@ -136,6 +136,27 @@ Each tmux session is auto-named `weave-<8-hex-uid>` so multiple parallel session
 
 The tmux backend parser is `#![forbid(unsafe_code)]` and covered by both unit tests and [proptest](https://crates.io/crates/proptest)-driven randomized robustness tests (`src/backend/tmux/parser.rs`). The protocol surface is modelled on [iTerm2's tmux integration](https://iterm2.com/documentation-tmux-integration.html).
 
+## Scripting weave with tmux
+
+When the tmux backend is active, external `tmux` commands drive the layout and weave reconciles + animates the result. tmux is the source of truth; both internal keybinds and external scripts flow through the same `%layout-change` path.
+
+```sh
+wv --session main --bare &              # create empty session, set @weave-instance marker, exit
+tmux new-window  -t main -n code        # workspace 0 (window 1)
+tmux split-window -h -t main:code
+tmux new-window  -t main -n agents      # workspace 1 (window 2)
+exec wv attach main                     # weave takes over and animates into the built layout
+```
+
+- `wv --session <name>` picks a stable, scriptable name (default is `weave-<uid>`).
+- `wv --bare` creates the session, sets options, and exits without spawning a pane — leaving room for a script to populate.
+- `wv exec <tmux-args...>` resolves the active weave session and runs a tmux subcommand against it.
+- `wv ls --windows` lists windows including overflow windows 10+ (addressable via `Command::GotoWindow`).
+
+tmux windows `1..9` map 1:1 to weave workspaces `0..8`; windows `10+` are overflow. Layouts produced by `select-layout main-horizontal | tiled | even-vertical` are accepted and normalized into a right-leaning BSP — exact round-trip is not guaranteed.
+
+Full safe-command contract and a worked example are in [`docs/tmux-scripting.md`](docs/tmux-scripting.md) and [`docs/examples/weave-bootstrap.sh`](docs/examples/weave-bootstrap.sh).
+
 ## Logs
 
 Tracing output is written to `~/.local/state/weave/weave.log`. The file rotates at 10 MB and keeps 3 numbered archives (`weave.log.1`–`weave.log.3`). Set `WEAVE_LOG=debug` (or `trace` / `warn` / `error`) for level control.

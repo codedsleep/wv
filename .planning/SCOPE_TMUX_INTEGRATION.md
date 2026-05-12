@@ -217,7 +217,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - Bench: fire 50 `tmux split-window` commands in 2 seconds; assert weave maintains the 6.25ms frame budget (master `Locked decisions`).
   - **Accept:** p99 frame time ≤ 6.25ms on the reference machine.
 
-- [ ] **E.4 README + SCOPE.md update** — *Claude* — `README.md`, `.planning/SCOPE.md`
+- [x] **E.4 README + SCOPE.md update** — *Claude* — `README.md`, `.planning/SCOPE.md`
   - README: new section "Scripting weave with tmux", linking to `docs/tmux-scripting.md`.
   - `SCOPE.md`: add a `Phase 4.5 — Script integration` block that references this file as its detail.
   - **Accept:** docs build clean; cross-links resolve.
@@ -357,5 +357,5 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] E.1 Backend parity test extension
 - [ ] E.2 Script-driven integration test
 - [ ] E.3 Animation budget under script load
-- [ ] E.4 README + SCOPE.md update
+- [x] E.4 README + SCOPE.md update
 - [ ] E.99 commit & tag `phase-4.5`
