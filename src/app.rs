@@ -596,7 +596,7 @@ impl App {
                     }
                 }
                 Some(event) = self.event_rx.recv() => {
-                    self.handle_backend_event(event);
+                    self.handle_backend_event(event).await?;
                 }
                 event = events.next() => {
                     self.handle_input(event).await?;
@@ -1201,7 +1201,7 @@ impl App {
         Ok(())
     }
 
-    fn handle_backend_event(&mut self, event: BackendEvent) {
+    async fn handle_backend_event(&mut self, event: BackendEvent) -> anyhow::Result<()> {
         match event {
             BackendEvent::PaneDied(id) => {
                 tracing::info!("pane died: {id:?}");
@@ -1231,7 +1231,38 @@ impl App {
                 tracing::error!("pane spawn failed: {id:?}: {message}");
                 self.exit = ExitState::Quit;
             }
+            BackendEvent::ActiveWindowChanged { window_id } => {
+                self.sync_active_tmux_window(window_id).await?;
+            }
         }
+
+        Ok(())
+    }
+
+    async fn sync_active_tmux_window(&mut self, window_id: u64) -> anyhow::Result<()> {
+        let Some(workspace_idx) = self.tmux_windows.workspace_for_window(window_id) else {
+            tracing::debug!(
+                window_id,
+                "ignoring active-window switch to unmapped window"
+            );
+            return Ok(());
+        };
+
+        if workspace_idx == self.current_workspace {
+            return Ok(());
+        }
+
+        self.snap_workspace_tweens(self.current_workspace).await?;
+        self.clear_external_tracking_for_workspace(self.current_workspace);
+
+        self.current_workspace = workspace_idx;
+        self.recompute_layout();
+
+        let pane_ids = self.current().leaf_panes();
+        self.resize_attached_panes(&pane_ids).await?;
+        self.dirty = true;
+
+        Ok(())
     }
 
     async fn handle_input(&mut self, event: Option<io::Result<Event>>) -> anyhow::Result<()> {
@@ -2231,7 +2262,7 @@ mod tests {
     use crate::backend::tmux::layout::LayoutAst;
     use crate::backend::tmux::process::TmuxPaneId;
     use crate::backend::tmux::{TmuxInitialPane, TmuxInitialState, TmuxInitialWindow};
-    use crate::backend::{PaneBackend, PaneCommand, PaneId};
+    use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
     use crate::command::Command;
     use crate::layout::geometry::{FRect, Rect, Split};
     use crate::layout::tree::Node;
@@ -2845,6 +2876,44 @@ mod tests {
 
         assert_eq!(handle.selected_windows(), vec![2]);
         assert_eq!(app.current_workspace, 2);
+    }
+
+    #[tokio::test]
+    async fn active_window_changed_updates_current_workspace_from_window_map() {
+        let (backend, handle) = mock_backend(PaneId(3));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let target_rect = rect(0, 0, 80, 23);
+        let _ = app.tmux_windows.on_window_add(101, 1);
+        let _ = app.tmux_windows.on_window_add(102, 2);
+        app.workspaces[1].root = Some(Node::Leaf {
+            pane: PaneId(2),
+            rect_current: FRect::from(target_rect),
+            rect_target: target_rect,
+        });
+        app.workspaces[1].focused = Some(PaneId(2));
+        app.panes
+            .push(crate::term::pane::Pane::new(PaneId(2), 80, 24));
+
+        app.handle_backend_event(BackendEvent::ActiveWindowChanged { window_id: 102 })
+            .await
+            .expect("active window sync succeeds");
+
+        assert_eq!(app.current_workspace, 1);
+        assert_eq!(handle.resized(), vec![(PaneId(2), 80, 23)]);
+    }
+
+    #[tokio::test]
+    async fn active_window_changed_to_unmapped_window_leaves_workspace_unchanged() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let _ = app.tmux_windows.on_window_add(101, 1);
+
+        app.handle_backend_event(BackendEvent::ActiveWindowChanged { window_id: 999 })
+            .await
+            .expect("unmapped active window is ignored");
+
+        assert_eq!(app.current_workspace, 0);
+        assert!(handle.resized().is_empty());
     }
 
     #[tokio::test]

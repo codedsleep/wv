@@ -20,6 +20,9 @@ pub enum TmuxNotification {
     SessionChanged {
         raw: String,
     },
+    ActiveWindowChanged {
+        window_id: u64,
+    },
     LayoutChange {
         window_id: u64,
         layout: LayoutAst,
@@ -38,6 +41,7 @@ pub enum TmuxNotification {
 pub enum NotificationKind {
     WindowAdd,
     WindowClose,
+    ActiveWindowChanged,
     LayoutChange,
 }
 
@@ -165,6 +169,13 @@ impl Parser {
             return Some(TmuxNotification::SessionChanged {
                 raw: raw_args(text, "%session-changed").to_owned(),
             });
+        }
+
+        if text.starts_with("%session-window-changed") {
+            return Some(parse_active_window_change(raw_args(
+                text,
+                "%session-window-changed",
+            )));
         }
 
         if text.starts_with("%layout-change") {
@@ -321,10 +332,24 @@ fn parse_window_notification(raw: &str, kind: NotificationKind) -> TmuxNotificat
         Ok(window_id) => match kind {
             NotificationKind::WindowAdd => TmuxNotification::WindowAdd { window_id },
             NotificationKind::WindowClose => TmuxNotification::WindowClose { window_id },
+            NotificationKind::ActiveWindowChanged => {
+                TmuxNotification::ActiveWindowChanged { window_id }
+            }
             NotificationKind::LayoutChange => unreachable!("layout-change is parsed separately"),
         },
         Err(error) => TmuxNotification::NotificationParseError {
             kind,
+            raw: raw.to_owned(),
+            error,
+        },
+    }
+}
+
+fn parse_active_window_change(raw: &str) -> TmuxNotification {
+    match parse_active_window_change_fields(raw) {
+        Ok(window_id) => TmuxNotification::ActiveWindowChanged { window_id },
+        Err(error) => TmuxNotification::NotificationParseError {
+            kind: NotificationKind::ActiveWindowChanged,
             raw: raw.to_owned(),
             error,
         },
@@ -344,6 +369,18 @@ fn parse_layout_change(raw: &str) -> TmuxNotification {
             error,
         },
     }
+}
+
+fn parse_active_window_change_fields(raw: &str) -> Result<u64, String> {
+    let mut fields = raw.split_whitespace();
+    let _session_token = fields
+        .next()
+        .ok_or_else(|| "missing session id".to_owned())?;
+    let window_token = fields
+        .next()
+        .ok_or_else(|| "missing window id".to_owned())?;
+
+    parse_window_id_token(window_token)
 }
 
 fn parse_layout_change_fields(raw: &str) -> Result<(u64, LayoutAst), String> {
@@ -425,6 +462,32 @@ mod tests {
                 TmuxNotification::WindowClose { window_id: 8 },
             ]
         );
+    }
+
+    #[test]
+    fn parses_session_window_changed_notification() {
+        let mut parser = Parser::new();
+
+        assert_eq!(
+            parser.feed(b"%session-window-changed $1 @42\n"),
+            vec![TmuxNotification::ActiveWindowChanged { window_id: 42 }]
+        );
+    }
+
+    #[test]
+    fn reports_session_window_changed_with_malformed_window_id_as_parse_error() {
+        let mut parser = Parser::new();
+        let notifications = parser.feed(b"%session-window-changed $1 not-a-window\n");
+
+        assert_eq!(notifications.len(), 1);
+        assert!(matches!(
+            &notifications[0],
+            TmuxNotification::NotificationParseError {
+                kind: NotificationKind::ActiveWindowChanged,
+                raw,
+                ..
+            } if raw == "$1 not-a-window"
+        ));
     }
 
     #[test]

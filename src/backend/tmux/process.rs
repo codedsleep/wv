@@ -615,6 +615,9 @@ fn handle_notification(
         TmuxNotification::PaneDied { pane_id } => {
             handle_pane_died(TmuxPaneId(pane_id), maps, event_tx);
         }
+        TmuxNotification::ActiveWindowChanged { window_id } => {
+            let _ = event_tx.blocking_send(BackendEvent::ActiveWindowChanged { window_id });
+        }
         TmuxNotification::Exit => emit_all_panes_dead(maps, event_tx),
         TmuxNotification::CommandResponse(response) => {
             let _ = response_tx.blocking_send(response);
@@ -622,8 +625,10 @@ fn handle_notification(
         TmuxNotification::WindowAdd { .. }
         | TmuxNotification::WindowClose { .. }
         | TmuxNotification::SessionChanged { .. }
-        | TmuxNotification::LayoutChange { .. }
-        | TmuxNotification::NotificationParseError { .. } => {}
+        | TmuxNotification::LayoutChange { .. } => {}
+        TmuxNotification::NotificationParseError { kind, raw, error } => {
+            tracing::debug!(?kind, raw, error, "failed to parse tmux notification");
+        }
     }
 }
 

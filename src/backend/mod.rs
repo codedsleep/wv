@@ -34,6 +34,7 @@ pub struct PaneCommand {
 pub enum BackendEvent {
     PaneDied(PaneId),
     SpawnFailed(PaneId, String),
+    ActiveWindowChanged { window_id: u64 },
 }
 
 /// Pane process backend.
