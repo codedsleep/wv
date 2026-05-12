@@ -1,6 +1,7 @@
 //! `App`: event loop + state owner.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::process::{Command as ProcessCommand, Stdio};
 
@@ -42,7 +43,7 @@ const EVENT_CHANNEL_CAPACITY: usize = 64;
 
 type BoxedBackend = Box<dyn PaneBackend>;
 
-pub const WORKSPACE_COUNT: usize = 9;
+pub use crate::backend::tmux::windows::WORKSPACE_COUNT;
 
 #[derive(Default)]
 struct Workspace {
@@ -174,11 +175,18 @@ pub struct AttachArgs {
     pub session_name: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ExecArgs {
+    pub session_name: Option<String>,
+    pub tmux_args: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LaunchArgs {
     Run(Args),
     Bare(Args),
     Attach(AttachArgs),
+    Exec(ExecArgs),
     ListSessions { windows: bool },
 }
 
@@ -298,6 +306,28 @@ impl AttachArgs {
     }
 }
 
+impl ExecArgs {
+    fn parse<I, S>(session_name: Option<String>, args: I) -> anyhow::Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let args = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_owned())
+            .collect::<Vec<_>>();
+        let (session_name, tmux_args) = parse_exec_args(session_name, &args)?;
+        if tmux_args.is_empty() {
+            bail!("`wv exec` requires tmux arguments, for example `wv exec split-window -h`");
+        }
+
+        Ok(Self {
+            session_name,
+            tmux_args,
+        })
+    }
+}
+
 impl LaunchArgs {
     pub fn parse_env() -> anyhow::Result<Self> {
         Self::parse(std::env::args().skip(1))
@@ -315,6 +345,9 @@ impl LaunchArgs {
 
         match args.first().map(String::as_str) {
             Some("attach") => return Ok(Self::Attach(AttachArgs::parse(args.iter().skip(1))?)),
+            Some("exec") => {
+                return Ok(Self::Exec(ExecArgs::parse(None, args.iter().skip(1))?));
+            }
             Some("ls") => {
                 let mut windows = false;
                 for arg in args.iter().skip(1) {
@@ -331,6 +364,10 @@ impl LaunchArgs {
             _ => {}
         }
 
+        if let Some(exec_args) = parse_session_prefixed_exec_args(&args)? {
+            return Ok(Self::Exec(exec_args));
+        }
+
         let args = Args::parse(args)?;
         if args.bare {
             Ok(Self::Bare(args))
@@ -338,6 +375,88 @@ impl LaunchArgs {
             Ok(Self::Run(args))
         }
     }
+}
+
+fn parse_session_prefixed_exec_args(args: &[String]) -> anyhow::Result<Option<ExecArgs>> {
+    let mut index = 0;
+
+    while let Some(arg) = args.get(index) {
+        if arg == "exec" {
+            let (session_name, prefix_args) = parse_exec_args(None, &args[..index])?;
+            debug_assert!(prefix_args.is_empty());
+            return Ok(Some(ExecArgs::parse(
+                session_name,
+                args.iter().skip(index + 1),
+            )?));
+        }
+
+        if let Some(width) = session_option_width(arg) {
+            index += width;
+        } else {
+            return Ok(None);
+        }
+    }
+
+    Ok(None)
+}
+
+fn session_option_width(arg: &str) -> Option<usize> {
+    if arg == "--session" || arg == "--session-named" {
+        Some(2)
+    } else if arg.starts_with("--session=") || arg.starts_with("--session-named=") {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+fn parse_exec_args(
+    mut session_name: Option<String>,
+    args: &[String],
+) -> anyhow::Result<(Option<String>, Vec<String>)> {
+    let mut index = 0;
+
+    while let Some(arg) = args.get(index) {
+        if parse_session_option(arg, args.get(index + 1), &mut session_name)? {
+            index += session_option_width(arg).expect("parsed session option has a width");
+        } else {
+            break;
+        }
+    }
+
+    Ok((session_name, args[index..].to_vec()))
+}
+
+fn parse_session_option(
+    arg: &str,
+    next: Option<&String>,
+    session_name: &mut Option<String>,
+) -> anyhow::Result<bool> {
+    if arg == "--session" || arg == "--session-named" {
+        let Some(value) = next else {
+            bail!("missing value for `{arg}`; expected a tmux session name");
+        };
+        set_exec_session_name(session_name, value)?;
+        return Ok(true);
+    }
+
+    if let Some(value) = arg
+        .strip_prefix("--session=")
+        .or_else(|| arg.strip_prefix("--session-named="))
+    {
+        set_exec_session_name(session_name, value)?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn set_exec_session_name(session_name: &mut Option<String>, value: &str) -> anyhow::Result<()> {
+    validate_session_name(value)?;
+    if session_name.replace(value.to_owned()).is_some() {
+        bail!("`wv exec` accepts at most one session name");
+    }
+    Ok(())
 }
 
 impl App {
@@ -834,10 +953,10 @@ impl App {
         self.remove_external_panes(&deltas);
 
         let ws = &mut self.workspaces[workspace_idx];
-        if ws.focused.is_none_or(|pane| {
+        if ws.focused.map_or(true, |pane| {
             ws.root
                 .as_ref()
-                .is_none_or(|root| root.find_leaf(pane).is_none())
+                .map_or(true, |root| root.find_leaf(pane).is_none())
         }) {
             ws.focused = ws.root.as_ref().and_then(first_leaf_pane);
         }
@@ -988,8 +1107,8 @@ impl App {
                         animated_panes.insert(*pane);
                     }
                 }
-                LayoutDelta::ResizeRatio { .. } => {}
-                LayoutDelta::SplitInternal { .. }
+                LayoutDelta::ResizeRatio { .. }
+                | LayoutDelta::SplitInternal { .. }
                 | LayoutDelta::MergeInternal { .. }
                 | LayoutDelta::SwapLeaves { .. } => {}
             }
@@ -1455,7 +1574,7 @@ impl App {
         let panes_idle = self
             .external_animation_panes
             .get(&workspace_idx)
-            .is_none_or(|panes| {
+            .map_or(true, |panes| {
                 panes
                     .iter()
                     .all(|pane| !self.timeline.has_leaf_rect_tween(*pane))
@@ -1763,15 +1882,52 @@ pub fn print_weave_sessions(windows: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn resolve_attach_session(requested: Option<&str>) -> anyhow::Result<String> {
-    if let Some(session_name) = requested {
-        if tmux_session_exists(session_name)? {
-            return Ok(session_name.to_owned());
+pub fn run_tmux_exec(args: &ExecArgs) -> anyhow::Result<()> {
+    ensure_tmux_available()?;
+    let session_name = resolve_exec_session(args.session_name.as_deref())?;
+    let tmux_args = tmux_exec_args(&args.tmux_args, &session_name);
+    let status = match ProcessCommand::new("tmux").args(&tmux_args).status() {
+        Ok(status) => status,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            bail!("tmux was not found on PATH; install tmux to use `wv exec`");
         }
+        Err(error) => return Err(error).context("failed to run tmux for `wv exec`"),
+    };
 
-        bail!(
-            "tmux session `{session_name}` does not exist; start one with `wv --backend tmux` or choose a name from `tmux list-sessions`"
-        );
+    if !status.success() {
+        bail!("`tmux {}` exited with {status}", tmux_args.join(" "));
+    }
+
+    Ok(())
+}
+
+fn tmux_exec_args(args: &[String], session_name: &str) -> Vec<String> {
+    if args.is_empty() || tmux_args_have_target(args) {
+        return args.to_vec();
+    }
+
+    let mut tmux_args = Vec::with_capacity(args.len() + 2);
+    tmux_args.push(args[0].clone());
+    tmux_args.push("-t".to_owned());
+    tmux_args.push(session_name.to_owned());
+    tmux_args.extend(args.iter().skip(1).cloned());
+    tmux_args
+}
+
+fn tmux_args_have_target(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "-t"
+            || arg
+                .strip_prefix("-t")
+                .is_some_and(|target| !target.is_empty())
+            || arg == "--target"
+            || arg.starts_with("--target=")
+    })
+}
+
+fn resolve_attach_session(requested: Option<&str>) -> anyhow::Result<String> {
+    if let Some(session_name) = resolve_requested_session(requested)? {
+        return Ok(session_name);
     }
 
     let Some(session) = list_weave_tmux_sessions()?
@@ -1782,6 +1938,48 @@ fn resolve_attach_session(requested: Option<&str>) -> anyhow::Result<String> {
     };
 
     Ok(session.name)
+}
+
+fn resolve_exec_session(requested: Option<&str>) -> anyhow::Result<String> {
+    if let Some(session_name) = resolve_requested_session(requested)? {
+        return Ok(session_name);
+    }
+
+    let mut sessions = list_weave_tmux_sessions()?;
+    match sessions.len() {
+        0 => bail!("no weave tmux sessions found; start one with `wv --backend tmux`"),
+        1 => Ok(sessions.remove(0).name),
+        _ => {
+            sessions.sort_by(|left, right| {
+                right
+                    .activity
+                    .cmp(&left.activity)
+                    .then_with(|| left.name.cmp(&right.name))
+            });
+            let candidates = sessions
+                .iter()
+                .map(|session| format!("  {}", session.name))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "ambiguous weave session for `wv exec`; pass `--session <name>`. candidates:\n{candidates}"
+            );
+        }
+    }
+}
+
+fn resolve_requested_session(requested: Option<&str>) -> anyhow::Result<Option<String>> {
+    let Some(session_name) = requested else {
+        return Ok(None);
+    };
+
+    if tmux_session_exists(session_name)? {
+        return Ok(Some(session_name.to_owned()));
+    }
+
+    bail!(
+        "tmux session `{session_name}` does not exist; start one with `wv --backend tmux` or choose a name from `tmux list-sessions`"
+    );
 }
 
 #[derive(Debug)]
@@ -1846,19 +2044,21 @@ fn parse_tmux_window_row(row: &[&str]) -> Option<WindowRow> {
 
 fn format_window_table(session_name: &str, windows: &[WindowRow]) -> String {
     let mut output = format!("\nwindows for {session_name}\n");
-    output.push_str(&format!(
-        "{:<7}  {:<10}  {:<10}  {}\n",
-        "index", "window-id", "tag", "name"
-    ));
+    let _ = writeln!(
+        output,
+        "{:<7}  {:<10}  {:<10}  name",
+        "index", "window-id", "tag"
+    );
 
     for window in windows {
-        output.push_str(&format!(
-            "{:<7}  @{:<9}  {:<10}  {}\n",
+        let _ = writeln!(
+            output,
+            "{:<7}  @{:<9}  {:<10}  {}",
             window.window_index,
             window.window_id,
             window_workspace_tag(window.window_index),
             window.name
-        ));
+        );
     }
 
     output
@@ -2364,8 +2564,8 @@ mod tests {
 
     use super::{
         format_window_table, frame_interval, parse_weave_tmux_session,
-        parse_weave_tmux_session_for_display, validate_session_name, App, Args, AttachArgs,
-        BackendKind, ExitState, LaunchArgs, WindowRow, CLOSE_PANE_DURATION,
+        parse_weave_tmux_session_for_display, tmux_exec_args, validate_session_name, App, Args,
+        AttachArgs, BackendKind, ExecArgs, ExitState, LaunchArgs, WindowRow, CLOSE_PANE_DURATION,
         FOCUS_BORDER_TWEEN_DURATION, OPEN_NEW_PANE_DURATION, OPEN_SIBLING_DURATION,
     };
     use crate::anim::tween::Easing;
@@ -3240,6 +3440,85 @@ mod tests {
             LaunchArgs::Attach(AttachArgs {
                 session_name: Some("weave-test".to_owned()),
             })
+        );
+    }
+
+    #[test]
+    fn launch_args_parse_exec_subcommand() {
+        assert_eq!(
+            LaunchArgs::parse(["exec", "split-window", "-h"]).expect("launch args parse"),
+            LaunchArgs::Exec(ExecArgs {
+                session_name: None,
+                tmux_args: vec!["split-window".to_owned(), "-h".to_owned()],
+            })
+        );
+    }
+
+    #[test]
+    fn launch_args_parse_exec_with_session_prefix() {
+        assert_eq!(
+            LaunchArgs::parse(["--session", "main", "exec", "split-window", "-h"])
+                .expect("launch args parse"),
+            LaunchArgs::Exec(ExecArgs {
+                session_name: Some("main".to_owned()),
+                tmux_args: vec!["split-window".to_owned(), "-h".to_owned()],
+            })
+        );
+    }
+
+    #[test]
+    fn launch_args_parse_exec_with_session_flag_after_exec() {
+        assert_eq!(
+            LaunchArgs::parse(["exec", "--session=main", "send-keys", "echo hi", "Enter"])
+                .expect("launch args parse"),
+            LaunchArgs::Exec(ExecArgs {
+                session_name: Some("main".to_owned()),
+                tmux_args: vec![
+                    "send-keys".to_owned(),
+                    "echo hi".to_owned(),
+                    "Enter".to_owned()
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn launch_args_reject_exec_without_tmux_args() {
+        assert!(LaunchArgs::parse(["exec"]).is_err());
+        assert!(LaunchArgs::parse(["--session", "main", "exec"]).is_err());
+    }
+
+    #[test]
+    fn tmux_exec_args_injects_target_after_verb() {
+        assert_eq!(
+            tmux_exec_args(&["split-window".to_owned(), "-h".to_owned()], "main"),
+            vec![
+                "split-window".to_owned(),
+                "-t".to_owned(),
+                "main".to_owned(),
+                "-h".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn tmux_exec_args_preserves_user_target() {
+        assert_eq!(
+            tmux_exec_args(
+                &[
+                    "split-window".to_owned(),
+                    "-t".to_owned(),
+                    "main:1.0".to_owned(),
+                    "-h".to_owned()
+                ],
+                "other"
+            ),
+            vec![
+                "split-window".to_owned(),
+                "-t".to_owned(),
+                "main:1.0".to_owned(),
+                "-h".to_owned()
+            ]
         );
     }
 

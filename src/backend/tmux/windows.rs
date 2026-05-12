@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::app::WORKSPACE_COUNT;
+pub const WORKSPACE_COUNT: usize = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddOutcome {
@@ -93,8 +93,7 @@ impl WindowMap {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddOutcome, CloseOutcome, WindowMap};
-    use crate::app::WORKSPACE_COUNT;
+    use super::{AddOutcome, CloseOutcome, WindowMap, WORKSPACE_COUNT};
 
     #[test]
     fn window_indices_one_through_nine_map_to_workspaces_zero_through_eight() {

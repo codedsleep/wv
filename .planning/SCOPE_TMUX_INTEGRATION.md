@@ -195,7 +195,7 @@ The single inbound path means animations, focus rules, and pane spawn/death are 
   - Uses `wv --session main --bare &` then drives the layout via `tmux` commands, then `exec wv attach main` to take over.
   - **Accept:** running the script produces a weave instance with the documented layout.
 
-- [ ] **D.3 `wv exec` passthrough** — *Codex* — `src/main.rs`
+- [x] **D.3 `wv exec` passthrough** — *Codex* — `src/main.rs`
   - `wv exec <tmux-args...>` resolves the most-recent (or explicitly-named via `--session`) weave session and runs the tmux subcommand against it — saves the user from looking up the session name in scripts.
   - **Accept:** `wv exec split-window -h` splits the current workspace's focused pane.
 
@@ -353,7 +353,7 @@ This trades the `-CC` parser (≈ 580 lines in `parser.rs`) for a much simpler s
 - [x] C.4 Overflow handling (windows 10+)
 - [x] D.1 Document safe-command contract
 - [x] D.2 Example bootstrap script
-- [ ] D.3 `wv exec` passthrough
+- [x] D.3 `wv exec` passthrough
 - [ ] E.1 Backend parity test extension
 - [ ] E.2 Script-driven integration test
 - [ ] E.3 Animation budget under script load

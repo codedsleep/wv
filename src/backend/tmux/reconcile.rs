@@ -106,12 +106,12 @@ fn normalize_group(rect: Rect, children: Vec<LayoutAst>, kind: LayoutAstKind) ->
     let first = iter
         .next()
         .expect("len checked above; N-ary group has a first child");
-    let rest: Vec<_> = iter.collect();
-    let rest_rect = cumulative_rect(kind, &rest);
+    let remaining_children: Vec<_> = iter.collect();
+    let rest_rect = cumulative_rect(kind, &remaining_children);
     group(
         kind,
         rect,
-        vec![first, normalize_group(rest_rect, rest, kind)],
+        vec![first, normalize_group(rest_rect, remaining_children, kind)],
     )
 }
 

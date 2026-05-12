@@ -207,6 +207,9 @@ async fn main() -> anyhow::Result<()> {
         weave::app::LaunchArgs::ListSessions { windows } => {
             return weave::app::print_weave_sessions(windows);
         }
+        weave::app::LaunchArgs::Exec(args) => {
+            return weave::app::run_tmux_exec(&args);
+        }
         weave::app::LaunchArgs::Bare(args) => {
             return weave::app::App::create_bare(args).await;
         }
