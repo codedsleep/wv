@@ -76,6 +76,15 @@ pub enum Command {
     RotateWindow { target: Target, reverse: bool },
     /// Rearrange a window's panes into a named shape.
     SelectLayout { target: Target, layout: LayoutPreset },
+    /// Read a pane's visible screen back out.
+    CapturePane {
+        target: Target,
+        /// First and last visible line to include, zero-based.
+        start: Option<u16>,
+        end: Option<u16>,
+    },
+    /// List panes, windows or sessions, one formatted line each.
+    List { scope: ListScope, format: Option<String> },
     /// Close a pane.
     KillPane { target: Target },
     /// Leave the session running and disconnect the client.
@@ -101,8 +110,8 @@ pub enum Command {
     /// Print a message back to the caller.
     ///
     /// `display-message -p` is how a script asks the session a question. The
-    /// message is literal text for now; the `#{...}` variables that make it
-    /// useful for introspection arrive with the format engine in PR 6.
+    /// message is a format string, so `-p "#{pane_current_path}"` reads a
+    /// value back out.
     DisplayMessage { message: String, target: Target },
 }
 
@@ -144,6 +153,17 @@ pub enum ResizeChange {
     Height(u16),
     /// Toggle the pane filling its window.
     ToggleZoom,
+}
+
+/// What a `list-*` command enumerates.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ListScope {
+    /// Panes of one window, or of every window with `-a`.
+    Panes { target: Target, all: bool },
+    /// Windows of this session.
+    Windows { target: Target },
+    /// Every live session.
+    Sessions,
 }
 
 /// tmux's named layouts.
@@ -234,6 +254,10 @@ pub const COMMAND_NAMES: &[&str] = &[
     "swap-pane",
     "rotate-window",
     "select-layout",
+    "capture-pane",
+    "list-panes",
+    "list-windows",
+    "list-sessions",
 ];
 
 /// The pre-target weave names, still accepted.
@@ -291,6 +315,11 @@ impl Command {
             "swap-pane" | "swapp" => parse_swap_pane(name, rest),
             "rotate-window" | "rotatew" => parse_rotate_window(name, rest),
             "select-layout" | "selectl" => parse_select_layout(name, rest),
+
+            "capture-pane" | "capturep" => parse_capture_pane(name, rest),
+            "list-panes" | "lsp" => parse_list(name, rest, ListKind::Panes),
+            "list-windows" | "lsw" => parse_list(name, rest, ListKind::Windows),
+            "list-sessions" | "ls" => parse_list(name, rest, ListKind::Sessions),
 
             "kill-pane" | "killp" | "close" => Ok(Self::KillPane {
                 target: parse_target_only(name, rest, TargetKind::Pane)?,
@@ -376,7 +405,7 @@ fn parse_split_window(
             }
             "-f" => return Err(unsupported(name, arg, "not planned: full-width splits need a layout model weave does not have")),
             "-b" => return Err(unsupported(name, arg, "not planned: splits always place the new pane second")),
-            "-P" | "-F" => return Err(unsupported(name, arg, "PR 6: format strings")),
+            "-P" | "-F" => return Err(unsupported(name, arg, "PR 9: printing the new pane")),
             "--" => {
                 // Everything after `--` is the command, even if it looks like
                 // a flag: `split-window -- ls -la`.
@@ -719,6 +748,143 @@ fn parse_select_layout(name: &str, args: &[String]) -> Result<Command, CommandEr
     })
 }
 
+/// What kind of thing a `list-*` enumerates, before its flags are read.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ListKind {
+    Panes,
+    Windows,
+    Sessions,
+}
+
+fn parse_list(name: &str, args: &[String], kind: ListKind) -> Result<Command, CommandError> {
+    let mut target = None;
+    let mut format = None;
+    let mut all = false;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-t" => {
+                let target_kind = match kind {
+                    ListKind::Panes => TargetKind::Window,
+                    ListKind::Windows | ListKind::Sessions => TargetKind::Session,
+                };
+                target = Some(next_target(name, &mut args, "-t", target_kind)?);
+            }
+            "-F" => format = Some(next_value(name, &mut args, "-F")?),
+            "-a" => all = true,
+            "-s" => return Err(unsupported(name, arg, "not planned: weave lists one session")),
+            "-f" => return Err(unsupported(name, arg, "PR 9: list filters")),
+            other if other.starts_with('-') => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                return Err(CommandError::UnexpectedArgument {
+                    command: name.to_owned(),
+                    argument: other.to_owned(),
+                });
+            }
+        }
+    }
+
+    let scope = match kind {
+        ListKind::Panes => ListScope::Panes {
+            target: target.unwrap_or_default(),
+            all,
+        },
+        ListKind::Windows => ListScope::Windows {
+            target: target.unwrap_or_default(),
+        },
+        ListKind::Sessions => ListScope::Sessions,
+    };
+
+    Ok(Command::List { scope, format })
+}
+
+fn parse_capture_pane(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut target = None;
+    let mut start = None;
+    let mut end = None;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-t" => target = Some(next_target(name, &mut args, "-t", TargetKind::Pane)?),
+            // `-p` prints to stdout, which is the only thing weave does with a
+            // capture, so it is accepted and implied.
+            "-p" => {}
+            "-S" => {
+                let value = next_value(name, &mut args, "-S")?;
+                start = Some(parse_capture_line(name, "-S", &value)?);
+            }
+            "-E" => {
+                let value = next_value(name, &mut args, "-E")?;
+                end = Some(parse_capture_line(name, "-E", &value)?);
+            }
+            "-e" | "-C" => {
+                return Err(unsupported(
+                    name,
+                    arg,
+                    "PR 9: capturing escape sequences rather than text",
+                ));
+            }
+            "-J" | "-N" | "-T" => {
+                return Err(unsupported(name, arg, "PR 9: capture line joining"));
+            }
+            "-b" | "-a" => {
+                return Err(unsupported(
+                    name,
+                    arg,
+                    "not planned: paste buffers went with copy mode",
+                ));
+            }
+            other if other.starts_with('-') => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                return Err(CommandError::UnexpectedArgument {
+                    command: name.to_owned(),
+                    argument: other.to_owned(),
+                });
+            }
+        }
+    }
+
+    Ok(Command::CapturePane {
+        target: target.unwrap_or_default(),
+        start,
+        end,
+    })
+}
+
+/// Parse a capture line number, refusing the negative and `-` forms that mean
+/// "reach into the scrollback" — weave has none, and silently clamping them to
+/// the visible screen would hand a script less than it asked for.
+fn parse_capture_line(command: &str, flag: &str, value: &str) -> Result<u16, CommandError> {
+    if value == "-" || value.starts_with('-') {
+        return Err(CommandError::UnsupportedFlag {
+            command: command.to_owned(),
+            flag: format!("{flag} {value}"),
+            plan: "not planned: weave keeps no scrollback, so only the visible \
+                   screen can be captured"
+                .to_owned(),
+        });
+    }
+
+    value.parse().map_err(|_| CommandError::InvalidValue {
+        command: command.to_owned(),
+        flag: flag.to_owned(),
+        value: value.to_owned(),
+        expected: "a line number on the visible screen".to_owned(),
+    })
+}
+
 fn next_value<'a, I>(command: &str, args: &mut I, flag: &str) -> Result<String, CommandError>
 where
     I: Iterator<Item = &'a String>,
@@ -855,7 +1021,7 @@ fn parse_new_window(name: &str, args: &[String]) -> Result<Command, CommandError
             "-d" => detached = true,
             "-a" | "-b" => return Err(unsupported(name, arg, "not planned: windows are fixed slots, so there is nothing to insert before or after")),
             "-k" => return Err(unsupported(name, arg, "PR 9: replacing an existing window")),
-            "-P" | "-F" => return Err(unsupported(name, arg, "PR 6: format strings")),
+            "-P" | "-F" => return Err(unsupported(name, arg, "PR 9: printing the new window")),
             "-S" => return Err(unsupported(name, arg, "PR 9: select if the window already exists")),
             "--" => {
                 spawn.argv.extend(args.cloned());
@@ -938,8 +1104,11 @@ fn parse_display_message(name: &str, args: &[String]) -> Result<Command, Command
                     });
                 }
             }
-            "-F" | "-v" | "-a" | "-I" | "-N" | "-c" | "-d" => {
-                return Err(unsupported(name, arg, "PR 6: format strings"));
+            // tmux's `-F` names the format explicitly; the bare argument is
+            // already treated as one, so this is just the other spelling.
+            "-F" => message = Some(next_value(name, &mut args, "-F")?),
+            "-v" | "-a" | "-I" | "-N" | "-c" | "-d" => {
+                return Err(unsupported(name, arg, "PR 9: message routing and verbose output"));
             }
             other if other.starts_with('-') => {
                 return Err(CommandError::UnknownFlag {
@@ -1086,8 +1255,8 @@ fn unsupported(command: &str, flag: &str, plan: &str) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, CommandError, LayoutPreset, PaneSelector, ResizeChange, SplitSize, Target,
-        WindowRef,
+        Command, CommandError, LayoutPreset, ListScope, PaneSelector, ResizeChange, SplitSize,
+        Target, WindowRef,
     };
     use crate::command::target::PaneRef;
     use crate::layout::geometry::{Direction, Split};
@@ -1518,10 +1687,57 @@ mod tests {
     }
 
     #[test]
-    fn format_strings_name_the_pr_that_brings_them() {
-        let error = Command::parse_str("display-message -p -F '#{pane_id}'")
-            .expect_err("formats are not supported yet");
-        assert!(error.to_string().contains("PR 6"), "{error}");
+    fn display_message_takes_a_format_either_way() {
+        let bare = parse("display-message -p #{pane_id}");
+        let flagged = parse("display-message -p -F #{pane_id}");
+        assert_eq!(bare, flagged);
+    }
+
+    #[test]
+    fn capture_pane_takes_a_line_range() {
+        assert_eq!(
+            parse("capture-pane -p -t %2 -S 0 -E 4"),
+            Command::CapturePane {
+                target: Target {
+                    pane: Some(PaneRef::Id(2)),
+                    ..Target::default()
+                },
+                start: Some(0),
+                end: Some(4),
+            }
+        );
+    }
+
+    /// Scrollback is out of scope, so `-S -` must fail loudly rather than
+    /// quietly returning only the visible screen.
+    #[test]
+    fn capture_pane_refuses_history_ranges() {
+        let error = Command::parse_str("capture-pane -p -S -").expect_err("no history");
+        assert!(error.to_string().contains("scrollback"), "{error}");
+
+        let error = Command::parse_str("capture-pane -p -S -20").expect_err("no history");
+        assert!(error.to_string().contains("scrollback"), "{error}");
+    }
+
+    #[test]
+    fn list_commands_carry_their_scope_and_format() {
+        assert_eq!(
+            parse("list-panes -a -F #{pane_id}"),
+            Command::List {
+                scope: ListScope::Panes {
+                    target: Target::current(),
+                    all: true,
+                },
+                format: Some("#{pane_id}".to_owned()),
+            }
+        );
+        assert_eq!(
+            parse("list-sessions"),
+            Command::List {
+                scope: ListScope::Sessions,
+                format: None,
+            }
+        );
     }
 
     #[test]

@@ -133,6 +133,8 @@ wv --session main      # start or attach to a session by name
 wv --bare              # create a session without attaching; prints its name
 wv attach [name]       # reattach; with no name, the most recent session
 wv ls                  # list live sessions
+wv has-session [name]  # exit 0 if it is live, 1 if not
+wv kill-server         # end every session
 ```
 
 `Alt+D` detaches: the server keeps running with every pane alive, and the client restores your terminal and prints `[detached from NAME]`. `Alt+Shift+Q` quits, which shuts the session down and kills its panes.
@@ -167,6 +169,8 @@ Commands use tmux's names and flags, including `-t session:window.pane` targets:
 - `resize-pane [-L|-R|-U|-D [n]] [-x n] [-y n] [-Z] [-t target]`
 - `swap-pane [-U|-D|-s src|-t dst] [-d]`, `rotate-window [-U|-D]`
 - `select-layout even-horizontal|even-vertical|main-vertical|main-horizontal|tiled`
+- `capture-pane [-p] [-S n] [-E n] [-t target]`
+- `list-panes [-a] [-F fmt]`, `list-windows [-F fmt]`, `list-sessions [-F fmt]`
 
 Targets accept pane ids (`%1`), pane indices (`.0`), window indices (`:2`), window
 names (`:build`), and the relative forms `+`, `-`, `!`, `{last}`, `{top}`,
@@ -188,6 +192,14 @@ exactly the bytes on the PTY that pressing the keys would:
 wv exec --session main split-window -h -d -- npm run dev
 wv exec --session main send-keys -t %1 'cargo test' Enter
 wv exec --session main send-keys -t %2 C-c
+```
+
+Scripts read state back out with format strings:
+
+```sh
+wv exec --session main list-panes -F '#{pane_id} #{pane_current_path}'
+wv exec --session main capture-pane -t build.1 -p
+wv exec --session main display-message -p '#{window_name}'
 ```
 
 `wv exec` reports what the command produced: output on stdout, failures on

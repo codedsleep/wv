@@ -155,24 +155,28 @@ windows and want the same machinery as the pane-movement commands there.
 **Won't do:** `-b`/`-f` split placement, `select-layout -p/-o/-E` and layout
 strings (weave keeps no layout history), `next-layout`.
 
-# PR 6 — Introspection, formats, `capture-pane`
+# PR 6 — Introspection, formats, `capture-pane` — **SHIPPED**
 
-**Required for the agent-harness loop; pairs with PR 2.**
+The milestone: the agent-harness loop in [SCOPE.md](./SCOPE.md) is portable.
+`tmux capture-pane -t "$WIN.2" -p` now has a direct equivalent, verified
+against a live session driving a pane by window *name*.
 
-- `list-sessions`, `list-windows`, `list-panes`, each with `-F` format strings.
-- Format-variable engine: `#{session_name}`, `#{window_index}`, `#{window_name}`,
-  `#{pane_id}`, `#{pane_index}`, `#{pane_title}`, `#{pane_current_path}`,
-  `#{pane_current_command}`, `#{pane_width/height}`, `#{?cond,a,b}`. Shared by
-  `list-*`, `display-message -p`, and the status bar (PR 7's `status-left/right`).
-- `capture-pane [-p] [-t] [-S start] [-E end] [-e]` reading the pane's vt100 grid
-  (`src/term/pane.rs:52`). Pre-scrollback this covers the visible screen only —
-  document the limit. Capturing history needs scrollback, which is out of
-  scope (see "Dropped" below).
-- `has-session`, `kill-session`, `rename-session`, `kill-server`.
+**Shipped:** `src/format.rs` (variables, `#X` shorthands, `#{?..}`
+conditionals, `##`), `list-panes [-a]`, `list-windows`, `list-sessions`,
+`capture-pane`, `display-message` expanding formats, `wv has-session`,
+`wv kill-server`, and `PaneBackend::pane_process_name`.
 
-**Files:** new `src/format.rs`, `src/app.rs`, `src/session/paths.rs`, `src/term/pane.rs`.
+Format arithmetic and comparisons are **refused** rather than expanded to
+nothing: a silently empty field in a listing is worse than a failed command.
 
----
+**Divergences, documented in docs/TMUX_PARITY.md:**
+
+- `capture-pane` reads the visible screen only — scrollback went with PR 8.
+  `-S -` and negative line numbers are refused rather than clamped.
+- `pane_current_command` is the pane's own process, not its foreground job.
+- `list-sessions` as a *command* describes the session it runs in; `wv ls`
+  lists them all. A session server does not know about its neighbours.
+- `rename-session` is won't-do: the socket is named after the session.
 
 # PR 7 — Prefix key, `bind-key`, runtime options, config parity
 

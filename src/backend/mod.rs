@@ -56,6 +56,18 @@ pub trait PaneBackend: Send {
     async fn pane_cwd(&mut self, _pane: PaneId) -> Result<Option<PathBuf>, anyhow::Error> {
         Ok(None)
     }
+
+    /// The name of the process a pane is running.
+    ///
+    /// This is the pane's own process — the shell, or whatever was spawned in
+    /// its place — not the foreground job inside it. A pane running a shell
+    /// that is running vim reports the shell. Default: `Ok(None)`.
+    async fn pane_process_name(
+        &mut self,
+        _pane: PaneId,
+    ) -> Result<Option<String>, anyhow::Error> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

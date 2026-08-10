@@ -82,6 +82,26 @@ impl Pane {
         }
     }
 
+    /// The visible screen as lines of plain text.
+    ///
+    /// Trailing blank lines are dropped, so capturing a pane running one
+    /// command returns that command's output rather than it plus twenty empty
+    /// rows. There is no scrollback, so this is the whole of what can be read.
+    pub fn capture_lines(&self) -> Vec<String> {
+        let (_, cols) = self.screen().size();
+        let mut lines: Vec<String> = self
+            .screen()
+            .rows(0, cols)
+            .map(|row| row.trim_end().to_owned())
+            .collect();
+
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+
+        lines
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.parser.set_size(rows, cols);
         self.dirty = true;

@@ -17,9 +17,10 @@ use crate::backend::native::NativeBackend;
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::target::{Extreme, PaneRef, WindowRef};
 use crate::command::{
-    Command, LayoutPreset, PaneSelector, ResizeChange, SpawnCommand, SplitSize, Target,
+    Command, LayoutPreset, ListScope, PaneSelector, ResizeChange, SpawnCommand, SplitSize, Target,
 };
 use crate::config::{Config, ThemeConfig};
+use crate::format::{expand as expand_format_impl, Variables};
 use crate::input;
 use crate::input::keymap::Keymap;
 use crate::layout::geometry::{Direction, FRect, Rect, Split};
@@ -49,6 +50,13 @@ const MAIN_PANE_RATIO: f32 = 0.5;
 /// These are local unix sockets with at most a frame or two in flight, so this
 /// is generous; it only has to outlast a single write syscall.
 const SHUTDOWN_FLUSH_GRACE: Duration = Duration::from_millis(50);
+/// Default `list-panes` output, matching tmux's shape closely enough that a
+/// script written against tmux reads the same fields out.
+const DEFAULT_PANE_FORMAT: &str =
+    "#{window_index}.#{pane_index}: [#{pane_width}x#{pane_height}] #{pane_id}#{?pane_active, (active),}";
+const DEFAULT_WINDOW_FORMAT: &str =
+    "#{window_index}: #{window_name} [#{window_panes} panes]#{?window_active, (active),}";
+const DEFAULT_SESSION_FORMAT: &str = "#{session_name}: #{session_windows} windows";
 const OUTPUT_CHANNEL_CAPACITY: usize = 256;
 const EVENT_CHANNEL_CAPACITY: usize = 64;
 
@@ -155,6 +163,12 @@ enum ExitState {
     Detached,
 }
 
+/// Expand a format string, turning a bad one into a rejection rather than a
+/// fatal error: a malformed `-F` is the caller's typo, not a session failure.
+fn expand_format(template: &str, vars: &Variables) -> Result<String, Rejected> {
+    expand_format_impl(template, vars).map_err(|error| Rejected::new(error.to_string()))
+}
+
 /// A command the session declined to run, with a message meant for the user.
 ///
 /// Deliberately not an `anyhow::Error`: this is the "you asked for a pane that
@@ -252,6 +266,13 @@ pub struct ExecArgs {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LaunchArgs {
     Run(Args),
+    /// `wv has-session [name]`: exit 0 if it is live, 1 if not.
+    ///
+    /// Answered without connecting, because the whole point is to ask about a
+    /// session that may not be there.
+    HasSession { session_name: Option<String> },
+    /// `wv kill-server`: end every live session.
+    KillServer,
     /// Run as the session daemon (`wv --server --session NAME`).
     Server(Args),
     Bare(Args),
@@ -453,11 +474,34 @@ impl LaunchArgs {
             Some("exec") => {
                 return Ok(Self::Exec(ExecArgs::parse(args.iter().skip(1))?));
             }
-            Some("ls") => {
+            Some("ls" | "list-sessions") => {
                 if let Some(arg) = args.get(1) {
                     bail!("`wv ls` does not accept `{arg}`");
                 }
                 return Ok(Self::ListSessions);
+            }
+            Some("has-session" | "has") => {
+                let session_name = match args.get(1).map(String::as_str) {
+                    // `-t name` is tmux's spelling; a bare name is ours.
+                    Some("-t") => args.get(2).cloned().context(
+                        "missing value for `-t`; expected a weave session name",
+                    )?,
+                    Some(name) if !name.starts_with('-') => name.to_owned(),
+                    Some(other) => bail!("`wv has-session` does not accept `{other}`"),
+                    None => {
+                        return Ok(Self::HasSession { session_name: None });
+                    }
+                };
+                validate_session_name(&session_name)?;
+                return Ok(Self::HasSession {
+                    session_name: Some(session_name),
+                });
+            }
+            Some("kill-server") => {
+                if let Some(arg) = args.get(1) {
+                    bail!("`wv kill-server` does not accept `{arg}`");
+                }
+                return Ok(Self::KillServer);
             }
             _ => {}
         }
@@ -1261,11 +1305,16 @@ impl App {
                 self.exit = ExitState::Quit;
             }
             Command::DisplayMessage { message, target } => {
-                // The target is resolved even though the message is literal, so
-                // `-t` is validated now and means something once PR 6 adds the
-                // `#{...}` variables that read from it.
-                self.resolve_pane(&target)?;
-                return Ok(message);
+                let (workspace, pane) = self.resolve_pane(&target)?;
+                let vars = self.pane_variables(workspace, pane).await;
+                return Ok(expand_format(&message, &vars)?);
+            }
+            Command::CapturePane { target, start, end } => {
+                let (_, pane) = self.resolve_pane(&target)?;
+                return self.capture_pane(pane, start, end);
+            }
+            Command::List { scope, format } => {
+                return self.list(&scope, format.as_deref()).await;
             }
         }
 
@@ -1573,6 +1622,164 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Read a pane's visible screen.
+    fn capture_pane(
+        &self,
+        pane: PaneId,
+        start: Option<u16>,
+        end: Option<u16>,
+    ) -> Result<String, ExecuteError> {
+        let Some(target) = self.pane(pane) else {
+            return Err(Rejected::new("that pane is gone".to_owned()).into());
+        };
+
+        let lines = target.capture_lines();
+        let first = usize::from(start.unwrap_or(0));
+        let last = end.map_or(lines.len(), |end| usize::from(end) + 1);
+
+        if first > lines.len() {
+            // Asking past the end returns nothing rather than failing: a
+            // script polling a quiet pane should see "" and carry on.
+            return Ok(String::new());
+        }
+
+        Ok(lines[first..last.min(lines.len())].join("\n"))
+    }
+
+    /// Format one line per pane, window or session.
+    async fn list(
+        &mut self,
+        scope: &ListScope,
+        format: Option<&str>,
+    ) -> Result<String, ExecuteError> {
+        let (template, rows) = match scope {
+            ListScope::Panes { target, all } => {
+                let template = format.unwrap_or(DEFAULT_PANE_FORMAT);
+                let windows = if *all {
+                    (0..WORKSPACE_COUNT)
+                        .filter(|&index| !self.workspaces[index].is_empty())
+                        .collect()
+                } else {
+                    vec![self.resolve_window(target)?]
+                };
+
+                let mut rows = Vec::new();
+                for window in windows {
+                    for pane in self.workspaces[window].leaf_panes() {
+                        rows.push(self.pane_variables(window, pane).await);
+                    }
+                }
+                (template, rows)
+            }
+            ListScope::Windows { target } => {
+                self.check_session(target)?;
+                let template = format.unwrap_or(DEFAULT_WINDOW_FORMAT);
+                let rows = (0..WORKSPACE_COUNT)
+                    .filter(|&index| !self.workspaces[index].is_empty())
+                    .map(|index| self.window_variables(index))
+                    .collect();
+                (template, rows)
+            }
+            ListScope::Sessions => {
+                let template = format.unwrap_or(DEFAULT_SESSION_FORMAT);
+                (template, vec![self.session_variables()])
+            }
+        };
+
+        let mut lines = Vec::with_capacity(rows.len());
+        for row in &rows {
+            lines.push(expand_format(template, row)?);
+        }
+
+        Ok(lines.join("\n"))
+    }
+
+    /// The variables describing this session.
+    fn session_variables(&self) -> Variables {
+        let mut vars = Variables::new();
+        vars.set(
+            "session_name",
+            self.session_name.clone().unwrap_or_default(),
+        )
+        .set("session_windows", self.occupied_workspaces().len().to_string())
+        .set_flag("session_attached", self.client_id.is_some());
+
+        vars
+    }
+
+    /// The variables describing one window, including its session's.
+    fn window_variables(&self, window: usize) -> Variables {
+        let mut vars = self.session_variables();
+        let workspace = &self.workspaces[window];
+        let is_current = window == self.current_workspace;
+
+        vars.set("window_index", (window + 1).to_string())
+            .set("window_name", self.window_name(window))
+            .set("window_panes", workspace.pane_count().to_string())
+            .set_flag("window_active", is_current)
+            .set_flag("window_zoomed_flag", workspace.zoomed.is_some())
+            // tmux's `#F`: `*` for the active window, `Z` when it is zoomed.
+            .set(
+                "window_flags",
+                match (is_current, workspace.zoomed.is_some()) {
+                    (true, true) => "*Z",
+                    (true, false) => "*",
+                    (false, true) => "Z",
+                    (false, false) => "",
+                },
+            );
+
+        vars
+    }
+
+    /// The variables describing one pane, including its window's.
+    ///
+    /// Takes `&mut self` because the pane's directory and process name are
+    /// read from the backend rather than held in memory.
+    async fn pane_variables(&mut self, window: usize, pane: PaneId) -> Variables {
+        let cwd = self.backend.pane_cwd(pane).await.ok().flatten();
+        let process = self.backend.pane_process_name(pane).await.ok().flatten();
+
+        let mut vars = self.window_variables(window);
+        let workspace = &self.workspaces[window];
+        let index = workspace
+            .leaf_panes()
+            .iter()
+            .position(|candidate| *candidate == pane)
+            .unwrap_or(0);
+        let rect = self.leaf_rect_target(pane).unwrap_or(Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        });
+
+        vars.set(
+            "pane_id",
+            self.pane_number(pane)
+                .map_or_else(String::new, |number| format!("%{number}")),
+        )
+        .set("pane_index", index.to_string())
+        .set(
+            "pane_title",
+            self.pane(pane)
+                .and_then(Pane::title)
+                .unwrap_or_default()
+                .to_owned(),
+        )
+        .set("pane_width", rect.w.to_string())
+        .set("pane_height", rect.h.to_string())
+        .set(
+            "pane_current_path",
+            cwd.map(|cwd| cwd.display().to_string()).unwrap_or_default(),
+        )
+        .set("pane_current_command", process.unwrap_or_default())
+        .set_flag("pane_active", workspace.focused == Some(pane))
+        .set_flag("pane_dead", self.pane(pane).is_none());
+
+        vars
     }
 
     /// Apply a `resize-pane`, animating every pane the change moves.
@@ -2729,6 +2936,23 @@ mod tests {
         Command::parse_str(line).expect("command parses")
     }
 
+    impl App {
+        /// Run a command and return what it printed, failing the test if it
+        /// was rejected.
+        async fn request_output(&mut self, line: &str) -> String {
+            match self
+                .execute_request(command(line))
+                .await
+                .expect("the request completes")
+            {
+                CommandResult::Ok { output } => output,
+                CommandResult::Error { message } => {
+                    panic!("`{line}` was rejected: {message}")
+                }
+            }
+        }
+    }
+
     fn mock_backend(next_id: PaneId) -> (Box<dyn PaneBackend>, MockBackendHandle) {
         let handle = MockBackendHandle::default();
         let backend = MockBackend {
@@ -3267,6 +3491,129 @@ mod tests {
                 "{layout} lost a pane"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn list_panes_formats_one_line_per_pane() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+
+        let result = app
+            .execute_request(command("list-panes -F #{pane_id}"))
+            .await
+            .expect("the request completes");
+
+        match result {
+            CommandResult::Ok { output } => assert_eq!(output, "%1\n%2"),
+            other @ CommandResult::Error { .. } => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_panes_marks_the_active_one() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+
+        let output = app
+            .request_output("list-panes -F #{pane_id}#{?pane_active,*,}")
+            .await;
+
+        // The split focused the new pane, so it is the marked one.
+        assert_eq!(output, "%1\n%2*");
+    }
+
+    #[tokio::test]
+    async fn list_panes_a_covers_every_window() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("new-window -d")).await.expect("window");
+
+        let all = app.request_output("list-panes -a -F #{window_index}.#{pane_index}").await;
+        let one = app.request_output("list-panes -F #{window_index}.#{pane_index}").await;
+
+        assert_eq!(all, "1.0\n2.0");
+        assert_eq!(one, "1.0", "without -a only the current window is listed");
+    }
+
+    #[tokio::test]
+    async fn list_windows_reports_names_and_flags() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("new-window -d -n build"))
+            .await
+            .expect("window");
+
+        let output = app.request_output("list-windows -F #{window_index}:#{window_name}#F").await;
+
+        assert_eq!(output, "1:shell*\n2:build");
+    }
+
+    #[tokio::test]
+    async fn window_flags_mark_a_zoomed_window() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+        app.execute(command("resize-pane -Z")).await.expect("zoom");
+
+        assert_eq!(app.request_output("list-windows -F #F").await, "*Z");
+    }
+
+    #[tokio::test]
+    async fn a_bad_format_is_rejected_rather_than_expanded_to_nothing() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+
+        let result = app
+            .execute_request(command("list-panes -F #{pane_id"))
+            .await
+            .expect("the request completes");
+
+        assert!(!result.is_ok(), "an unterminated format must not silently pass");
+    }
+
+    #[tokio::test]
+    async fn display_message_expands_formats() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+
+        assert_eq!(app.request_output("display-message -p #{pane_id}").await, "%1");
+        assert_eq!(
+            app.request_output("display-message -p #{window_index}:#{pane_index}").await,
+            "1:0"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_pane_returns_the_visible_screen() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 40, 10, PaneId(1));
+
+        // Feed the pane some output, as its PTY would.
+        if let Some(pane) = app.pane_mut(PaneId(1)) {
+            pane.process(b"first\r\nsecond\r\n");
+        }
+
+        assert_eq!(
+            app.request_output("capture-pane -p").await,
+            "first\nsecond"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_pane_honours_a_line_range() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 40, 10, PaneId(1));
+        if let Some(pane) = app.pane_mut(PaneId(1)) {
+            pane.process(b"a\r\nb\r\nc\r\n");
+        }
+
+        assert_eq!(app.request_output("capture-pane -p -S 1").await, "b\nc");
+        assert_eq!(app.request_output("capture-pane -p -S 0 -E 1").await, "a\nb");
+        // Past the end is empty rather than an error: a script polling a quiet
+        // pane should see nothing and carry on.
+        assert_eq!(app.request_output("capture-pane -p -S 99").await, "");
     }
 
     /// A waiting caller gets the command's output, not just "it ran".

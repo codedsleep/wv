@@ -237,6 +237,19 @@ async fn main() -> anyhow::Result<()> {
     init_tracing()?;
     match launch_args {
         weave::app::LaunchArgs::ListSessions => list_sessions(),
+        weave::app::LaunchArgs::HasSession { session_name } => {
+            if weave::session::launch::has_session(session_name.as_deref())? {
+                Ok(())
+            } else {
+                // Silent, like tmux: the exit status is the answer.
+                std::process::exit(1);
+            }
+        }
+        weave::app::LaunchArgs::KillServer => {
+            let ended = weave::session::launch::kill_server().await?;
+            println!("ended {ended} session(s)");
+            Ok(())
+        }
         weave::app::LaunchArgs::Exec(args) => exec_command(args).await,
         weave::app::LaunchArgs::Bare(args) => weave::app::App::create_bare(args).await,
         // The daemon: it owns the panes and renders for whichever client is

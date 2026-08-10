@@ -114,6 +114,42 @@ pub async fn exec(
     server::request(&session.path, command).await
 }
 
+/// Whether a named session — or any session — is live right now.
+///
+/// Answered from the socket directory rather than by connecting, so asking
+/// about a session that is not there is a plain `false`, not an error.
+pub fn has_session(session_name: Option<&str>) -> anyhow::Result<bool> {
+    let sessions = paths::list_sessions()?;
+
+    Ok(match session_name {
+        Some(name) => sessions.iter().any(|session| session.name == name),
+        None => !sessions.is_empty(),
+    })
+}
+
+/// End every live session.
+pub async fn kill_server() -> anyhow::Result<usize> {
+    let sessions = paths::list_sessions()?;
+    let mut ended = 0;
+
+    for session in &sessions {
+        // One unreachable session must not stop the rest from being killed.
+        match server::request(
+            &session.path,
+            Command::KillSession {
+                target: crate::command::Target::current(),
+            },
+        )
+        .await
+        {
+            Ok(_) => ended += 1,
+            Err(error) => tracing::warn!("could not end session {}: {error:#}", session.name),
+        }
+    }
+
+    Ok(ended)
+}
+
 /// List live sessions, newest first.
 pub fn list() -> anyhow::Result<Vec<SessionEntry>> {
     paths::list_sessions()

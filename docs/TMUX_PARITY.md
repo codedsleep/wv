@@ -79,11 +79,18 @@ means the current one.
 | `select-layout` | — | yes | `even-horizontal`, `even-vertical`, `main-vertical`, `main-horizontal`, `tiled` |
 | `select-layout -p/-o/-E`, layout strings | — | no | weave keeps no layout history |
 | `break-pane`, `join-pane` | — | PR 9 | Moving panes between windows |
-| `list-sessions`, `list-windows`, `list-panes`, `-F` formats | `wv ls` (sessions only) | PR 6 | |
-| `display-message -p` | — | yes | Literal text; `#{...}` variables in PR 6 |
+| `list-panes [-a] [-t] [-F]` | — | yes | |
+| `list-windows [-t] [-F]` | — | yes | |
+| `list-sessions [-F]` | `wv ls` | partial | The command describes the session it runs in; `wv ls` lists them all |
+| `list-*  -f` filters | — | PR 9 | |
+| `display-message -p [-F]` | — | yes | Expands formats |
 | `display-message` without `-p` | — | PR 7 | Needs a status line message area |
-| `capture-pane` | — | PR 6 | |
-| `has-session`, `rename-session`, `kill-server` | — | PR 6 | |
+| `capture-pane [-p] [-t] [-S n] [-E n]` | — | yes | Visible screen only |
+| `capture-pane -S -` / negative lines | — | no | Needs scrollback |
+| `capture-pane -e/-C/-J/-b/-a` | — | PR 9 / no | Escapes and joining are PR 9; buffers went with copy mode |
+| `has-session [-t]` | `wv has-session [name]` | yes | Exit status is the answer, as in tmux |
+| `kill-server` | `wv kill-server` | yes | |
+| `rename-session` | — | no | The socket is named after the session; renaming would break every attached client |
 | `bind-key`, `unbind-key`, prefix key, `set-option`, `source-file` | TOML config | PR 7 | |
 | `copy-mode`, buffers, scrollback, search | — | no | Dropped: a phase of its own, not a PR |
 | `run-shell`, `if-shell`, `set-hook`, `pipe-pane` | — | PR 9 | |
@@ -116,6 +123,36 @@ What follows from that:
 - `select-window` **fails** on a window that does not exist, as in tmux. The
   `workspace-N` aliases behind `Alt+N` create one instead — that is how weave
   has always behaved and the keybindings keep it.
+
+## Format strings
+
+`#{name}`, the `#S`/`#W`/`#I`/`#P`/`#D`/`#T`/`#F` shorthands, `#{?flag,then,else}`
+conditionals and `##` for a literal hash. Variables:
+
+| Scope | Variables |
+|---|---|
+| Session | `session_name`, `session_windows`, `session_attached` |
+| Window | `window_index`, `window_name`, `window_panes`, `window_active`, `window_zoomed_flag`, `window_flags` |
+| Pane | `pane_id`, `pane_index`, `pane_title`, `pane_width`, `pane_height`, `pane_active`, `pane_dead`, `pane_current_path`, `pane_current_command` |
+
+Format **arithmetic, comparisons and substitution** (`#{==:..}`, `#{e|+|:..}`,
+`#{s/../../:..}`) are rejected with an error rather than expanded to nothing —
+a silently empty field is worse than a failed command.
+
+`pane_current_command` reports the **pane's own process**, not the foreground
+job inside it. A pane whose shell is running vim reports the shell; a pane
+spawned as `split-window npm run dev` reports `npm`.
+
+## Reading a pane back out
+
+```console
+$ wv exec capture-pane -t build.1 -p
+```
+
+Returns the pane's visible screen as plain text, trailing blank lines trimmed.
+`-S`/`-E` take zero-based line numbers within that screen. There is no
+scrollback, so `-S -` and negative line numbers are refused rather than quietly
+returning less than was asked for.
 
 ## Resizing moves a border
 

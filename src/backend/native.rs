@@ -228,6 +228,21 @@ impl PaneBackend for NativeBackend {
         Ok(())
     }
 
+    /// Read the pane process's name from `/proc/<pid>/comm`.
+    async fn pane_process_name(&mut self, pane: PaneId) -> Result<Option<String>, Error> {
+        let Some(pid) = self.panes.get(&pane).and_then(|pane| pane.pid) else {
+            return Ok(None);
+        };
+
+        match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+            Ok(name) => Ok(Some(name.trim_end().to_owned())),
+            Err(error) => {
+                tracing::debug!("could not read command of pane {pane:?} (pid {pid}): {error}");
+                Ok(None)
+            }
+        }
+    }
+
     /// Read a pane's working directory from `/proc/<pid>/cwd`.
     ///
     /// This is the shell's own cwd, so a new pane opens wherever the focused
