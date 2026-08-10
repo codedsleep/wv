@@ -159,6 +159,7 @@ Commands use tmux's names and flags, including `-t session:window.pane` targets:
 - `select-pane [-L|-R|-U|-D] [-l] [-t target]`
 - `select-window [-t target] [-n|-p|-l]`
 - `kill-pane [-t target]`, `detach-client`, `kill-session`
+- `display-message -p [-t target] [text]`
 
 Targets accept pane ids (`%1`), pane indices (`.0`), window indices (`:2`), and the
 relative forms `+`, `-`, `!`, `{last}`, `{top}`, `{bottom}`, `{left}`, `{right}`.
@@ -166,6 +167,15 @@ relative forms `+`, `-`, `!`, `{last}`, `{top}`, `{bottom}`, `{left}`, `{right}`
 The older weave names still work: `split-h`, `split-v`, `focus-left`, `focus-right`,
 `focus-up`, `focus-down`, `close`, `detach`, `quit`, and `workspace-1` .. `workspace-9`.
 With no `--session`, the most recent live session is used.
+
+`wv exec` reports what the command produced: output on stdout, failures on
+stderr with a non-zero exit, so a script can branch on it.
+
+```sh
+if ! wv exec --session main kill-pane -t %9; then
+  echo "no such pane" >&2
+fi
+```
 
 **Coming from tmux?** [`docs/TMUX_PARITY.md`](docs/TMUX_PARITY.md) is the full matrix of
 what is supported, what is planned, and the one trap worth knowing: `split-window -h`

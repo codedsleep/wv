@@ -14,6 +14,8 @@ if ! wv ls | awk '{print $1}' | grep -qx "$session"; then
   wv --bare --session "$session" >/dev/null
 fi
 
+# `wv exec` exits non-zero and explains itself when a command cannot run, so
+# `set -e` stops the script on a bad target rather than building half a layout.
 run() { wv exec --session "$session" "$@"; }
 
 # Window 1: editor on the left, two stacked shells on the right.

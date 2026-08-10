@@ -28,7 +28,7 @@ const LENGTH_PREFIX_BYTES: usize = 4;
 /// the wrong thing. The handshake turns that silent corruption into a clear
 /// error. Bump this whenever `ClientToServer`, `ServerToClient`, or anything
 /// they carry changes shape.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Message sent from an attached client to the session server.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,8 +46,12 @@ pub enum ClientToServer {
     Input(Event),
     /// The client's terminal changed size.
     Resize { cols: u16, rows: u16 },
-    /// Run a command as if it had been typed as a keybinding.
-    Exec(Command),
+    /// Run a command and reply with what it produced.
+    ///
+    /// The id is echoed in the [`ServerToClient::Reply`], so a client with
+    /// several requests in flight can match them up. `wv exec` sends one
+    /// request per connection and uses id 0.
+    Request { id: u64, command: Command },
     /// Leave the session running and disconnect.
     Detach,
     /// Shut the session down, killing every pane.
@@ -65,6 +69,33 @@ pub enum ServerToClient {
     Exit(ExitReason),
     /// A non-fatal server-side error worth surfacing to the user.
     Error(String),
+    /// The outcome of a [`ClientToServer::Request`], tagged with its id.
+    Reply { id: u64, result: CommandResult },
+}
+
+/// What running a command produced.
+///
+/// A command that fails is still a completed request: the session says why and
+/// carries on. Only a broken connection is an error at the transport level.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandResult {
+    /// The command ran. `output` is what it printed, usually empty.
+    Ok { output: String },
+    /// The command was understood but could not be applied.
+    Error { message: String },
+}
+
+impl CommandResult {
+    /// An `Ok` with nothing to print, which is what most commands produce.
+    pub fn empty() -> Self {
+        Self::Ok {
+            output: String::new(),
+        }
+    }
+
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok { .. })
+    }
 }
 
 /// Why the server ended a client connection.
@@ -219,12 +250,15 @@ mod tests {
                 KeyModifiers::ALT,
             ))),
             ClientToServer::Resize { cols: 80, rows: 24 },
-            ClientToServer::Exec(Command::SelectWindow {
-                target: Target {
-                    window: Some(WindowRef::Index(3)),
-                    ..Target::default()
+            ClientToServer::Request {
+                id: 7,
+                command: Command::SelectWindow {
+                    target: Target {
+                        window: Some(WindowRef::Index(3)),
+                        ..Target::default()
+                    },
                 },
-            }),
+            },
             ClientToServer::Detach,
         ];
 

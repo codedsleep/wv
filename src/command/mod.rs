@@ -33,6 +33,12 @@ pub enum Command {
     DetachClient,
     /// Shut the session down, killing every pane.
     KillSession { target: Target },
+    /// Print a message back to the caller.
+    ///
+    /// `display-message -p` is how a script asks the session a question. The
+    /// message is literal text for now; the `#{...}` variables that make it
+    /// useful for introspection arrive with the format engine in PR 6.
+    DisplayMessage { message: String, target: Target },
 }
 
 /// How `select-pane` picks its new focus.
@@ -83,6 +89,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "kill-pane",
     "detach-client",
     "kill-session",
+    "display-message",
 ];
 
 /// The pre-target weave names, still accepted.
@@ -139,6 +146,8 @@ impl Command {
             "kill-session" | "quit" => Ok(Self::KillSession {
                 target: parse_target_only(name, rest, TargetKind::Session)?,
             }),
+
+            "display-message" | "display" => parse_display_message(name, rest),
 
             other => parse_workspace_alias(other)
                 .ok_or_else(|| CommandError::UnknownCommand(other.to_owned())),
@@ -313,6 +322,62 @@ fn parse_select_window(
     }
 
     Ok(Command::SelectWindow {
+        target: target.unwrap_or_default(),
+    })
+}
+
+fn parse_display_message(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut print = false;
+    let mut target = None;
+    let mut message = None;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-p" => print = true,
+            "-t" => {
+                if target
+                    .replace(next_target(name, &mut args, "-t", TargetKind::Pane)?)
+                    .is_some()
+                {
+                    return Err(CommandError::ConflictingFlags {
+                        command: name.to_owned(),
+                        flags: "`-t`".to_owned(),
+                    });
+                }
+            }
+            "-F" | "-v" | "-a" | "-I" | "-N" | "-c" | "-d" => {
+                return Err(unsupported(name, arg, "PR 6: format strings"));
+            }
+            other if other.starts_with('-') => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                if message.replace(other.to_owned()).is_some() {
+                    return Err(CommandError::UnexpectedArgument {
+                        command: name.to_owned(),
+                        argument: other.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Without `-p` the message belongs on the status line, which has no
+    // message area until PR 7. Saying so beats printing somewhere unexpected.
+    if !print {
+        return Err(CommandError::UnsupportedFlag {
+            command: name.to_owned(),
+            flag: "without -p".to_owned(),
+            plan: "PR 7: the status line message area. Use `-p` to print to stdout".to_owned(),
+        });
+    }
+
+    Ok(Command::DisplayMessage {
+        message: message.unwrap_or_default(),
         target: target.unwrap_or_default(),
     })
 }
@@ -616,6 +681,37 @@ mod tests {
     fn shell_command_arguments_are_named_as_planned() {
         let error = Command::parse_str("split-window npm run dev").expect_err("not supported yet");
         assert!(error.to_string().contains("PR 3"), "{error}");
+    }
+
+    #[test]
+    fn display_message_needs_p_to_print() {
+        assert_eq!(
+            parse("display-message -p hello"),
+            Command::DisplayMessage {
+                message: "hello".to_owned(),
+                target: Target::current(),
+            }
+        );
+
+        // Without `-p` the message belongs on a status line we do not have.
+        let error = Command::parse_str("display-message hello").expect_err("needs -p");
+        assert!(error.to_string().contains("PR 7"), "{error}");
+    }
+
+    #[test]
+    fn display_message_takes_a_target_and_defaults_to_empty() {
+        let Command::DisplayMessage { message, target } = parse("display-message -p -t %3") else {
+            panic!("expected a display-message");
+        };
+        assert_eq!(message, "");
+        assert_eq!(target.pane, Some(PaneRef::Id(3)));
+    }
+
+    #[test]
+    fn format_strings_name_the_pr_that_brings_them() {
+        let error = Command::parse_str("display-message -p -F '#{pane_id}'")
+            .expect_err("formats are not supported yet");
+        assert!(error.to_string().contains("PR 6"), "{error}");
     }
 
     #[test]

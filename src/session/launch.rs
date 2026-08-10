@@ -11,7 +11,7 @@ use anyhow::Context;
 
 use super::client::{self, ClientOutcome};
 use super::paths::{self, SessionEntry};
-use super::protocol::ClientToServer;
+use super::protocol::CommandResult;
 use super::server::{self, SessionServer};
 use crate::app::{App, Args};
 use crate::command::Command;
@@ -101,12 +101,17 @@ pub async fn run_server(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Send a single command to a running session, as `wv exec split-v` does.
-pub async fn exec(session_name: Option<&str>, command: Command) -> anyhow::Result<()> {
+/// Run a command against a running session, as `wv exec` does.
+///
+/// Returns the command's result rather than printing it, so the CLI decides
+/// how to report it and callers in tests can assert on it.
+pub async fn exec(
+    session_name: Option<&str>,
+    command: Command,
+) -> anyhow::Result<CommandResult> {
     let session = paths::resolve_session(session_name)?;
-    server::send_command(&session.path, &ClientToServer::Exec(command)).await?;
 
-    Ok(())
+    server::request(&session.path, command).await
 }
 
 /// List live sessions, newest first.

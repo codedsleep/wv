@@ -133,6 +133,11 @@ pub async fn run(stream: UnixStream, name: &str) -> anyhow::Result<ClientOutcome
                         Some(Ok(ServerToClient::Error(message))) => {
                             tracing::warn!("session error: {message}");
                         }
+                        // An attached client has no requests in flight yet;
+                        // PR 7's command prompt is the first thing to send one.
+                        Some(Ok(ServerToClient::Reply { id, result })) => {
+                            tracing::debug!("unexpected reply to request {id}: {result:?}");
+                        }
                         Some(Err(error)) => return Err(error),
                         None => return Ok(ClientOutcome::ConnectionLost),
                     }

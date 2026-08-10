@@ -24,7 +24,7 @@ use crate::layout::geometry::{Direction, FRect, Rect, Split};
 use crate::layout::tree::Node;
 use crate::render::diff::{ColorMode, DiffRenderer};
 use crate::render::{chrome, compositor};
-use crate::session::protocol::{ClientToServer, ExitReason, ServerToClient};
+use crate::session::protocol::{ClientToServer, CommandResult, ExitReason, ServerToClient};
 use crate::session::sink::OutputSink;
 use crate::session::SessionEvent;
 use crate::term::pane::Pane;
@@ -35,6 +35,11 @@ const OPEN_NEW_PANE_DURATION: Duration = Duration::from_millis(220);
 const OPEN_SIBLING_DURATION: Duration = Duration::from_millis(180);
 // Close tweens use ease-out-cubic so panes decelerate into the collapsed line.
 const CLOSE_PANE_DURATION: Duration = Duration::from_millis(180);
+/// How long shutdown waits for socket writers to flush their last frame.
+///
+/// These are local unix sockets with at most a frame or two in flight, so this
+/// is generous; it only has to outlast a single write syscall.
+const SHUTDOWN_FLUSH_GRACE: Duration = Duration::from_millis(50);
 const OUTPUT_CHANNEL_CAPACITY: usize = 256;
 const EVENT_CHANNEL_CAPACITY: usize = 64;
 
@@ -920,8 +925,11 @@ impl App {
             // A no-op when the client already got its goodbye; otherwise it
             // learns the session ended rather than seeing a dropped socket.
             self.detach_client(ServerToClient::Exit(ExitReason::ServerShutdown));
-            // Give the socket writer a chance to flush before the runtime goes.
-            time::sleep(Duration::from_millis(50)).await;
+            // Let the connection tasks flush before the runtime drops them.
+            // Two things depend on this: the goodbye above, and the reply to a
+            // request that ended the session — `wv exec kill-session` must not
+            // race the shutdown and report a lost connection instead of Ok.
+            time::sleep(SHUTDOWN_FLUSH_GRACE).await;
         }
 
         if self.exit != ExitState::Detached {
@@ -933,7 +941,7 @@ impl App {
         Ok(())
     }
 
-    /// Run a command, whether it came from a keybinding or a script.
+    /// Run a command from a keybinding, where nobody is waiting for an answer.
     ///
     /// A command the session cannot carry out — a target naming a pane that
     /// does not exist, say — is reported to the client and swallowed. Only a
@@ -941,15 +949,36 @@ impl App {
     /// the session. A typo in a script must never kill a user's panes.
     pub async fn execute(&mut self, cmd: Command) -> anyhow::Result<()> {
         match self.execute_now(cmd).await {
-            Ok(()) => Ok(()),
+            Ok(output) => {
+                // A keybinding has nowhere to print to yet; PR 7's status line
+                // message area is where this text belongs.
+                if !output.is_empty() {
+                    tracing::info!("command output: {output}");
+                }
+                Ok(())
+            }
             Err(ExecuteError::Fatal(error)) => Err(error),
             Err(ExecuteError::Rejected(message)) => {
                 tracing::warn!("command rejected: {message}");
-                // PR 2 turns this into `wv exec`'s stderr and exit code; for
-                // now an attached client logs it.
                 self.report_error(message);
                 Ok(())
             }
+        }
+    }
+
+    /// Run a command on behalf of a caller waiting for the result.
+    ///
+    /// A rejected command comes back as `CommandResult::Error` rather than an
+    /// `Err`: the request itself succeeded, and the caller — usually
+    /// `wv exec` — turns it into a message and a non-zero exit.
+    pub async fn execute_request(&mut self, cmd: Command) -> anyhow::Result<CommandResult> {
+        match self.execute_now(cmd).await {
+            Ok(output) => Ok(CommandResult::Ok { output }),
+            Err(ExecuteError::Rejected(message)) => {
+                tracing::warn!("command rejected: {message}");
+                Ok(CommandResult::Error { message })
+            }
+            Err(ExecuteError::Fatal(error)) => Err(error),
         }
     }
 
@@ -985,7 +1014,11 @@ impl App {
         self.advance_animations(dt).await
     }
 
-    async fn execute_now(&mut self, cmd: Command) -> Result<(), ExecuteError> {
+    /// Run a command, returning whatever it printed.
+    ///
+    /// Most commands print nothing and return an empty string; only
+    /// `display-message -p` has output today.
+    async fn execute_now(&mut self, cmd: Command) -> Result<String, ExecuteError> {
         match cmd {
             Command::SplitWindow { split, target } => {
                 let (workspace, pane) = self.resolve_pane(&target)?;
@@ -1007,9 +1040,16 @@ impl App {
                 self.check_session(&target)?;
                 self.exit = ExitState::Quit;
             }
+            Command::DisplayMessage { message, target } => {
+                // The target is resolved even though the message is literal, so
+                // `-t` is validated now and means something once PR 6 adds the
+                // `#{...}` variables that read from it.
+                self.resolve_pane(&target)?;
+                return Ok(message);
+            }
         }
 
-        Ok(())
+        Ok(String::new())
     }
 
     async fn select_pane(&mut self, selector: PaneSelector) -> Result<(), ExecuteError> {
@@ -1169,8 +1209,21 @@ impl App {
             SessionEvent::Message(ClientToServer::Resize { cols, rows }) => {
                 self.resize_to(cols, rows).await;
             }
-            SessionEvent::Message(ClientToServer::Exec(command)) => {
-                self.execute(command).await?;
+            // A request from the attached client: it is watching frames, not
+            // this socket, so the reply goes back through its frame sink.
+            SessionEvent::Message(ClientToServer::Request { id, command }) => {
+                let result = self.execute_request(command).await?;
+                if let OutputSink::Client { frames, .. } = &self.sink {
+                    let _ = frames.send(ServerToClient::Reply { id, result });
+                }
+            }
+            SessionEvent::Request { command, reply } => {
+                let result = self.execute_request(command).await?;
+                // A dropped receiver means the caller hung up mid-command. The
+                // command still ran; there is simply nobody left to tell.
+                if reply.send(result).is_err() {
+                    tracing::debug!("command completed after its caller disconnected");
+                }
             }
             SessionEvent::Message(ClientToServer::Detach) => {
                 self.detach_client(ServerToClient::Detached);
@@ -1992,6 +2045,7 @@ mod tests {
     use crate::backend::{PaneBackend, PaneCommand, PaneId};
     use crate::command::Command;
     use crate::layout::geometry::{FRect, Split};
+    use crate::session::protocol::CommandResult;
     use crate::layout::tree::Node;
     use tokio::time::Duration;
 
@@ -2073,6 +2127,67 @@ mod tests {
         assert_eq!(app.current().focused, Some(PaneId(2)));
 
         app
+    }
+
+    /// A waiting caller gets the command's output, not just "it ran".
+    #[tokio::test]
+    async fn a_request_returns_command_output() {
+        let mut app = two_pane_app().await;
+
+        let result = app
+            .execute_request(command("display-message -p hello"))
+            .await
+            .expect("the request completes");
+
+        assert_eq!(
+            result,
+            CommandResult::Ok {
+                output: "hello".to_owned()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn most_commands_return_no_output() {
+        let mut app = two_pane_app().await;
+
+        let result = app
+            .execute_request(command("select-pane -t %1"))
+            .await
+            .expect("the request completes");
+
+        assert_eq!(result, CommandResult::empty());
+    }
+
+    /// A rejected command is a completed request with an error in it, not a
+    /// transport failure: the caller needs the message, and the session lives.
+    #[tokio::test]
+    async fn a_rejected_command_comes_back_as_an_error_result() {
+        let mut app = two_pane_app().await;
+
+        let result = app
+            .execute_request(command("kill-pane -t %99"))
+            .await
+            .expect("a bad target is not a transport failure");
+
+        match result {
+            CommandResult::Error { message } => assert!(message.contains("%99"), "{message}"),
+            other @ CommandResult::Ok { .. } => panic!("expected an error result, got {other:?}"),
+        }
+        assert_eq!(app.exit, ExitState::Running);
+        assert_eq!(app.panes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_target_that_names_a_missing_pane_still_reports_through_display_message() {
+        let mut app = two_pane_app().await;
+
+        let result = app
+            .execute_request(command("display-message -p -t %99 hi"))
+            .await
+            .expect("the request completes");
+
+        assert!(!result.is_ok(), "an unresolvable -t must not print");
     }
 
     #[tokio::test]

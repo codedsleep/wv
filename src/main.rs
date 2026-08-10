@@ -199,6 +199,30 @@ fn install_panic_hook() {
     }));
 }
 
+/// `wv exec`: run one command against a session and report what it produced.
+///
+/// The command's own output goes to stdout and its failure to stderr, so a
+/// script can pipe one and check the other. A rejected command exits 1 without
+/// the `Error:` prefix `main` would add, because the message is already the
+/// whole story.
+async fn exec_command(args: weave::app::ExecArgs) -> anyhow::Result<()> {
+    let result =
+        weave::session::launch::exec(args.session_name.as_deref(), args.command).await?;
+
+    match result {
+        weave::session::protocol::CommandResult::Ok { output } => {
+            if !output.is_empty() {
+                println!("{output}");
+            }
+            Ok(())
+        }
+        weave::session::protocol::CommandResult::Error { message } => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// `wv ls`: every live session, newest first.
 fn list_sessions() -> anyhow::Result<()> {
     let sessions = weave::session::launch::list()?;
@@ -213,9 +237,7 @@ async fn main() -> anyhow::Result<()> {
     init_tracing()?;
     match launch_args {
         weave::app::LaunchArgs::ListSessions => list_sessions(),
-        weave::app::LaunchArgs::Exec(args) => {
-            weave::session::launch::exec(args.session_name.as_deref(), args.command).await
-        }
+        weave::app::LaunchArgs::Exec(args) => exec_command(args).await,
         weave::app::LaunchArgs::Bare(args) => weave::app::App::create_bare(args).await,
         // The daemon: it owns the panes and renders for whichever client is
         // attached, so it never touches this process's terminal.
