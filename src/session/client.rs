@@ -13,6 +13,7 @@ use anyhow::Context;
 use crossterm::event::{Event, EventStream};
 use futures::StreamExt;
 use tokio::net::UnixStream;
+use tokio::sync::mpsc;
 
 use super::protocol::{read_frame, write_frame, ClientToServer, ExitReason, ServerToClient};
 use crate::term::TerminalGuard;
@@ -90,40 +91,73 @@ pub async fn run(stream: UnixStream, name: &str) -> anyhow::Result<ClientOutcome
     let mut stdout = std::io::stdout();
     tracing::info!("attached to session {name} at {cols}x{rows}");
 
-    loop {
-        tokio::select! {
-            frame = read_frame::<_, ServerToClient>(&mut read_half) => {
-                match frame? {
-                    Some(ServerToClient::Frame(bytes)) => {
-                        stdout.write_all(&bytes)?;
-                        stdout.flush()?;
+    // Frames are read on their own task rather than inside the `select!` below.
+    // `read_frame` is not cancel-safe — half a frame consumed by a future that
+    // `select!` then drops is gone for good, and the stream desyncs on the very
+    // first keystroke. `Receiver::recv` is cancel-safe, so the select branch
+    // reads from this channel instead. Closing it means end of stream.
+    let (frames_tx, mut frames_rx) = mpsc::unbounded_channel::<anyhow::Result<ServerToClient>>();
+    let reader = tokio::spawn(async move {
+        loop {
+            match read_frame::<_, ServerToClient>(&mut read_half).await {
+                Ok(Some(message)) => {
+                    if frames_tx.send(Ok(message)).is_err() {
+                        return;
                     }
-                    Some(ServerToClient::Detached) => return Ok(ClientOutcome::Detached),
-                    Some(ServerToClient::Exit(reason)) => return Ok(ClientOutcome::Exited(reason)),
-                    Some(ServerToClient::Error(message)) => {
-                        tracing::warn!("session error: {message}");
-                    }
-                    None => return Ok(ClientOutcome::ConnectionLost),
+                }
+                Ok(None) => return,
+                Err(error) => {
+                    let _ = frames_tx.send(Err(error));
+                    return;
                 }
             }
-            event = events.next() => {
-                match event {
-                    Some(Ok(Event::Resize(cols, rows))) => {
-                        write_frame(&mut write_half, &ClientToServer::Resize { cols, rows }).await?;
+        }
+    });
+
+    let result: anyhow::Result<ClientOutcome> = async {
+        loop {
+            tokio::select! {
+                frame = frames_rx.recv() => {
+                    match frame {
+                        Some(Ok(ServerToClient::Frame(bytes))) => {
+                            stdout.write_all(&bytes)?;
+                            stdout.flush()?;
+                        }
+                        Some(Ok(ServerToClient::Detached)) => return Ok(ClientOutcome::Detached),
+                        Some(Ok(ServerToClient::Exit(reason))) => {
+                            return Ok(ClientOutcome::Exited(reason));
+                        }
+                        Some(Ok(ServerToClient::Error(message))) => {
+                            tracing::warn!("session error: {message}");
+                        }
+                        Some(Err(error)) => return Err(error),
+                        None => return Ok(ClientOutcome::ConnectionLost),
                     }
-                    Some(Ok(event)) => {
-                        write_frame(&mut write_half, &ClientToServer::Input(event)).await?;
+                }
+                event = events.next() => {
+                    match event {
+                        Some(Ok(Event::Resize(cols, rows))) => {
+                            write_frame(&mut write_half, &ClientToServer::Resize { cols, rows }).await?;
+                        }
+                        Some(Ok(event)) => {
+                            write_frame(&mut write_half, &ClientToServer::Input(event)).await?;
+                        }
+                        Some(Err(error)) => {
+                            tracing::warn!("terminal input error: {error:#}");
+                        }
+                        // stdin closed: nothing more can be sent, so leave the
+                        // session running rather than killing its panes.
+                        None => return Ok(ClientOutcome::Detached),
                     }
-                    Some(Err(error)) => {
-                        tracing::warn!("terminal input error: {error:#}");
-                    }
-                    // stdin closed: nothing more can be sent, so leave the
-                    // session running rather than killing its panes.
-                    None => return Ok(ClientOutcome::Detached),
                 }
             }
         }
     }
+    .await;
+
+    reader.abort();
+
+    result
 }
 
 #[cfg(test)]
