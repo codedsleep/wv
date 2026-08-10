@@ -7,7 +7,7 @@ use weave::backend::PaneId;
 use weave::config::ThemeConfig;
 use weave::layout::geometry::{FRect, Rect, Split};
 use weave::layout::tree::Node;
-use weave::render::compositor::compose;
+use weave::render::compositor::{compose, ComposeOptions};
 use weave::render::diff::DiffRenderer;
 use weave::term::pane::Pane;
 use weave::term::surface::Surface;
@@ -145,7 +145,7 @@ fn render_ansi(root: &Node, panes: &[Pane]) -> String {
         TEST_THEME,
         &Timeline::new(),
         &mut back,
-        true,
+        ComposeOptions { pane_titles: true, zoomed: None },
     );
     renderer
         .flush(&front, &back, &mut bytes)

@@ -16,12 +16,14 @@ use crate::anim::tween::Easing;
 use crate::backend::native::NativeBackend;
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::target::{Extreme, PaneRef, WindowRef};
-use crate::command::{Command, PaneSelector, SpawnCommand, Target};
+use crate::command::{
+    Command, LayoutPreset, PaneSelector, ResizeChange, SpawnCommand, SplitSize, Target,
+};
 use crate::config::{Config, ThemeConfig};
 use crate::input;
 use crate::input::keymap::Keymap;
 use crate::layout::geometry::{Direction, FRect, Rect, Split};
-use crate::layout::tree::Node;
+use crate::layout::tree::{self, Node};
 use crate::render::diff::{ColorMode, DiffRenderer};
 use crate::render::{chrome, compositor};
 use crate::session::protocol::{ClientToServer, CommandResult, ExitReason, ServerToClient};
@@ -35,6 +37,13 @@ const OPEN_NEW_PANE_DURATION: Duration = Duration::from_millis(220);
 const OPEN_SIBLING_DURATION: Duration = Duration::from_millis(180);
 // Close tweens use ease-out-cubic so panes decelerate into the collapsed line.
 const CLOSE_PANE_DURATION: Duration = Duration::from_millis(180);
+/// Reshaping an existing layout — resize, zoom, swap, rotate, select-layout.
+///
+/// Shorter than opening a pane: nothing is appearing, so a long tween just
+/// feels like lag when you are holding down a resize key.
+const RESIZE_DURATION: Duration = Duration::from_millis(140);
+/// The share `main-vertical` and `main-horizontal` give their main pane.
+const MAIN_PANE_RATIO: f32 = 0.5;
 /// How long shutdown waits for socket writers to flush their last frame.
 ///
 /// These are local unix sockets with at most a frame or two in flight, so this
@@ -62,6 +71,11 @@ struct Workspace {
     focused: Option<PaneId>,
     /// The pane focused before the current one, for `select-pane -l` / `{last}`.
     last_focused: Option<PaneId>,
+    /// The pane filling the window, if `resize-pane -Z` zoomed one.
+    ///
+    /// The layout tree is untouched while zoomed, so unzooming is just
+    /// forgetting this — and both directions animate for free.
+    zoomed: Option<PaneId>,
     closing: HashSet<PaneId>,
 }
 
@@ -526,6 +540,7 @@ impl App {
             root,
             focused,
             last_focused: None,
+            zoomed: None,
             closing: HashSet::new(),
         };
 
@@ -1152,7 +1167,10 @@ impl App {
             self.theme,
             &self.timeline,
             &mut surface,
-            self.pane_titles,
+            compositor::ComposeOptions {
+                pane_titles: self.pane_titles,
+                zoomed: self.workspaces[self.current_workspace].zoomed,
+            },
         );
         surface
     }
@@ -1172,12 +1190,19 @@ impl App {
                 target,
                 command,
                 detached,
+                size,
             } => {
                 let (workspace, pane) = self.resolve_pane(&target)?;
                 self.switch_workspace(workspace).await?;
-                self.split_pane(pane, split, command.as_ref(), detached)
+                self.split_pane(pane, split, command.as_ref(), detached, size)
                     .await?;
             }
+            // Everything that reshapes an existing window shares a tail, so
+            // it lives in one place rather than four arms of this match.
+            reshape @ (Command::ResizePane { .. }
+            | Command::SwapPane { .. }
+            | Command::RotateWindow { .. }
+            | Command::SelectLayout { .. }) => self.execute_reshape(reshape).await?,
             Command::SendKeys {
                 target,
                 keys,
@@ -1470,6 +1495,7 @@ impl App {
         split: Split,
         command: Option<&SpawnCommand>,
         detached: bool,
+        size: Option<SplitSize>,
     ) -> anyhow::Result<()> {
         let focused = pane;
         let Some(old_parent_rect) = self.leaf_rect_target(focused) else {
@@ -1483,12 +1509,246 @@ impl App {
             if !detached {
                 ws.set_focus(Some(new_pane));
             }
+            // `-p`/`-l` size the *new* pane, which is the second half, so the
+            // ratio kept by the original is one minus what was asked for.
+            if let Some(size) = size {
+                let extent = match split {
+                    Split::Vertical => old_parent_rect.w,
+                    Split::Horizontal => old_parent_rect.h,
+                };
+                let share = match size {
+                    SplitSize::Percent(percent) => f32::from(percent.min(100)) / 100.0,
+                    SplitSize::Cells(cells) if extent > 0 => {
+                        f32::from(cells) / f32::from(extent)
+                    }
+                    SplitSize::Cells(_) => 0.5,
+                };
+                if let Some(root) = self.current_mut().root.as_mut() {
+                    root.set_parent_ratio(new_pane, 1.0 - share);
+                }
+            }
             self.recompute_layout();
             self.start_open_tweens(focused, new_pane, split, old_parent_rect);
             self.dirty = true;
         }
 
         Ok(())
+    }
+
+    /// Commands that rearrange a window without adding or removing panes.
+    async fn execute_reshape(&mut self, cmd: Command) -> Result<(), ExecuteError> {
+        match cmd {
+            Command::ResizePane { target, change } => {
+                let (workspace, pane) = self.resolve_pane(&target)?;
+                self.switch_workspace(workspace).await?;
+                self.resize_pane_command(pane, change)?;
+            }
+            Command::SwapPane {
+                source,
+                target,
+                keep_focus,
+            } => {
+                let (workspace, first) = self.resolve_pane(&source)?;
+                let (other_workspace, second) = self.resolve_pane(&target)?;
+                if workspace != other_workspace {
+                    return Err(Rejected::new(
+                        "swap-pane needs both panes in the same window".to_owned(),
+                    )
+                    .into());
+                }
+                self.switch_workspace(workspace).await?;
+                self.swap_panes(first, second, keep_focus);
+            }
+            Command::RotateWindow { target, reverse } => {
+                let workspace = self.resolve_window(&target)?;
+                self.switch_workspace(workspace).await?;
+                self.rotate_window(reverse);
+            }
+            Command::SelectLayout { target, layout } => {
+                let workspace = self.resolve_window(&target)?;
+                self.switch_workspace(workspace).await?;
+                self.apply_layout(layout)?;
+            }
+            other => unreachable!("execute_reshape got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    /// Apply a `resize-pane`, animating every pane the change moves.
+    fn resize_pane_command(
+        &mut self,
+        pane: PaneId,
+        change: ResizeChange,
+    ) -> Result<(), ExecuteError> {
+        if let ResizeChange::ToggleZoom = change {
+            self.toggle_zoom(pane);
+            return Ok(());
+        }
+
+        if self.current().zoomed.is_some() {
+            return Err(Rejected::new(
+                "cannot resize a zoomed pane; unzoom with `resize-pane -Z` first".to_owned(),
+            )
+            .into());
+        }
+
+        let applied = match change {
+            ResizeChange::By { direction, cells } => self
+                .current_mut()
+                .root
+                .as_mut()
+                .is_some_and(|root| root.resize_leaf(pane, direction, cells)),
+            ResizeChange::Width(cells) => self
+                .current_mut()
+                .root
+                .as_mut()
+                .is_some_and(|root| root.resize_leaf_to(pane, Split::Vertical, cells)),
+            ResizeChange::Height(cells) => self
+                .current_mut()
+                .root
+                .as_mut()
+                .is_some_and(|root| root.resize_leaf_to(pane, Split::Horizontal, cells)),
+            ResizeChange::ToggleZoom => unreachable!("zoom is handled above"),
+        };
+
+        if !applied {
+            return Err(Rejected::new(
+                "nothing to resize: the pane has no split on that axis".to_owned(),
+            )
+            .into());
+        }
+
+        self.animate_to_new_layout();
+
+        Ok(())
+    }
+
+    /// Toggle a pane filling its window.
+    ///
+    /// The tree is left alone, so unzooming animates straight back to the
+    /// layout that was there — nothing has to be remembered or rebuilt.
+    fn toggle_zoom(&mut self, pane: PaneId) {
+        let ws = self.current_mut();
+        ws.zoomed = match ws.zoomed {
+            Some(zoomed) if zoomed == pane => None,
+            // Zooming a different pane moves the zoom rather than nesting it.
+            _ => Some(pane),
+        };
+        if ws.zoomed.is_some() {
+            ws.set_focus(Some(pane));
+        }
+        self.animate_to_new_layout();
+    }
+
+    fn swap_panes(&mut self, first: PaneId, second: PaneId, keep_focus: bool) {
+        let swapped = self
+            .current_mut()
+            .root
+            .as_mut()
+            .is_some_and(|root| root.swap_leaves(first, second));
+        if !swapped {
+            return;
+        }
+
+        if !keep_focus {
+            // Focus follows the pane, which is now where the other one was.
+            self.current_mut().set_focus(Some(first));
+        }
+        self.animate_to_new_layout();
+    }
+
+    /// Move every pane one position around the window's layout.
+    fn rotate_window(&mut self, reverse: bool) {
+        let panes = self.current().leaf_panes();
+        if panes.len() < 2 {
+            return;
+        }
+
+        let mut rotated = panes.clone();
+        if reverse {
+            rotated.rotate_right(1);
+        } else {
+            rotated.rotate_left(1);
+        }
+
+        // Write the rotated order back into the same layout positions.
+        if let Some(root) = self.current_mut().root.as_mut() {
+            let mut next = rotated.into_iter();
+            root.set_leaves(&mut next);
+        }
+        self.animate_to_new_layout();
+    }
+
+    fn apply_layout(&mut self, layout: LayoutPreset) -> Result<(), ExecuteError> {
+        let panes = self.current().leaf_panes();
+        if panes.is_empty() {
+            return Err(Rejected::new("window has no panes to lay out".to_owned()).into());
+        }
+
+        let rect = self.root_rect();
+        let root = match layout {
+            LayoutPreset::EvenHorizontal => tree::even_chain(&panes, Split::Vertical, rect),
+            LayoutPreset::EvenVertical => tree::even_chain(&panes, Split::Horizontal, rect),
+            LayoutPreset::MainVertical => {
+                tree::main_and_stack(&panes, Split::Vertical, MAIN_PANE_RATIO, rect)
+            }
+            LayoutPreset::MainHorizontal => {
+                tree::main_and_stack(&panes, Split::Horizontal, MAIN_PANE_RATIO, rect)
+            }
+            LayoutPreset::Tiled => tree::tiled(&panes, rect),
+        };
+
+        let Some(mut root) = root else {
+            return Err(Rejected::new("could not build that layout".to_owned()).into());
+        };
+
+        // Start every pane where it is now so the rearrangement animates
+        // rather than teleporting.
+        for pane in &panes {
+            if let Some(current) = self.leaf_rect_current(*pane) {
+                if let Some(Node::Leaf { rect_current, .. }) = root.find_leaf_mut(*pane) {
+                    *rect_current = current;
+                }
+            }
+        }
+        self.current_mut().root = Some(root);
+        self.animate_to_new_layout();
+
+        Ok(())
+    }
+
+    /// Recompute the layout and tween every pane from where it is to where it
+    /// now belongs.
+    ///
+    /// This is the shared tail of every command that changes shape without
+    /// adding or removing a pane.
+    fn animate_to_new_layout(&mut self) {
+        self.recompute_layout();
+
+        let mut targets = Vec::new();
+        if let Some(root) = self.current().root.as_ref() {
+            collect_leaf_targets(root, &mut targets);
+        }
+
+        for (pane, target) in targets {
+            let Some(from) = self.leaf_rect_current(pane) else {
+                continue;
+            };
+            let to = FRect::from(target);
+            if from == to {
+                continue;
+            }
+            self.timeline.tween_leaf_rect(
+                pane,
+                from,
+                to,
+                RESIZE_DURATION,
+                Easing::EaseOutCubic,
+            );
+        }
+
+        self.dirty = true;
     }
 
     /// Type `keys` into `pane`, producing exactly the bytes the keyboard would.
@@ -1882,7 +2142,10 @@ impl App {
             self.theme,
             &self.timeline,
             &mut self.back,
-            self.pane_titles,
+            compositor::ComposeOptions {
+                pane_titles: self.pane_titles,
+                zoomed: self.workspaces[self.current_workspace].zoomed,
+            },
         );
         if self.status_bar {
             let indicators = self.workspace_indicators();
@@ -2013,8 +2276,18 @@ impl App {
 
     fn recompute_layout(&mut self) {
         let root_rect = self.root_rect();
+        let zoomed = self.current().zoomed;
         if let Some(root) = self.current_mut().root.as_mut() {
             root.compute_layout(root_rect);
+
+            // A zoomed pane is laid out normally and then stretched over the
+            // whole window. Leaving the rest of the tree at its real geometry
+            // is what lets unzooming animate straight back.
+            if let Some(zoomed) = zoomed {
+                if let Some(Node::Leaf { rect_target, .. }) = root.find_leaf_mut(zoomed) {
+                    *rect_target = root_rect;
+                }
+            }
         }
     }
 
@@ -2107,6 +2380,7 @@ impl App {
             }),
             focused: Some(pane_id),
             last_focused: None,
+            zoomed: None,
             closing: HashSet::new(),
         };
 
@@ -2790,6 +3064,211 @@ mod tests {
         assert_eq!(app.exit, ExitState::Quit);
     }
 
+    /// Ratios are what make `-p 30` mean 30%, so assert the geometry, not
+    /// just that the command succeeded.
+    #[tokio::test]
+    async fn split_window_p_sizes_the_new_pane() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+
+        app.execute(command("split-window -h -p 30"))
+            .await
+            .expect("split succeeds");
+
+        let new_rect = app.leaf_rect_target(PaneId(2)).expect("new pane laid out");
+        // 30% of a 100-cell window, within a cell of rounding.
+        assert!(
+            (29..=31).contains(&new_rect.w),
+            "new pane should be ~30 cells wide, got {}",
+            new_rect.w
+        );
+    }
+
+    #[tokio::test]
+    async fn resize_pane_moves_the_boundary_and_animates() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+
+        let before = app.leaf_rect_target(PaneId(1)).expect("laid out").w;
+        app.execute(command("resize-pane -t %1 -R 10"))
+            .await
+            .expect("resize succeeds");
+        let after = app.leaf_rect_target(PaneId(1)).expect("laid out").w;
+
+        assert!(
+            after > before,
+            "moving %1's right border right should widen it: {before} -> {after}"
+        );
+        assert!(!app.timeline.is_idle(), "a resize should animate");
+    }
+
+    /// `-L` moves a border, it does not always enlarge — which side the pane
+    /// is on decides. This is tmux's behaviour and the easy thing to get wrong.
+    #[tokio::test]
+    async fn resize_left_shrinks_the_pane_on_the_left() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+
+        let before = app.leaf_rect_target(PaneId(1)).expect("laid out").w;
+        app.execute(command("resize-pane -t %1 -L 10"))
+            .await
+            .expect("resize succeeds");
+        let after = app.leaf_rect_target(PaneId(1)).expect("laid out").w;
+
+        assert!(after < before, "{before} -> {after}");
+    }
+
+    #[tokio::test]
+    async fn resizing_a_pane_with_no_split_on_that_axis_is_refused() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+
+        let result = app
+            .execute_request(command("resize-pane -R 5"))
+            .await
+            .expect("the request completes");
+
+        assert!(!result.is_ok(), "a lone pane has no boundary to move");
+    }
+
+    #[tokio::test]
+    async fn resize_pane_x_sets_an_absolute_width() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+
+        app.execute(command("resize-pane -t %1 -x 40"))
+            .await
+            .expect("resize succeeds");
+
+        let width = app.leaf_rect_target(PaneId(1)).expect("laid out").w;
+        assert!((39..=41).contains(&width), "expected ~40, got {width}");
+    }
+
+    /// Zoom leaves the tree alone, so unzooming restores the exact layout
+    /// without anything having to be remembered.
+    #[tokio::test]
+    async fn zoom_fills_the_window_and_unzoom_restores_the_layout() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+        let unzoomed = app.leaf_rect_target(PaneId(2)).expect("laid out");
+
+        app.execute(command("resize-pane -Z"))
+            .await
+            .expect("zoom succeeds");
+        assert_eq!(app.current().zoomed, Some(PaneId(2)));
+        let zoomed = app.leaf_rect_target(PaneId(2)).expect("laid out");
+        assert_eq!(zoomed, app.root_rect(), "a zoomed pane fills the window");
+
+        app.execute(command("resize-pane -Z"))
+            .await
+            .expect("unzoom succeeds");
+        assert_eq!(app.current().zoomed, None);
+        assert_eq!(app.leaf_rect_target(PaneId(2)), Some(unzoomed));
+    }
+
+    #[tokio::test]
+    async fn resizing_while_zoomed_is_refused_rather_than_silently_ignored() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+        app.execute(command("resize-pane -Z")).await.expect("zoom");
+
+        let result = app
+            .execute_request(command("resize-pane -R 5"))
+            .await
+            .expect("the request completes");
+
+        assert!(!result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn swap_pane_exchanges_positions() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+
+        let left = app.current().leaf_panes()[0];
+        let right = app.current().leaf_panes()[1];
+        app.execute(command("swap-pane -U"))
+            .await
+            .expect("swap succeeds");
+
+        assert_eq!(app.current().leaf_panes(), vec![right, left]);
+    }
+
+    #[tokio::test]
+    async fn rotate_window_moves_every_pane_along() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+        app.execute(command("split-window -v")).await.expect("split");
+        let before = app.current().leaf_panes();
+
+        app.execute(command("rotate-window"))
+            .await
+            .expect("rotate succeeds");
+
+        let after = app.current().leaf_panes();
+        assert_ne!(before, after);
+        let mut sorted_before = before.clone();
+        let mut sorted_after = after.clone();
+        sorted_before.sort_by_key(|pane| pane.0);
+        sorted_after.sort_by_key(|pane| pane.0);
+        assert_eq!(sorted_before, sorted_after, "rotate must not lose a pane");
+    }
+
+    #[tokio::test]
+    async fn select_layout_even_horizontal_gives_every_pane_the_same_width() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 120, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+        app.execute(command("split-window -v")).await.expect("split");
+
+        app.execute(command("select-layout even-horizontal"))
+            .await
+            .expect("layout succeeds");
+
+        let widths: Vec<u16> = app
+            .current()
+            .leaf_panes()
+            .into_iter()
+            .map(|pane| app.leaf_rect_target(pane).expect("laid out").w)
+            .collect();
+        assert_eq!(widths.len(), 3);
+        let min = widths.iter().min().copied().unwrap_or(0);
+        let max = widths.iter().max().copied().unwrap_or(0);
+        assert!(max - min <= 1, "widths should be even, got {widths:?}");
+    }
+
+    #[tokio::test]
+    async fn select_layout_keeps_every_pane() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 120, 40, PaneId(1));
+        for _ in 0..3 {
+            app.execute(command("split-window -h")).await.expect("split");
+        }
+
+        for layout in [
+            "even-vertical",
+            "main-vertical",
+            "main-horizontal",
+            "tiled",
+        ] {
+            app.execute(command(&format!("select-layout {layout}")))
+                .await
+                .unwrap_or_else(|error| panic!("{layout} failed: {error}"));
+            assert_eq!(
+                app.current().leaf_panes().len(),
+                4,
+                "{layout} lost a pane"
+            );
+        }
+    }
+
     /// A waiting caller gets the command's output, not just "it ran".
     #[tokio::test]
     async fn a_request_returns_command_output() {
@@ -3454,11 +3933,11 @@ mod tests {
     /// tmux script learns what is missing rather than that something failed.
     #[test]
     fn exec_reports_unsupported_flags_with_their_plan() {
-        let error = LaunchArgs::parse(["exec", "split-window", "-p", "30"])
-            .expect_err("sizing is not implemented yet")
+        let error = LaunchArgs::parse(["exec", "resize-pane", "-M"])
+            .expect_err("mouse resizing is not implemented yet")
             .to_string();
 
-        assert!(error.contains("PR 5"), "{error}");
+        assert!(error.contains("PR 11"), "{error}");
     }
 
     #[test]

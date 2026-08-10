@@ -31,6 +31,8 @@ pub enum Command {
         command: Option<SpawnCommand>,
         /// `-d`: leave focus where it is.
         detached: bool,
+        /// How big the new pane should be. `None` splits evenly.
+        size: Option<SplitSize>,
     },
     /// Move focus.
     SelectPane { selector: PaneSelector },
@@ -58,6 +60,22 @@ pub enum Command {
     KillWindow { target: Target },
     /// Name a window, pinning it against automatic renaming.
     RenameWindow { target: Target, name: String },
+    /// Resize a pane, or toggle it filling its window.
+    ResizePane {
+        target: Target,
+        change: ResizeChange,
+    },
+    /// Exchange two panes' positions.
+    SwapPane {
+        source: Target,
+        target: Target,
+        /// Keep focus on the pane that was focused, not on where it moved to.
+        keep_focus: bool,
+    },
+    /// Cycle every pane through the window's layout positions.
+    RotateWindow { target: Target, reverse: bool },
+    /// Rearrange a window's panes into a named shape.
+    SelectLayout { target: Target, layout: LayoutPreset },
     /// Close a pane.
     KillPane { target: Target },
     /// Leave the session running and disconnect the client.
@@ -88,6 +106,15 @@ pub enum Command {
     DisplayMessage { message: String, target: Target },
 }
 
+/// How big a new pane should be, from `-p` or `-l`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum SplitSize {
+    /// A percentage of the pane being split.
+    Percent(u16),
+    /// A number of cells along the split axis.
+    Cells(u16),
+}
+
 /// What to run in a pane, and where.
 ///
 /// A `None` program means the user's shell; `cwd` overrides where it starts.
@@ -103,6 +130,42 @@ pub struct SpawnCommand {
 impl SpawnCommand {
     pub fn is_empty(&self) -> bool {
         self.argv.is_empty() && self.cwd.is_none()
+    }
+}
+
+/// What a `resize-pane` should do.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ResizeChange {
+    /// Move the nearest boundary in a direction by some cells.
+    By { direction: Direction, cells: u16 },
+    /// Set the pane's width.
+    Width(u16),
+    /// Set the pane's height.
+    Height(u16),
+    /// Toggle the pane filling its window.
+    ToggleZoom,
+}
+
+/// tmux's named layouts.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum LayoutPreset {
+    EvenHorizontal,
+    EvenVertical,
+    MainVertical,
+    MainHorizontal,
+    Tiled,
+}
+
+impl LayoutPreset {
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "even-horizontal" => Self::EvenHorizontal,
+            "even-vertical" => Self::EvenVertical,
+            "main-vertical" => Self::MainVertical,
+            "main-horizontal" => Self::MainHorizontal,
+            "tiled" => Self::Tiled,
+            _ => return None,
+        })
     }
 }
 
@@ -138,6 +201,13 @@ pub enum CommandError {
     UnexpectedArgument { command: String, argument: String },
     #[error("`{command}` accepts only one of {flags}")]
     ConflictingFlags { command: String, flags: String },
+    #[error("`{command} {flag}` expects {expected}, not `{value}`")]
+    InvalidValue {
+        command: String,
+        flag: String,
+        value: String,
+        expected: String,
+    },
     #[error("invalid target for `{command}`: {source}")]
     Target {
         command: String,
@@ -160,6 +230,10 @@ pub const COMMAND_NAMES: &[&str] = &[
     "new-window",
     "kill-window",
     "rename-window",
+    "resize-pane",
+    "swap-pane",
+    "rotate-window",
+    "select-layout",
 ];
 
 /// The pre-target weave names, still accepted.
@@ -212,6 +286,11 @@ impl Command {
                 target: parse_target_only(name, rest, TargetKind::Window)?,
             }),
             "rename-window" | "renamew" => parse_rename_window(name, rest),
+
+            "resize-pane" | "resizep" => parse_resize_pane(name, rest),
+            "swap-pane" | "swapp" => parse_swap_pane(name, rest),
+            "rotate-window" | "rotatew" => parse_rotate_window(name, rest),
+            "select-layout" | "selectl" => parse_select_layout(name, rest),
 
             "kill-pane" | "killp" | "close" => Ok(Self::KillPane {
                 target: parse_target_only(name, rest, TargetKind::Pane)?,
@@ -266,6 +345,7 @@ fn parse_split_window(
     let mut split = fixed;
     let mut target = None;
     let mut detached = false;
+    let mut size = None;
     let mut spawn = SpawnCommand::default();
     let mut args = args.iter();
 
@@ -282,8 +362,20 @@ fn parse_split_window(
             "-t" => target = Some(next_target(name, &mut args, "-t", TargetKind::Pane)?),
             "-c" => spawn.cwd = Some(PathBuf::from(next_value(name, &mut args, "-c")?)),
             "-d" => detached = true,
-            "-p" | "-l" | "-f" => return Err(unsupported(name, arg, "PR 5: pane sizing")),
-            "-b" => return Err(unsupported(name, arg, "PR 5: split placement")),
+            "-p" => {
+                let value = next_value(name, &mut args, "-p")?;
+                size = Some(SplitSize::Percent(parse_size(name, "-p", &value)?));
+            }
+            "-l" => {
+                let value = next_value(name, &mut args, "-l")?;
+                // tmux accepts `-l 30%` as a spelling of `-p 30`.
+                size = Some(match value.strip_suffix('%') {
+                    Some(percent) => SplitSize::Percent(parse_size(name, "-l", percent)?),
+                    None => SplitSize::Cells(parse_size(name, "-l", &value)?),
+                });
+            }
+            "-f" => return Err(unsupported(name, arg, "not planned: full-width splits need a layout model weave does not have")),
+            "-b" => return Err(unsupported(name, arg, "not planned: splits always place the new pane second")),
             "-P" | "-F" => return Err(unsupported(name, arg, "PR 6: format strings")),
             "--" => {
                 // Everything after `--` is the command, even if it looks like
@@ -313,6 +405,16 @@ fn parse_split_window(
         target: target.unwrap_or_default(),
         command: (!spawn.is_empty()).then_some(spawn),
         detached,
+        size,
+    })
+}
+
+fn parse_size(command: &str, flag: &str, value: &str) -> Result<u16, CommandError> {
+    value.parse().map_err(|_| CommandError::InvalidValue {
+        command: command.to_owned(),
+        flag: flag.to_owned(),
+        value: value.to_owned(),
+        expected: "a number".to_owned(),
     })
 }
 
@@ -405,6 +507,215 @@ fn parse_respawn_pane(name: &str, args: &[String]) -> Result<Command, CommandErr
         target: target.unwrap_or_default(),
         kill,
         command: (!spawn.is_empty()).then_some(spawn),
+    })
+}
+
+fn parse_resize_pane(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut target = None;
+    let mut change = None;
+    let mut args = args.iter().peekable();
+
+    while let Some(arg) = args.next() {
+        let next = match arg.as_str() {
+            "-t" => {
+                target = Some(next_target(name, &mut args, "-t", TargetKind::Pane)?);
+                continue;
+            }
+            "-Z" => ResizeChange::ToggleZoom,
+            // A direction takes an optional count, so a bare `-L` means one
+            // cell and `-L 5` means five. Only a number counts as the count.
+            "-L" => ResizeChange::By {
+                direction: Direction::Left,
+                cells: optional_count(&mut args),
+            },
+            "-R" => ResizeChange::By {
+                direction: Direction::Right,
+                cells: optional_count(&mut args),
+            },
+            "-U" => ResizeChange::By {
+                direction: Direction::Up,
+                cells: optional_count(&mut args),
+            },
+            "-D" => ResizeChange::By {
+                direction: Direction::Down,
+                cells: optional_count(&mut args),
+            },
+            "-x" => {
+                let value = next_value(name, &mut args, "-x")?;
+                ResizeChange::Width(parse_size(name, "-x", &value)?)
+            }
+            "-y" => {
+                let value = next_value(name, &mut args, "-y")?;
+                ResizeChange::Height(parse_size(name, "-y", &value)?)
+            }
+            "-M" => return Err(unsupported(name, arg, "PR 11: mouse resizing")),
+            other if other.starts_with('-') => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                return Err(CommandError::UnexpectedArgument {
+                    command: name.to_owned(),
+                    argument: other.to_owned(),
+                });
+            }
+        };
+
+        if change.replace(next).is_some() {
+            return Err(CommandError::ConflictingFlags {
+                command: name.to_owned(),
+                flags: "`-L`, `-R`, `-U`, `-D`, `-x`, `-y` and `-Z`".to_owned(),
+            });
+        }
+    }
+
+    let change = change.ok_or_else(|| CommandError::MissingValue {
+        flag: "a direction, `-x`, `-y` or `-Z`".to_owned(),
+    })?;
+
+    Ok(Command::ResizePane {
+        target: target.unwrap_or_default(),
+        change,
+    })
+}
+
+/// tmux's resize directions take an optional count; default to one cell.
+fn optional_count<'a, I>(args: &mut std::iter::Peekable<I>) -> u16
+where
+    I: Iterator<Item = &'a String>,
+{
+    let Some(next) = args.peek() else {
+        return 1;
+    };
+    let Ok(count) = next.parse::<u16>() else {
+        return 1;
+    };
+    args.next();
+
+    count
+}
+
+fn parse_swap_pane(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut source = None;
+    let mut target = None;
+    let mut keep_focus = false;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-s" => source = Some(next_target(name, &mut args, "-s", TargetKind::Pane)?),
+            "-t" => target = Some(next_target(name, &mut args, "-t", TargetKind::Pane)?),
+            "-d" => keep_focus = true,
+            "-U" => target = Some(relative_pane(PaneRef::Previous)),
+            "-D" => target = Some(relative_pane(PaneRef::Next)),
+            other if other.starts_with('-') => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                return Err(CommandError::UnexpectedArgument {
+                    command: name.to_owned(),
+                    argument: other.to_owned(),
+                });
+            }
+        }
+    }
+
+    Ok(Command::SwapPane {
+        source: source.unwrap_or_default(),
+        target: target.unwrap_or_default(),
+        keep_focus,
+    })
+}
+
+fn relative_pane(pane: PaneRef) -> Target {
+    Target {
+        pane: Some(pane),
+        ..Target::default()
+    }
+}
+
+fn parse_rotate_window(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut target = None;
+    let mut reverse = false;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-t" => target = Some(next_target(name, &mut args, "-t", TargetKind::Window)?),
+            "-U" => reverse = true,
+            "-D" => reverse = false,
+            "-Z" => return Err(unsupported(name, arg, "not planned: rotate does not unzoom")),
+            other if other.starts_with('-') => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                return Err(CommandError::UnexpectedArgument {
+                    command: name.to_owned(),
+                    argument: other.to_owned(),
+                });
+            }
+        }
+    }
+
+    Ok(Command::RotateWindow {
+        target: target.unwrap_or_default(),
+        reverse,
+    })
+}
+
+fn parse_select_layout(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut target = None;
+    let mut layout = None;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-t" => target = Some(next_target(name, &mut args, "-t", TargetKind::Window)?),
+            "-n" => layout = Some(LayoutPreset::Tiled),
+            "-p" | "-o" | "-E" => {
+                return Err(unsupported(
+                    name,
+                    arg,
+                    "not planned: weave keeps no layout history to step through",
+                ));
+            }
+            other if other.starts_with('-') => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                let preset = LayoutPreset::parse(other).ok_or_else(|| {
+                    CommandError::InvalidValue {
+                        command: name.to_owned(),
+                        flag: "layout".to_owned(),
+                        value: other.to_owned(),
+                        expected: "even-horizontal, even-vertical, main-vertical, \
+                                   main-horizontal or tiled"
+                            .to_owned(),
+                    }
+                })?;
+                layout = Some(preset);
+            }
+        }
+    }
+
+    let layout = layout.ok_or_else(|| CommandError::MissingValue {
+        flag: "a layout name".to_owned(),
+    })?;
+
+    Ok(Command::SelectLayout {
+        target: target.unwrap_or_default(),
+        layout,
     })
 }
 
@@ -774,7 +1085,10 @@ fn unsupported(command: &str, flag: &str, plan: &str) -> CommandError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, CommandError, PaneSelector, Target, WindowRef};
+    use super::{
+        Command, CommandError, LayoutPreset, PaneSelector, ResizeChange, SplitSize, Target,
+        WindowRef,
+    };
     use crate::command::target::PaneRef;
     use crate::layout::geometry::{Direction, Split};
 
@@ -793,6 +1107,7 @@ mod tests {
                 target: Target::current(),
                 command: None,
                 detached: false,
+                size: None,
             }
         );
         assert_eq!(
@@ -802,6 +1117,7 @@ mod tests {
                 target: Target::current(),
                 command: None,
                 detached: false,
+                size: None,
             }
         );
     }
@@ -815,6 +1131,7 @@ mod tests {
                 target: Target::current(),
                 command: None,
                 detached: false,
+                size: None,
             }
         );
     }
@@ -830,6 +1147,7 @@ mod tests {
                 target: Target::current(),
                 command: None,
                 detached: false,
+                size: None,
             }
         );
         assert_eq!(
@@ -839,6 +1157,7 @@ mod tests {
                 target: Target::current(),
                 command: None,
                 detached: false,
+                size: None,
             }
         );
     }
@@ -963,10 +1282,119 @@ mod tests {
 
     #[test]
     fn planned_flags_say_which_pr_brings_them() {
-        let error = Command::parse_str("split-window -h -p 30").expect_err("not supported yet");
+        let error = Command::parse_str("resize-pane -M").expect_err("not supported yet");
         let message = error.to_string();
-        assert!(message.contains("-p"), "{message}");
-        assert!(message.contains("PR 5"), "{message}");
+        assert!(message.contains("-M"), "{message}");
+        assert!(message.contains("PR 11"), "{message}");
+    }
+
+    #[test]
+    fn split_window_sizes_the_new_pane() {
+        let Command::SplitWindow { size, .. } = parse("split-window -h -p 30") else {
+            panic!("expected a split");
+        };
+        assert_eq!(size, Some(SplitSize::Percent(30)));
+
+        let Command::SplitWindow { size, .. } = parse("split-window -l 20") else {
+            panic!("expected a split");
+        };
+        assert_eq!(size, Some(SplitSize::Cells(20)));
+
+        // tmux accepts `-l 30%` as another way to say `-p 30`.
+        let Command::SplitWindow { size, .. } = parse("split-window -l 30%") else {
+            panic!("expected a split");
+        };
+        assert_eq!(size, Some(SplitSize::Percent(30)));
+    }
+
+    #[test]
+    fn a_bad_size_says_what_it_wanted() {
+        let error = Command::parse_str("split-window -p wide").expect_err("not a number");
+        assert!(error.to_string().contains("a number"), "{error}");
+    }
+
+    /// tmux's resize directions take an optional count, so `-L` is one cell.
+    #[test]
+    fn resize_directions_default_to_one_cell() {
+        assert_eq!(
+            parse("resize-pane -L"),
+            Command::ResizePane {
+                target: Target::current(),
+                change: ResizeChange::By {
+                    direction: Direction::Left,
+                    cells: 1,
+                },
+            }
+        );
+        assert_eq!(
+            parse("resize-pane -R 5"),
+            Command::ResizePane {
+                target: Target::current(),
+                change: ResizeChange::By {
+                    direction: Direction::Right,
+                    cells: 5,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn resize_pane_takes_absolute_sizes_and_zoom() {
+        assert_eq!(
+            parse("resize-pane -x 40"),
+            Command::ResizePane {
+                target: Target::current(),
+                change: ResizeChange::Width(40),
+            }
+        );
+        assert_eq!(
+            parse("resize-pane -Z"),
+            Command::ResizePane {
+                target: Target::current(),
+                change: ResizeChange::ToggleZoom,
+            }
+        );
+    }
+
+    #[test]
+    fn resize_pane_needs_to_be_told_what_to_do() {
+        assert!(matches!(
+            Command::parse_str("resize-pane -t %1"),
+            Err(CommandError::MissingValue { .. })
+        ));
+    }
+
+    #[test]
+    fn swap_pane_directions_are_relative_targets() {
+        let Command::SwapPane { target, .. } = parse("swap-pane -U") else {
+            panic!("expected a swap");
+        };
+        assert_eq!(target.pane, Some(PaneRef::Previous));
+    }
+
+    #[test]
+    fn select_layout_names_its_presets() {
+        for (line, expected) in [
+            ("select-layout even-horizontal", LayoutPreset::EvenHorizontal),
+            ("select-layout even-vertical", LayoutPreset::EvenVertical),
+            ("select-layout main-vertical", LayoutPreset::MainVertical),
+            ("select-layout main-horizontal", LayoutPreset::MainHorizontal),
+            ("select-layout tiled", LayoutPreset::Tiled),
+        ] {
+            assert_eq!(
+                parse(line),
+                Command::SelectLayout {
+                    target: Target::current(),
+                    layout: expected,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_layout_lists_the_ones_that_exist() {
+        let error = Command::parse_str("select-layout spiral").expect_err("no such layout");
+        assert!(error.to_string().contains("even-horizontal"), "{error}");
     }
 
     /// The first bare word starts the command line; everything after it

@@ -5,7 +5,7 @@ use weave::backend::PaneId;
 use weave::config::ThemeConfig;
 use weave::layout::geometry::{FRect, Rect, Split};
 use weave::layout::tree::Node;
-use weave::render::compositor::compose;
+use weave::render::compositor::{compose, ComposeOptions};
 use weave::term::pane::Pane;
 use weave::term::surface::Surface;
 
@@ -104,7 +104,10 @@ fn bench_compose(c: &mut Criterion) {
                     BENCH_THEME,
                     black_box(&timeline),
                     black_box(&mut surface),
-                    false,
+                    ComposeOptions {
+                        pane_titles: false,
+                        zoomed: None,
+                    },
                 );
                 black_box(&surface);
             });

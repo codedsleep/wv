@@ -84,6 +84,7 @@ fn split(split: Split) -> Command {
         target: Target::current(),
         command: None,
         detached: false,
+        size: None,
     }
 }
 

@@ -136,23 +136,24 @@ renumbering, and more than nine windows.
 **Cost:** about a third of the original estimate, and none of the
 index-versus-position risk that made the original the highest-risk PR here.
 
-# PR 5 — Sizing, zoom, pane manipulation
+# PR 5 — Sizing, zoom, pane manipulation — **SHIPPED**
 
-**Where weave's animation identity actually pays off — every one of these tweens.**
+Where weave's animation identity actually pays off: every one of these tweens.
 
-- Split sizing: `-p PERCENT`, `-l SIZE` → seed `ratio_target` instead of hardcoded 0.5
-  (`src/layout/tree.rs:97`).
-- `resize-pane -L/-R/-U/-D [N]`, `-x/-y`, and `-Z` zoom (zoom = render the focused leaf at
-  root rect, tweened; tree unchanged, so unzoom is free).
-- `select-pane -t/-L/-R/-U/-D/-l`, `swap-pane -U/-D/-t`, `rotate-window`,
-  `break-pane`, `join-pane -h/-v -s -t`.
-- `select-layout` presets (`even-horizontal`, `even-vertical`, `main-vertical`, `tiled`)
-  expressed as BSP shapes, animated as one transition.
+**Shipped:** `split-window -p/-l` seeding `ratio_target`, `resize-pane`
+(`-L/-R/-U/-D [n]`, `-x`, `-y`, `-Z`), `swap-pane`, `rotate-window`, and
+`select-layout` with the five named presets. All of them route through one
+`animate_to_new_layout` tail, so anything that reshapes a window animates.
 
-**Files:** `src/layout/tree.rs`, `src/layout/geometry.rs`, `src/app.rs`, `src/anim/timeline.rs`.
-**Tests:** `tests/render_snapshots.rs` golden frames at t=0/mid/end for zoom and resize.
+Zoom keeps the layout tree untouched and stretches the zoomed leaf over the
+window in `recompute_layout`, so unzooming animates back to the exact previous
+geometry with no saved state.
 
----
+**Deferred to PR 9:** `break-pane` and `join-pane`, which move panes *between*
+windows and want the same machinery as the pane-movement commands there.
+
+**Won't do:** `-b`/`-f` split placement, `select-layout -p/-o/-E` and layout
+strings (weave keeps no layout history), `next-layout`.
 
 # PR 6 — Introspection, formats, `capture-pane`
 

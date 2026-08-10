@@ -155,7 +155,7 @@ exec wv attach main                           # ... then take it over interactiv
 
 Commands use tmux's names and flags, including `-t session:window.pane` targets:
 
-- `split-window [-h|-v] [-d] [-c dir] [-t target] [command...]`
+- `split-window [-h|-v] [-d] [-p percent|-l size] [-c dir] [-t target] [command...]`
 - `select-pane [-L|-R|-U|-D] [-l] [-t target]`
 - `select-window [-t target] [-n|-p|-l]`, `next-window`, `previous-window`, `last-window`
 - `new-window [-d] [-n name] [-c dir] [-t target] [command...]`
@@ -164,6 +164,9 @@ Commands use tmux's names and flags, including `-t session:window.pane` targets:
 - `display-message -p [-t target] [text]`
 - `send-keys [-l] [-t target] <keys...>`
 - `respawn-pane [-k] [-c dir] [-t target] [command...]`
+- `resize-pane [-L|-R|-U|-D [n]] [-x n] [-y n] [-Z] [-t target]`
+- `swap-pane [-U|-D|-s src|-t dst] [-d]`, `rotate-window [-U|-D]`
+- `select-layout even-horizontal|even-vertical|main-vertical|main-horizontal|tiled`
 
 Targets accept pane ids (`%1`), pane indices (`.0`), window indices (`:2`), window
 names (`:build`), and the relative forms `+`, `-`, `!`, `{last}`, `{top}`,

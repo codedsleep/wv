@@ -45,7 +45,8 @@ means the current one.
 | tmux | weave alias | Status | Notes |
 |---|---|---|---|
 | `split-window [-hv] [-t]` | `split-h`, `split-v` | yes | |
-| `split-window -p/-l` | — | PR 5 | Sizing; splits are even for now |
+| `split-window -p/-l` | — | yes | `-l 30%` is accepted as `-p 30` |
+| `split-window -b/-f` | — | no | Splits always place the new pane second |
 | `split-window -c` | — | yes | |
 | `split-window -d` | — | yes | |
 | `split-window <command>` | — | yes | Trailing words are the command; `--` forces it |
@@ -56,8 +57,9 @@ means the current one.
 | `select-pane -LRUD` | `focus-left`… | yes | Geometric, walks the layout tree |
 | `select-pane -t` | — | yes | |
 | `select-pane -l` | — | yes | |
-| `select-pane -Z` | — | PR 5 | Zoom |
+| `select-pane -Z` | — | PR 7 | Use `resize-pane -Z` |
 | `select-pane -T/-P` | — | PR 7 | Titles and styles |
+| `next-layout` | — | no | |
 | `select-window -t/-n/-p/-l` | `workspace-1`…`workspace-9` | yes | Fails on a missing window; the alias creates one |
 | `next-window`, `previous-window`, `last-window` | — | yes | |
 | `new-window [-d] [-n] [-c] [-t] [cmd]` | — | yes | Takes the lowest free window unless `-t` says otherwise |
@@ -65,10 +67,18 @@ means the current one.
 | `rename-window [-t] <name>` | — | yes | Pins the name against automatic renaming |
 | `move-window`, `swap-window`, renumbering | — | no | Windows are fixed slots |
 | `kill-pane -t` | `close` | yes | |
-| `kill-pane -a` | — | PR 5 | |
+| `kill-pane -a` | — | PR 9 | |
 | `detach-client` | `detach` | yes | `-t`/`-a` need multi-client (PR 10) |
 | `kill-session` | `quit` | yes | |
-| `resize-pane`, `swap-pane`, `rotate-window`, `break-pane`, `join-pane`, `select-layout` | — | PR 5 | |
+| `resize-pane -L/-R/-U/-D [n]` | — | yes | Moves a border; which side the pane is on decides if it grows |
+| `resize-pane -x/-y` | — | yes | |
+| `resize-pane -Z` | — | yes | Zoom; the layout tree is untouched so unzoom animates back |
+| `resize-pane -M` | — | PR 11 | Mouse |
+| `swap-pane [-U/-D/-s/-t/-d]` | — | yes | Both panes must be in one window |
+| `rotate-window [-U/-D]` | — | yes | |
+| `select-layout` | — | yes | `even-horizontal`, `even-vertical`, `main-vertical`, `main-horizontal`, `tiled` |
+| `select-layout -p/-o/-E`, layout strings | — | no | weave keeps no layout history |
+| `break-pane`, `join-pane` | — | PR 9 | Moving panes between windows |
 | `list-sessions`, `list-windows`, `list-panes`, `-F` formats | `wv ls` (sessions only) | PR 6 | |
 | `display-message -p` | — | yes | Literal text; `#{...}` variables in PR 6 |
 | `display-message` without `-p` | — | PR 7 | Needs a status line message area |
@@ -106,6 +116,21 @@ What follows from that:
 - `select-window` **fails** on a window that does not exist, as in tmux. The
   `workspace-N` aliases behind `Alt+N` create one instead — that is how weave
   has always behaved and the keybindings keep it.
+
+## Resizing moves a border
+
+`resize-pane -L` does not always make a pane wider. It moves the pane's nearest
+vertical border left, so a pane on the left of a split shrinks and one on the
+right grows — the same as tmux. `-x`/`-y` set an absolute size instead.
+
+Every reshaping command animates: resize, zoom, swap, rotate and
+`select-layout` all tween from the old geometry to the new one rather than
+snapping. Zoom leaves the layout tree untouched and simply stretches the zoomed
+pane over the window, so unzooming animates back to the exact previous layout
+with nothing stored.
+
+A pane can only be squeezed to 5% of its split before the border stops moving,
+and resizing while a pane is zoomed is refused rather than silently ignored.
 
 ## Panes inherit where you are
 
