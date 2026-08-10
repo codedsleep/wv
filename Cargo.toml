@@ -22,9 +22,9 @@ name = "wv"
 path = "src/main.rs"
 
 [dependencies]
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.28", features = ["event-stream", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-tokio = { version = "1", features = ["rt", "macros", "io-util", "time", "sync", "signal"] }
+tokio = { version = "1", features = ["rt", "macros", "io-util", "time", "sync", "signal", "net", "process"] }
 portable-pty = "0.8"
 vt100 = "0.15"
 bytes = "1"
@@ -39,6 +39,7 @@ unicode-width = "0.2"
 unicode-segmentation = "1"
 async-trait = "0.1"
 bitflags = "2"
+bincode = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -51,10 +52,6 @@ harness = false
 
 [[bench]]
 name = "compose"
-harness = false
-
-[[bench]]
-name = "script_storm"
 harness = false
 
 # The profile that 'dist' will build with

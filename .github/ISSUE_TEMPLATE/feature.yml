@@ -39,7 +39,6 @@ body:
       options:
         - Layout / tiling
         - Animation / motion
-        - tmux backend
         - Native backend
         - Config / theming
         - Rendering / chrome

@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Command {
     SplitH,
     SplitV,
@@ -14,7 +14,6 @@ pub enum Command {
     Detach,
     Quit,
     SwitchWorkspace(u8),
-    GotoWindow(u64),
 }
 
 impl Command {

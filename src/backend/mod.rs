@@ -6,13 +6,12 @@ use std::hash::Hash;
 use std::path::PathBuf;
 
 pub mod native;
-pub mod tmux;
 
 /// Backend-local pane identifier.
 ///
-/// Each backend owns its own `PaneId` space: a `NativeBackend` and a
-/// `TmuxBackend` may issue the same numeric ID for different panes. Callers
-/// must only pass IDs back to the backend that created them.
+/// Each backend owns its own `PaneId` space: two backend instances may issue
+/// the same numeric ID for different panes. Callers must only pass IDs back to
+/// the backend that created them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PaneId(pub u64);
 
@@ -34,7 +33,6 @@ pub struct PaneCommand {
 pub enum BackendEvent {
     PaneDied(PaneId),
     SpawnFailed(PaneId, String),
-    ActiveWindowChanged { window_id: u64 },
 }
 
 /// Pane process backend.
@@ -52,28 +50,11 @@ pub trait PaneBackend: Send {
 
     async fn kill(&mut self, id: PaneId) -> Result<(), anyhow::Error>;
 
-    async fn detach(&mut self) -> Result<(), anyhow::Error> {
-        Ok(())
-    }
-
-    async fn select_window(&mut self, _workspace_idx: usize) -> Result<(), anyhow::Error> {
-        Ok(())
-    }
-
-    async fn select_window_by_id(&mut self, _window_id: u64) -> Result<(), anyhow::Error> {
-        Ok(())
-    }
-
     /// Query the current working directory of a pane.
     ///
     /// Default: returns `Ok(None)` for backends that can't introspect their child shell.
-    /// Tmux overrides this to return `#{pane_current_path}` for the given pane.
     async fn pane_cwd(&mut self, _pane: PaneId) -> Result<Option<PathBuf>, anyhow::Error> {
         Ok(None)
-    }
-
-    async fn ingest_external_pane(&mut self, _tmux_pane_id: u64) -> Result<PaneId, anyhow::Error> {
-        anyhow::bail!("external tmux pane ingest is not supported by this backend")
     }
 }
 

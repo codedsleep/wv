@@ -199,37 +199,36 @@ fn install_panic_hook() {
     }));
 }
 
+/// `wv ls`: every live session, newest first.
+fn list_sessions() -> anyhow::Result<()> {
+    let sessions = weave::session::launch::list()?;
+    println!("{}", weave::session::launch::format_sessions(&sessions));
+
+    Ok(())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let launch_args = weave::app::LaunchArgs::parse_env()?;
     init_tracing()?;
-    let app = match launch_args {
-        weave::app::LaunchArgs::ListSessions { windows } => {
-            return weave::app::print_weave_sessions(windows);
-        }
+    match launch_args {
+        weave::app::LaunchArgs::ListSessions => list_sessions(),
         weave::app::LaunchArgs::Exec(args) => {
-            return weave::app::run_tmux_exec(&args);
+            weave::session::launch::exec(args.session_name.as_deref(), args.command).await
         }
-        weave::app::LaunchArgs::Bare(args) => {
-            return weave::app::App::create_bare(args).await;
-        }
+        weave::app::LaunchArgs::Bare(args) => weave::app::App::create_bare(args).await,
+        // The daemon: it owns the panes and renders for whichever client is
+        // attached, so it never touches this process's terminal.
+        weave::app::LaunchArgs::Server(args) => weave::session::launch::run_server(&args).await,
         weave::app::LaunchArgs::Run(args) => {
             install_panic_hook();
-            let (width, height) = crossterm::terminal::size()?;
-            weave::app::App::new(width, height, args).await?
+            weave::session::launch::start_and_attach(&args).await
         }
         weave::app::LaunchArgs::Attach(args) => {
             install_panic_hook();
-            let (width, height) = crossterm::terminal::size()?;
-            weave::app::App::attach(width, height, args).await?
+            weave::session::launch::attach(args.session_name.as_deref()).await
         }
-    };
-    let _guard = weave::term::TerminalGuard::new()?;
-    tracing::info!("weave starting");
-    tracing::info!("entered alt screen");
-    app.run().await?;
-
-    Ok(())
+    }
 }
 
 #[cfg(test)]

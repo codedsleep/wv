@@ -1,3 +1,5 @@
+> **Superseded.** The tmux backend was removed in favor of weave's own client/server session layer; see [SCOPE_NATIVE_SESSION.md](SCOPE_NATIVE_SESSION.md). This document is kept as a record of what the tmux integration did.
+
 # SCOPE — Deep tmux integration (script-driven layout)
 
 > Companion to [SCOPE.md](./SCOPE.md). This adds a sub-feature on top of **Phase 4 — tmux backend** (already complete). It is sequenced as **Phase 4.5** in the master plan; numbering inside this doc is local (A.1, B.1, …) and cross-references master tasks where relevant (e.g. _depends on master 4.1_).

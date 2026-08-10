@@ -33,7 +33,6 @@ pub struct WorkspaceIndicator {
     pub number: u8,
     pub is_current: bool,
     pub pane_count: usize,
-    pub external_in_flight: bool,
 }
 
 pub fn draw_borders(
@@ -105,11 +104,7 @@ pub fn draw_status_bar(
         if x >= max_x {
             break;
         }
-        let label = if ws.external_in_flight {
-            format!(" {}⟳ ", ws.number)
-        } else {
-            format!(" {} ", ws.number)
-        };
+        let label = format!(" {} ", ws.number);
         let (fg, bg) = if ws.is_current {
             (theme.status_bg, theme.accent)
         } else {
@@ -431,13 +426,11 @@ mod tests {
                 number: 1,
                 is_current: true,
                 pane_count: 2,
-                external_in_flight: false,
             },
             super::WorkspaceIndicator {
                 number: 3,
                 is_current: false,
                 pane_count: 1,
-                external_in_flight: false,
             },
         ];
 
@@ -458,28 +451,6 @@ mod tests {
             .get(u16::try_from(one_idx).expect("fits"), surface.height - 1)
             .expect("cell exists");
         assert_eq!(cell.bg, Color::Red);
-    }
-
-    #[test]
-    fn draw_status_bar_marks_external_change_in_flight() {
-        let mut surface = Surface::new(48, 4);
-        let now = chrono::Local
-            .with_ymd_and_hms(2026, 5, 11, 14, 23, 11)
-            .single()
-            .expect("test time exists");
-        let workspaces = [super::WorkspaceIndicator {
-            number: 1,
-            is_current: true,
-            pane_count: 2,
-            external_in_flight: true,
-        }];
-
-        draw_status_bar(&mut surface, "NORMAL", &workspaces, now, TEST_THEME);
-
-        let bottom: String = (0..surface.width)
-            .map(|x| surface.get(x, surface.height - 1).expect("cell exists").ch)
-            .collect();
-        assert!(bottom.contains("⟳"));
     }
 
     #[test]
