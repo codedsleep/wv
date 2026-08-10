@@ -611,9 +611,17 @@ impl App {
                     self.tick(dt).await?;
                 }
                 Some((id, bytes)) = self.output_rx.recv() => {
-                    if let Some(pane) = self.pane_mut(id) {
-                        pane.process(&bytes);
+                    if let Some(replies) = self.pane_mut(id).map(|pane| pane.process(&bytes)) {
                         self.dirty = true;
+                        // A pane that asked its terminal a question is waiting
+                        // on the answer before it writes anything else.
+                        if !replies.is_empty() {
+                            if let Err(error) = self.backend.write(id, &replies).await {
+                                tracing::warn!(
+                                    "failed to answer a terminal query from pane {id:?}: {error:#}"
+                                );
+                            }
+                        }
                     }
                 }
                 Some(event) = self.event_rx.recv() => {

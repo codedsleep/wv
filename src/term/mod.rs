@@ -5,6 +5,8 @@ pub mod cell;
 #[allow(dead_code)]
 pub mod pane;
 #[allow(dead_code)]
+pub mod query;
+#[allow(dead_code)]
 pub mod surface;
 
 pub struct TerminalGuard {
