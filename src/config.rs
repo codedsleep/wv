@@ -43,8 +43,12 @@ pub struct ThemeConfig {
 pub enum ConfigError {
     #[error("invalid key `{0}`")]
     InvalidKey(String),
-    #[error("invalid command `{0}`")]
-    InvalidCommand(String),
+    #[error("invalid command `{line}`: {source}")]
+    InvalidCommand {
+        line: String,
+        #[source]
+        source: crate::command::CommandError,
+    },
     #[error("toml parse failed: {0}")]
     Toml(#[from] toml::de::Error),
 }
@@ -78,10 +82,15 @@ impl Config {
     fn from_raw(raw: RawConfig) -> Result<Self, ConfigError> {
         let mut config = Self::default();
 
-        for (key, command) in raw.keymap.bindings {
+        // A binding value is a whole command line, so a config can say
+        // `"Alt+s" = "split-window -h -t %1"`, not just a bare command name.
+        for (key, line) in raw.keymap.bindings {
             let key = parse_key(&key)?;
-            let command = Command::from_str(&command)
-                .ok_or_else(|| ConfigError::InvalidCommand(command.clone()))?;
+            let command =
+                Command::parse_str(&line).map_err(|source| ConfigError::InvalidCommand {
+                    line: line.clone(),
+                    source,
+                })?;
             config.keymap.set_binding(key, command);
         }
 
@@ -355,15 +364,19 @@ mod tests {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT)
     }
 
+    fn command(line: &str) -> Command {
+        Command::parse_str(line).expect("command parses")
+    }
+
     #[test]
     fn default_config_matches_default_keymap() {
         let config = Config::default();
 
         assert_eq!(
             config.keymap.command_for(&alt('h')),
-            Some(Command::FocusLeft)
+            Some(command("focus-left"))
         );
-        assert_eq!(config.keymap.command_for(&alt('q')), Some(Command::Close));
+        assert_eq!(config.keymap.command_for(&alt('q')), Some(command("close")));
         assert_eq!(config.ui.border_color, Color::Cyan);
         assert!(config.ui.status_bar);
         assert!(config.ui.pane_titles);
@@ -402,10 +415,10 @@ mod tests {
         )
         .expect("sample config parses");
 
-        assert_eq!(config.keymap.command_for(&alt('s')), Some(Command::SplitV));
+        assert_eq!(config.keymap.command_for(&alt('s')), Some(command("split-v")));
         assert_eq!(
             config.keymap.command_for(&alt('h')),
-            Some(Command::FocusLeft)
+            Some(command("focus-left"))
         );
         assert_eq!(config.ui.border_color, Color::Magenta);
         assert_eq!(config.theme.border_focused, Color::Magenta);

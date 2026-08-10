@@ -4,7 +4,9 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::command::Command;
+use crate::command::target::WindowRef;
+use crate::command::{Command, PaneSelector, Target};
+use crate::layout::geometry::{Direction, Split};
 
 #[derive(Clone)]
 pub struct Keymap {
@@ -18,39 +20,77 @@ impl Keymap {
         }
     }
 
+    /// The command bound to `event`, if any.
+    ///
+    /// Commands carry owned arguments now, so this clones rather than copies;
+    /// it runs once per keypress, not per frame.
     pub fn command_for(&self, event: &KeyEvent) -> Option<Command> {
-        self.bindings.get(&normalize_key(event)?).copied()
+        self.bindings.get(&normalize_key(event)?).cloned()
     }
 }
 
 impl Default for Keymap {
     fn default() -> Self {
         let mut bindings = HashMap::new();
-        bindings.insert(alt_char('h'), Command::FocusLeft);
-        bindings.insert(alt_char('j'), Command::FocusDown);
-        bindings.insert(alt_char('k'), Command::FocusUp);
-        bindings.insert(alt_char('l'), Command::FocusRight);
-        bindings.insert(alt_char('q'), Command::Close);
-        bindings.insert(alt_char('d'), Command::Detach);
-        bindings.insert(alt_char('v'), Command::SplitV);
+        bindings.insert(alt_char('h'), focus(Direction::Left));
+        bindings.insert(alt_char('j'), focus(Direction::Down));
+        bindings.insert(alt_char('k'), focus(Direction::Up));
+        bindings.insert(alt_char('l'), focus(Direction::Right));
+        bindings.insert(
+            alt_char('q'),
+            Command::KillPane {
+                target: Target::current(),
+            },
+        );
+        bindings.insert(alt_char('d'), Command::DetachClient);
+        bindings.insert(alt_char('v'), split(Split::Vertical));
         // Some terminals fold Shift into the uppercase char and drop the SHIFT
         // modifier; kitty-style protocols keep it. Register both so Alt+Shift+Q
         // reliably quits.
-        bindings.insert(alt_char('Q'), Command::Quit);
+        bindings.insert(
+            alt_char('Q'),
+            Command::KillSession {
+                target: Target::current(),
+            },
+        );
         bindings.insert(
             KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::ALT | KeyModifiers::SHIFT),
-            Command::Quit,
+            Command::KillSession {
+                target: Target::current(),
+            },
         );
         bindings.insert(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
-            Command::SplitH,
+            split(Split::Horizontal),
         );
-        for n in 1u8..=9 {
-            let digit = char::from(b'0' + n);
-            bindings.insert(alt_char(digit), Command::SwitchWorkspace(n));
+        for n in 1u32..=9 {
+            let digit = char::from(b'0' + u8::try_from(n).expect("1..=9 fits a byte"));
+            bindings.insert(alt_char(digit), select_window(n));
         }
 
         Self { bindings }
+    }
+}
+
+fn focus(direction: Direction) -> Command {
+    Command::SelectPane {
+        selector: PaneSelector::Direction(direction),
+    }
+}
+
+fn split(split: Split) -> Command {
+    Command::SplitWindow {
+        split,
+        target: Target::current(),
+    }
+}
+
+fn select_window(index: u32) -> Command {
+    Command::SelectWindow {
+        target: Target {
+            window: Some(WindowRef::Index(index)),
+            ..Target::default()
+        },
     }
 }
 
@@ -81,13 +121,20 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::ALT | KeyModifiers::SHIFT)
     }
 
+    /// The defaults are asserted against the parsed alias forms, which pins
+    /// two things at once: the binding, and the alias meaning the same thing
+    /// as the key. If `split-h` ever drifts from Alt+Enter, this fails.
+    fn command(line: &str) -> Command {
+        Command::parse_str(line).expect("alias parses")
+    }
+
     #[test]
     fn default_alt_enter_splits_horizontally() {
         let keymap = Keymap::default();
 
         assert_eq!(
             keymap.command_for(&alt(KeyCode::Enter)),
-            Some(Command::SplitH)
+            Some(command("split-h"))
         );
     }
 
@@ -97,7 +144,7 @@ mod tests {
 
         assert_eq!(
             keymap.command_for(&alt(KeyCode::Char('v'))),
-            Some(Command::SplitV)
+            Some(command("split-v"))
         );
     }
 
@@ -107,7 +154,7 @@ mod tests {
 
         assert_eq!(
             keymap.command_for(&alt(KeyCode::Char('h'))),
-            Some(Command::FocusLeft)
+            Some(command("focus-left"))
         );
     }
 
@@ -117,7 +164,7 @@ mod tests {
 
         assert_eq!(
             keymap.command_for(&alt(KeyCode::Char('q'))),
-            Some(Command::Close)
+            Some(command("close"))
         );
     }
 
@@ -127,7 +174,7 @@ mod tests {
 
         assert_eq!(
             keymap.command_for(&alt(KeyCode::Char('d'))),
-            Some(Command::Detach)
+            Some(command("detach"))
         );
     }
 
@@ -137,11 +184,11 @@ mod tests {
 
         assert_eq!(
             keymap.command_for(&alt(KeyCode::Char('Q'))),
-            Some(Command::Quit)
+            Some(command("quit"))
         );
         assert_eq!(
             keymap.command_for(&alt_shift(KeyCode::Char('Q'))),
-            Some(Command::Quit)
+            Some(command("quit"))
         );
     }
 
@@ -151,11 +198,11 @@ mod tests {
 
         assert_eq!(
             keymap.command_for(&alt(KeyCode::Char('1'))),
-            Some(Command::SwitchWorkspace(1))
+            Some(command("workspace-1"))
         );
         assert_eq!(
             keymap.command_for(&alt(KeyCode::Char('9'))),
-            Some(Command::SwitchWorkspace(9))
+            Some(command("workspace-9"))
         );
         assert_eq!(keymap.command_for(&alt(KeyCode::Char('0'))), None);
     }

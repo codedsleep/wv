@@ -13,7 +13,9 @@ use tokio::net::UnixStream;
 use tokio::time::timeout;
 use weave::app::{App, Args};
 use weave::command::Command;
-use weave::session::protocol::{read_frame, write_frame, ClientToServer, ExitReason, ServerToClient};
+use weave::session::protocol::{
+    read_frame, write_frame, write_hello, ClientToServer, ExitReason, ServerToClient,
+};
 use weave::session::server::SessionServer;
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -80,7 +82,11 @@ async fn session_survives_detach_and_serves_one_client_at_a_time() -> anyhow::Re
     );
 
     // A command sent over the socket animates the session like a keybinding.
-    write_frame(&mut client, &ClientToServer::Exec(Command::SplitV)).await?;
+    write_frame(
+        &mut client,
+        &ClientToServer::Exec(Command::parse_str("split-v").expect("command parses")),
+    )
+    .await?;
     next_frame(&mut client).await?;
 
     // A second client evicts the first.
@@ -106,6 +112,7 @@ async fn session_survives_detach_and_serves_one_client_at_a_time() -> anyhow::Re
 
 async fn attach(socket: &std::path::Path, cols: u16, rows: u16) -> anyhow::Result<UnixStream> {
     let mut stream = timeout(STEP_TIMEOUT, weave::session::client::connect(socket)).await??;
+    write_hello(&mut stream).await?;
     write_frame(
         &mut stream,
         &ClientToServer::Attach {

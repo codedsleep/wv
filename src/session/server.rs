@@ -11,7 +11,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use super::paths;
-use super::protocol::{read_frame, write_frame, ClientToServer, ServerToClient};
+use super::protocol::{
+    check_protocol_version, read_frame, write_frame, write_hello, ClientToServer, ServerToClient,
+};
 use super::SessionEvent;
 
 const APP_EVENT_CAPACITY: usize = 64;
@@ -107,7 +109,28 @@ async fn serve_connection(
     stream: UnixStream,
     app_tx: mpsc::Sender<SessionEvent>,
 ) -> anyhow::Result<()> {
-    let (mut read_half, write_half) = stream.into_split();
+    let (mut read_half, mut write_half) = stream.into_split();
+
+    // Every connection opens with a version handshake, so a client from a
+    // different build fails loudly here instead of decoding frames into the
+    // wrong variants further down.
+    match read_frame::<_, ClientToServer>(&mut read_half).await? {
+        Some(ClientToServer::Hello { protocol_version }) => {
+            if let Err(error) = check_protocol_version(protocol_version) {
+                let message = format!("{error:#}");
+                tracing::warn!("rejecting client {id}: {message}");
+                let _ = write_frame(&mut write_half, &ServerToClient::Error(message)).await;
+                return Ok(());
+            }
+        }
+        // A connect-and-close is how `ls`, `attach` and the server itself
+        // check that a socket is live, not a misbehaving client.
+        None => {
+            tracing::debug!("client {id} was a liveness probe");
+            return Ok(());
+        }
+        other => bail!("client {id} sent {other:?} instead of a protocol handshake"),
+    }
 
     let handshake: Option<ClientToServer> = read_frame(&mut read_half).await?;
     let (cols, rows, truecolor) = match handshake {
@@ -124,10 +147,10 @@ async fn serve_connection(
                 .context("session app stopped accepting events")?;
             return Ok(());
         }
-        // A connect-and-close is how `ls`, `attach` and the server itself
-        // check that a socket is live, not a misbehaving client.
+        // The handshake frame arrived but nothing followed it: a probe that
+        // speaks the protocol, still not a client.
         None => {
-            tracing::debug!("client {id} was a liveness probe");
+            tracing::debug!("client {id} said hello and left");
             return Ok(());
         }
         other => bail!("client {id} sent {other:?} instead of an attach handshake"),
@@ -200,9 +223,19 @@ pub async fn send_command(path: &Path, message: &ClientToServer) -> anyhow::Resu
     let mut stream = UnixStream::connect(path)
         .await
         .with_context(|| format!("failed to connect to session socket {}", path.display()))?;
+    write_hello(&mut stream).await?;
     write_frame(&mut stream, message).await?;
 
-    Ok(())
+    // The server stays silent on this path and closes when it is done, so the
+    // only thing that can come back is a rejection worth reporting. Waiting for
+    // EOF also means a one-shot cannot exit before the server has read it.
+    // Command *replies* land in PR 2; this is purely the version gate.
+    match read_frame::<_, ServerToClient>(&mut stream).await {
+        Ok(Some(ServerToClient::Error(message))) => bail!(message),
+        Ok(Some(other)) => bail!("unexpected reply from session server: {other:?}"),
+        Ok(None) => Ok(()),
+        Err(error) => Err(error).context("failed to read the session server's reply"),
+    }
 }
 
 /// Channel type used by the app to push frames at the attached client.

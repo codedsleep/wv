@@ -1,9 +1,9 @@
 //! `App`: event loop + state owner.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use bytes::Bytes;
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
@@ -15,7 +15,8 @@ use crate::anim::timeline::Timeline;
 use crate::anim::tween::Easing;
 use crate::backend::native::NativeBackend;
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
-use crate::command::Command;
+use crate::command::target::{Extreme, PaneRef, WindowRef};
+use crate::command::{Command, PaneSelector, Target};
 use crate::config::{Config, ThemeConfig};
 use crate::input;
 use crate::input::keymap::Keymap;
@@ -46,12 +47,28 @@ pub const WORKSPACE_COUNT: usize = 9;
 struct Workspace {
     root: Option<Node>,
     focused: Option<PaneId>,
+    /// The pane focused before the current one, for `select-pane -l` / `{last}`.
+    last_focused: Option<PaneId>,
     closing: HashSet<PaneId>,
 }
 
 impl Workspace {
     fn is_empty(&self) -> bool {
         self.root.is_none()
+    }
+
+    /// Move focus, remembering where it came from.
+    ///
+    /// Every focus change goes through here so `{last}` stays truthful no
+    /// matter which path caused it — a keybinding, a script, or a pane dying.
+    fn set_focus(&mut self, pane: Option<PaneId>) {
+        if self.focused == pane {
+            return;
+        }
+        if let Some(previous) = self.focused {
+            self.last_focused = Some(previous);
+        }
+        self.focused = pane;
     }
 
     fn pane_count(&self) -> usize {
@@ -111,12 +128,58 @@ enum ExitState {
     Detached,
 }
 
+/// A command the session declined to run, with a message meant for the user.
+///
+/// Deliberately not an `anyhow::Error`: this is the "you asked for a pane that
+/// isn't there" case, which must be reported and forgotten, not propagated.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Rejected(String);
+
+impl Rejected {
+    fn new(message: String) -> Self {
+        Self(message)
+    }
+}
+
+/// Why a command did not complete.
+enum ExecuteError {
+    /// The command was understood but could not be applied. Non-fatal.
+    Rejected(String),
+    /// Something broke that the session cannot continue past.
+    Fatal(anyhow::Error),
+}
+
+impl From<Rejected> for ExecuteError {
+    fn from(rejected: Rejected) -> Self {
+        Self::Rejected(rejected.0)
+    }
+}
+
+impl From<anyhow::Error> for ExecuteError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Fatal(error)
+    }
+}
+
 pub struct App {
     front: Surface,
     back: Surface,
     panes: Vec<Pane>,
     workspaces: Vec<Workspace>,
     current_workspace: usize,
+    /// The workspace shown before the current one, for `select-window -l`.
+    last_workspace: Option<usize>,
+    /// Backend pane id → the `%N` a user or script sees.
+    ///
+    /// `PaneId` is documented as backend-local and not portable, so targets
+    /// address panes through this map instead. Numbers are handed out in
+    /// order and never reused, so a `%N` in a script keeps meaning the same
+    /// pane for as long as that pane exists.
+    pane_numbers: HashMap<PaneId, u64>,
+    next_pane_number: u64,
+    /// This session's name, so a target naming another session is rejected
+    /// rather than silently applied here.
+    session_name: Option<String>,
     resize_mode: ResizeMode,
     backend: BoxedBackend,
     output_rx: mpsc::Receiver<(PaneId, Bytes)>,
@@ -282,20 +345,25 @@ impl AttachArgs {
 }
 
 impl ExecArgs {
-    /// Parse `wv exec [--session NAME] <command>`.
+    /// Parse `wv exec [--session NAME] <command> [args...]`.
+    ///
+    /// `--session` is weave's own flag and must come before the command name.
+    /// Everything from the command name onward belongs to the command, so its
+    /// flags never collide with `wv`'s: `wv exec split-window -h -t %2` passes
+    /// `-h -t %2` through untouched.
     fn parse<I, S>(args: I) -> anyhow::Result<Self>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
         let mut session_name = None;
-        let mut command = None;
-        let mut args = args.into_iter();
+        let mut args = args.into_iter().peekable();
 
-        while let Some(arg) = args.next() {
-            let arg = arg.as_ref();
+        while let Some(arg) = args.peek() {
+            let arg = arg.as_ref().to_owned();
 
             if arg == "--session" {
+                args.next();
                 let Some(value) = args.next() else {
                     bail!("missing value for `--session`; expected a weave session name");
                 };
@@ -305,19 +373,31 @@ impl ExecArgs {
             } else if let Some(value) = arg.strip_prefix("--session=") {
                 validate_session_name(value)?;
                 session_name = Some(value.to_owned());
+                args.next();
+            } else if arg == "--" {
+                args.next();
+                break;
             } else if arg.starts_with('-') {
-                bail!("`wv exec` does not accept `{arg}`");
-            } else if command.is_some() {
-                bail!("`wv exec` takes a single command, for example `wv exec split-v`");
+                bail!("`wv exec` does not accept `{arg}` before the command name");
             } else {
-                command = Some(Command::from_str(arg).with_context(|| {
-                    format!("unknown command `{arg}`; try split-h, split-v, focus-left, focus-right, focus-up, focus-down, close, detach, quit, or workspace-1..9")
-                })?);
+                break;
             }
         }
 
-        let command =
-            command.context("`wv exec` requires a command, for example `wv exec split-v`")?;
+        let command_line = args.map(|arg| arg.as_ref().to_owned()).collect::<Vec<_>>();
+        if command_line.is_empty() {
+            bail!("`wv exec` requires a command, for example `wv exec split-window -h`");
+        }
+
+        // The parse error leads and the hint follows, so `to_string()` — what
+        // the CLI prints — carries the actual problem first.
+        let command = Command::parse(&command_line).map_err(|error| {
+            anyhow!(
+                "{error}\n\ncommands: {}\naliases: {}",
+                crate::command::COMMAND_NAMES.join(", "),
+                crate::command::ALIAS_NAMES.join(", ")
+            )
+        })?;
 
         Ok(Self {
             session_name,
@@ -417,11 +497,21 @@ impl App {
         let root = flat_horizontal_root(&initial_panes, root_rect);
         let focused = initial_panes.first().copied();
 
+        // Number the panes we start with in layout order, so `%1` is the first
+        // pane on screen for a script that attaches immediately.
+        let pane_numbers: HashMap<PaneId, u64> = initial_panes
+            .iter()
+            .enumerate()
+            .map(|(index, &pane)| (pane, index as u64 + 1))
+            .collect();
+        let next_pane_number = pane_numbers.len() as u64 + 1;
+
         let mut workspaces: Vec<Workspace> =
             (0..WORKSPACE_COUNT).map(|_| Workspace::default()).collect();
         workspaces[0] = Workspace {
             root,
             focused,
+            last_focused: None,
             closing: HashSet::new(),
         };
 
@@ -434,6 +524,10 @@ impl App {
                 .collect(),
             workspaces,
             current_workspace: 0,
+            last_workspace: None,
+            pane_numbers,
+            next_pane_number,
+            session_name: None,
             resize_mode: ResizeMode::Normal,
             backend: backend_parts.backend,
             output_rx: backend_parts.output_rx,
@@ -463,6 +557,173 @@ impl App {
 
     fn current_mut(&mut self) -> &mut Workspace {
         &mut self.workspaces[self.current_workspace]
+    }
+
+    /// Name this session, so targets naming a session can be checked.
+    pub fn with_session_name(mut self, name: impl Into<String>) -> Self {
+        self.session_name = Some(name.into());
+        self
+    }
+
+    /// The `%N` a script uses to address `pane`.
+    pub fn pane_number(&self, pane: PaneId) -> Option<u64> {
+        self.pane_numbers.get(&pane).copied()
+    }
+
+    fn pane_by_number(&self, number: u64) -> Option<PaneId> {
+        self.pane_numbers
+            .iter()
+            .find(|(_, &n)| n == number)
+            .map(|(&pane, _)| pane)
+    }
+
+    /// Hand out the next `%N`. Numbers are monotonic and never reused.
+    fn register_pane_number(&mut self, pane: PaneId) -> u64 {
+        let number = self.next_pane_number;
+        self.next_pane_number = self.next_pane_number.saturating_add(1);
+        self.pane_numbers.insert(pane, number);
+        number
+    }
+
+    /// Workspaces with panes in them, in order, always including the current
+    /// one — the set `+`, `-`, `{start}` and `{end}` cycle over.
+    fn occupied_workspaces(&self) -> Vec<usize> {
+        (0..WORKSPACE_COUNT)
+            .filter(|&idx| idx == self.current_workspace || !self.workspaces[idx].is_empty())
+            .collect()
+    }
+
+    /// Reject a target that names a different session than this one.
+    fn check_session(&self, target: &Target) -> Result<(), Rejected> {
+        let Some(requested) = target.session.as_deref() else {
+            return Ok(());
+        };
+
+        match self.session_name.as_deref() {
+            Some(name) if name == requested => Ok(()),
+            Some(name) => Err(Rejected::new(format!(
+                "target names session `{requested}` but this is session `{name}`; \
+                 a command can only act on the session it is sent to"
+            ))),
+            None => Err(Rejected::new(format!(
+                "target names session `{requested}` but this weave is not running as a session"
+            ))),
+        }
+    }
+
+    /// Resolve the window half of a target to a workspace index.
+    fn resolve_window(&self, target: &Target) -> Result<usize, Rejected> {
+        self.check_session(target)?;
+
+        let Some(window) = target.window.as_ref() else {
+            return Ok(self.current_workspace);
+        };
+
+        let occupied = self.occupied_workspaces();
+        let position = occupied
+            .iter()
+            .position(|&idx| idx == self.current_workspace)
+            .unwrap_or(0);
+
+        match window {
+            WindowRef::Index(number) => usize::try_from(*number)
+                .ok()
+                .and_then(|number| number.checked_sub(1))
+                .filter(|index| *index < WORKSPACE_COUNT)
+                .ok_or_else(|| {
+                    Rejected::new(format!(
+                        "no window {number}: weave has workspaces 1..={WORKSPACE_COUNT}"
+                    ))
+                }),
+            WindowRef::Next => Ok(occupied[(position + 1) % occupied.len()]),
+            WindowRef::Previous => {
+                Ok(occupied[(position + occupied.len() - 1) % occupied.len()])
+            }
+            WindowRef::Last => self.last_workspace.ok_or_else(|| {
+                Rejected::new("no previous window to switch back to".to_owned())
+            }),
+            WindowRef::Start => Ok(occupied.first().copied().unwrap_or(self.current_workspace)),
+            WindowRef::End => Ok(occupied.last().copied().unwrap_or(self.current_workspace)),
+            // Workspaces are numbered slots, not named objects, until PR 4.
+            WindowRef::Id(id) => Err(Rejected::new(format!(
+                "window ids are not available yet (`@{id}`); address a workspace by index, like `:2`"
+            ))),
+            WindowRef::Name(name) => Err(Rejected::new(format!(
+                "window names are not available yet (`:{name}`); address a workspace by index, like `:2`"
+            ))),
+        }
+    }
+
+    /// Resolve a target to the workspace and pane it names.
+    ///
+    /// Pane indices are zero-based within their window, matching tmux's
+    /// default `pane-base-index`; window indices are one-based.
+    fn resolve_pane(&self, target: &Target) -> Result<(usize, PaneId), Rejected> {
+        self.check_session(target)?;
+
+        // `%N` carries its own scope: it finds the pane wherever it lives.
+        if let Some(PaneRef::Id(number)) = target.pane.as_ref() {
+            let pane = self
+                .pane_by_number(*number)
+                .ok_or_else(|| Rejected::new(format!("no pane `%{number}`")))?;
+            let workspace = self.workspace_of_pane(pane).ok_or_else(|| {
+                Rejected::new(format!("pane `%{number}` is not in any window"))
+            })?;
+
+            if target.window.is_some() {
+                let requested = self.resolve_window(target)?;
+                if requested != workspace {
+                    return Err(Rejected::new(format!(
+                        "pane `%{number}` is in window {}, not window {}",
+                        workspace + 1,
+                        requested + 1
+                    )));
+                }
+            }
+
+            return Ok((workspace, pane));
+        }
+
+        let workspace = self.resolve_window(target)?;
+        let panes = self.workspaces[workspace].leaf_panes();
+        if panes.is_empty() {
+            return Err(Rejected::new(format!(
+                "window {} has no panes",
+                workspace + 1
+            )));
+        }
+
+        let focused = self.workspaces[workspace].focused;
+        let pane = match target.pane.as_ref() {
+            None => focused.unwrap_or(panes[0]),
+            Some(PaneRef::Index(index)) => usize::try_from(*index)
+                .ok()
+                .and_then(|index| panes.get(index).copied())
+                .ok_or_else(|| {
+                    Rejected::new(format!(
+                        "no pane {index} in window {}: it has {} pane(s), numbered 0..{}",
+                        workspace + 1,
+                        panes.len(),
+                        panes.len() - 1
+                    ))
+                })?,
+            Some(PaneRef::Next) => step_pane(&panes, focused, Step::Forward),
+            Some(PaneRef::Previous) => step_pane(&panes, focused, Step::Backward),
+            Some(PaneRef::Last) => self.workspaces[workspace]
+                .last_focused
+                .filter(|pane| panes.contains(pane))
+                .ok_or_else(|| {
+                    Rejected::new("no previously focused pane to go back to".to_owned())
+                })?,
+            Some(PaneRef::Extreme(extreme)) => {
+                extreme_pane(self.workspaces[workspace].root.as_ref(), *extreme)
+                    .unwrap_or(panes[0])
+            }
+            // Handled above, before the window is resolved.
+            Some(PaneRef::Id(_)) => unreachable!("pane ids are resolved before the window is"),
+        };
+
+        Ok((workspace, pane))
     }
 
     fn workspace_of_pane(&self, id: PaneId) -> Option<usize> {
@@ -496,12 +757,12 @@ impl App {
             .collect()
     }
 
-    async fn switch_workspace(&mut self, number: u8) -> anyhow::Result<()> {
-        if number < 1 || usize::from(number) > WORKSPACE_COUNT {
-            return Ok(());
-        }
-        let target = usize::from(number) - 1;
-        if target == self.current_workspace {
+    /// Show workspace `target`, given as a zero-based index.
+    ///
+    /// Targets are resolved to an index before they get here, so an
+    /// out-of-range value is a bug rather than a user error.
+    async fn switch_workspace(&mut self, target: usize) -> anyhow::Result<()> {
+        if target >= WORKSPACE_COUNT || target == self.current_workspace {
             return Ok(());
         }
 
@@ -509,6 +770,7 @@ impl App {
         // is at rest when we return to it later.
         self.snap_workspace_tweens(self.current_workspace).await?;
 
+        self.last_workspace = Some(self.current_workspace);
         self.current_workspace = target;
         if self.current().is_empty() {
             let pane_id = self.spawn_shell_pane(true).await?;
@@ -519,7 +781,7 @@ impl App {
                 rect_current: FRect::from(root_rect),
                 rect_target: root_rect,
             });
-            ws.focused = Some(pane_id);
+            ws.set_focus(Some(pane_id));
         }
         self.recompute_layout();
         // Refresh PTY sizes for the incoming workspace so panes match the
@@ -553,7 +815,7 @@ impl App {
             if let Some(root) = ws.root.as_mut() {
                 if !root.close(pane) {
                     ws.root = None;
-                    ws.focused = None;
+                    ws.set_focus(None);
                 }
             }
         }
@@ -584,7 +846,7 @@ impl App {
                 rect_current: FRect::from(root_rect),
                 rect_target: root_rect,
             });
-            ws.focused = Some(pane_id);
+            ws.set_focus(Some(pane_id));
             self.recompute_layout();
         }
 
@@ -671,8 +933,31 @@ impl App {
         Ok(())
     }
 
+    /// Run a command, whether it came from a keybinding or a script.
+    ///
+    /// A command the session cannot carry out — a target naming a pane that
+    /// does not exist, say — is reported to the client and swallowed. Only a
+    /// genuine failure, like a PTY that would not spawn, propagates and ends
+    /// the session. A typo in a script must never kill a user's panes.
     pub async fn execute(&mut self, cmd: Command) -> anyhow::Result<()> {
-        self.execute_now(cmd).await
+        match self.execute_now(cmd).await {
+            Ok(()) => Ok(()),
+            Err(ExecuteError::Fatal(error)) => Err(error),
+            Err(ExecuteError::Rejected(message)) => {
+                tracing::warn!("command rejected: {message}");
+                // PR 2 turns this into `wv exec`'s stderr and exit code; for
+                // now an attached client logs it.
+                self.report_error(message);
+                Ok(())
+            }
+        }
+    }
+
+    /// Surface a non-fatal problem to whoever is attached.
+    fn report_error(&mut self, message: String) {
+        if let OutputSink::Client { frames, .. } = &self.sink {
+            let _ = frames.send(ServerToClient::Error(message));
+        }
     }
 
     pub fn current_layout_root(&self) -> Option<&Node> {
@@ -700,21 +985,69 @@ impl App {
         self.advance_animations(dt).await
     }
 
-    async fn execute_now(&mut self, cmd: Command) -> anyhow::Result<()> {
+    async fn execute_now(&mut self, cmd: Command) -> Result<(), ExecuteError> {
         match cmd {
-            Command::SplitH => self.split_focused(Split::Horizontal).await?,
-            Command::SplitV => self.split_focused(Split::Vertical).await?,
-            Command::FocusLeft => self.focus(Direction::Left),
-            Command::FocusRight => self.focus(Direction::Right),
-            Command::FocusUp => self.focus(Direction::Up),
-            Command::FocusDown => self.focus(Direction::Down),
-            Command::Close => self.close_focused().await?,
-            Command::Detach => self.detach(),
-            Command::Quit => self.exit = ExitState::Quit,
-            Command::SwitchWorkspace(n) => self.switch_workspace(n).await?,
+            Command::SplitWindow { split, target } => {
+                let (workspace, pane) = self.resolve_pane(&target)?;
+                self.switch_workspace(workspace).await?;
+                self.split_pane(pane, split).await?;
+            }
+            Command::SelectPane { selector } => self.select_pane(selector).await?,
+            Command::SelectWindow { target } => {
+                let workspace = self.resolve_window(&target)?;
+                self.switch_workspace(workspace).await?;
+            }
+            Command::KillPane { target } => {
+                let (workspace, pane) = self.resolve_pane(&target)?;
+                self.switch_workspace(workspace).await?;
+                self.close_pane(pane).await?;
+            }
+            Command::DetachClient => self.detach(),
+            Command::KillSession { target } => {
+                self.check_session(&target)?;
+                self.exit = ExitState::Quit;
+            }
         }
 
         Ok(())
+    }
+
+    async fn select_pane(&mut self, selector: PaneSelector) -> Result<(), ExecuteError> {
+        let target = match selector {
+            // Directional focus stays geometric: it walks the layout tree
+            // rather than the flat pane order a target would give.
+            PaneSelector::Direction(direction) => {
+                self.focus_direction(direction);
+                return Ok(());
+            }
+            PaneSelector::Last => Target {
+                pane: Some(PaneRef::Last),
+                ..Target::default()
+            },
+            PaneSelector::Target(target) => target,
+        };
+
+        let (workspace, pane) = self.resolve_pane(&target)?;
+        self.switch_workspace(workspace).await?;
+        self.focus_pane(pane);
+
+        Ok(())
+    }
+
+    /// Focus an addressed pane in the current workspace.
+    fn focus_pane(&mut self, pane: PaneId) {
+        let Some(previous) = self.current().focused else {
+            self.current_mut().set_focus(Some(pane));
+            self.dirty = true;
+            return;
+        };
+        if previous == pane {
+            return;
+        }
+
+        self.start_focus_border_tweens(previous, pane);
+        self.current_mut().set_focus(Some(pane));
+        self.dirty = true;
     }
 
     async fn spawn_shell_pane(&mut self, resize_immediately: bool) -> anyhow::Result<PaneId> {
@@ -730,6 +1063,8 @@ impl App {
         }
 
         let pane_id = self.backend.spawn(cmd).await?;
+        let number = self.register_pane_number(pane_id);
+        tracing::debug!("spawned pane %{number}");
 
         if resize_immediately {
             self.resize_pane(pane_id, self.back.width, self.back.height)
@@ -823,6 +1158,11 @@ impl App {
             SessionEvent::Message(ClientToServer::Attach { .. }) => {
                 tracing::warn!("ignoring a second attach on an established connection");
             }
+            SessionEvent::Message(ClientToServer::Hello { .. }) => {
+                // The socket layer checks the version before forwarding
+                // anything, so a handshake reaching the app is redundant.
+                tracing::warn!("ignoring a repeated protocol handshake");
+            }
             SessionEvent::Message(ClientToServer::Input(event)) => {
                 self.handle_input(Some(Ok(event))).await?;
             }
@@ -851,10 +1191,12 @@ impl App {
         Ok(())
     }
 
-    async fn split_focused(&mut self, split: Split) -> anyhow::Result<()> {
-        let Some(focused) = self.current().focused else {
-            return Ok(());
-        };
+    /// Split `pane` in two, spawning a shell in the new half.
+    ///
+    /// The pane is passed in rather than read from the workspace so `-t` can
+    /// split something other than the focused pane.
+    async fn split_pane(&mut self, pane: PaneId, split: Split) -> anyhow::Result<()> {
+        let focused = pane;
         let Some(old_parent_rect) = self.leaf_rect_target(focused) else {
             return Ok(());
         };
@@ -863,7 +1205,7 @@ impl App {
         let ws = self.current_mut();
         if let Some(root) = ws.root.as_mut() {
             root.split_focused(focused, split, new_pane);
-            ws.focused = Some(new_pane);
+            ws.set_focus(Some(new_pane));
             self.recompute_layout();
             self.start_open_tweens(focused, new_pane, split, old_parent_rect);
             self.dirty = true;
@@ -909,7 +1251,8 @@ impl App {
         );
     }
 
-    fn focus(&mut self, dir: Direction) {
+    /// Move focus to the nearest pane in `dir`, geometrically.
+    fn focus_direction(&mut self, dir: Direction) {
         let Some(focused) = self.current().focused else {
             return;
         };
@@ -922,7 +1265,7 @@ impl App {
 
         if let Some(next) = next {
             self.start_focus_border_tweens(focused, next);
-            self.current_mut().focused = Some(next);
+            self.current_mut().set_focus(Some(next));
             self.dirty = true;
         }
     }
@@ -958,16 +1301,18 @@ impl App {
         );
     }
 
-    async fn close_focused(&mut self) -> anyhow::Result<()> {
-        let Some(focused) = self.current().focused else {
-            return Ok(());
-        };
+    /// Close `pane`, animating the panes that grow into its space.
+    ///
+    /// The pane is passed in rather than read from the workspace so `-t` can
+    /// close something other than the focused pane.
+    async fn close_pane(&mut self, pane: PaneId) -> anyhow::Result<()> {
+        let focused = pane;
         if self.current().closing.contains(&focused) {
             return Ok(());
         }
 
         let Some(root) = self.current().root.as_ref() else {
-            self.current_mut().focused = None;
+            self.current_mut().set_focus(None);
             if self.all_other_workspaces_empty() {
                 self.exit = ExitState::Quit;
             }
@@ -981,7 +1326,7 @@ impl App {
             let last_pane_anywhere = self.all_other_workspaces_empty();
             let ws = self.current_mut();
             ws.root = None;
-            ws.focused = None;
+            ws.set_focus(None);
             if last_pane_anywhere {
                 self.exit = ExitState::Quit;
             }
@@ -1027,7 +1372,7 @@ impl App {
         let new_focus = first_leaf_pane(&post_close_root);
         let ws = self.current_mut();
         ws.closing.insert(focused);
-        ws.focused = new_focus;
+        ws.set_focus(new_focus);
         self.dirty = true;
 
         Ok(())
@@ -1045,13 +1390,13 @@ impl App {
                     let closed = ws.root.as_mut().is_some_and(|root| root.close(id));
                     if closed {
                         let new_focus = ws.root.as_ref().and_then(first_leaf_pane);
-                        ws.focused = new_focus;
+                        ws.set_focus(new_focus);
                         if ws_idx == self.current_workspace {
                             self.recompute_layout();
                         }
                     } else if was_focused {
                         ws.root = None;
-                        ws.focused = None;
+                        ws.set_focus(None);
                     }
                 }
                 if self.workspaces.iter().all(Workspace::is_empty) {
@@ -1250,11 +1595,12 @@ impl App {
                     self.recompute_layout();
                     let ws = self.current_mut();
                     if needs_refocus {
-                        ws.focused = ws.root.as_ref().and_then(first_leaf_pane);
+                        let next = ws.root.as_ref().and_then(first_leaf_pane);
+                        ws.set_focus(next);
                     }
                 } else {
                     ws.root = None;
-                    ws.focused = None;
+                    ws.set_focus(None);
                     if self.all_other_workspaces_empty() {
                         self.exit = ExitState::Quit;
                     }
@@ -1331,6 +1677,9 @@ impl App {
 
     fn remove_pane(&mut self, id: PaneId) {
         self.panes.retain(|pane| pane.id() != id);
+        // Retire the `%N` with the pane. Numbers are never reused, so a stale
+        // `%N` in a script fails loudly instead of hitting somebody else's pane.
+        self.pane_numbers.remove(&id);
     }
 
     async fn resize_pane(&mut self, pane: PaneId, cols: u16, rows: u16) -> anyhow::Result<()> {
@@ -1367,6 +1716,7 @@ impl App {
                 rect_target: root_rect,
             }),
             focused: Some(pane_id),
+            last_focused: None,
             closing: HashSet::new(),
         };
 
@@ -1376,6 +1726,10 @@ impl App {
             panes: vec![Pane::new(pane_id, width, height)],
             workspaces,
             current_workspace: 0,
+            last_workspace: None,
+            pane_numbers: std::iter::once((pane_id, 1)).collect(),
+            next_pane_number: 2,
+            session_name: None,
             resize_mode: ResizeMode::Normal,
             backend,
             output_rx,
@@ -1472,6 +1826,48 @@ fn count_workspace_leaves(node: &Node) -> usize {
         Node::Leaf { .. } => 1,
         Node::Internal { a, b, .. } => count_workspace_leaves(a) + count_workspace_leaves(b),
     }
+}
+
+/// Which way `+` and `-` walk the pane list.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Step {
+    Forward,
+    Backward,
+}
+
+/// Step one place through `panes` from `focused`, wrapping at both ends.
+///
+/// `panes` is in layout order, so this is the order `+` and `-` walk.
+fn step_pane(panes: &[PaneId], focused: Option<PaneId>, step: Step) -> PaneId {
+    debug_assert!(!panes.is_empty(), "callers check for an empty window first");
+
+    let len = panes.len();
+    let current = focused
+        .and_then(|focused| panes.iter().position(|&pane| pane == focused))
+        .unwrap_or(0);
+    let next = match step {
+        Step::Forward => (current + 1) % len,
+        // `+ len` keeps the arithmetic on usize when current is 0.
+        Step::Backward => (current + len - 1) % len,
+    };
+
+    panes[next]
+}
+
+/// The pane furthest in one direction, for `{top}`, `{bottom}`, `{left}`, `{right}`.
+fn extreme_pane(root: Option<&Node>, extreme: Extreme) -> Option<PaneId> {
+    let mut targets = Vec::new();
+    collect_leaf_targets(root?, &mut targets);
+
+    targets
+        .into_iter()
+        .min_by_key(|(_, rect)| match extreme {
+            Extreme::Top => i32::from(rect.y),
+            Extreme::Bottom => -i32::from(rect.y),
+            Extreme::Left => i32::from(rect.x),
+            Extreme::Right => -i32::from(rect.x),
+        })
+        .map(|(pane, _)| pane)
 }
 
 fn collect_leaf_pane_ids(node: &Node, out: &mut Vec<PaneId>) {
@@ -1619,6 +2015,15 @@ mod tests {
         }
     }
 
+    /// Drive the app the way a script does: through the parser.
+    ///
+    /// The behaviour tests go through `Command::parse_str` rather than
+    /// building variants directly, so they double as proof that the weave
+    /// aliases still mean what they always meant.
+    fn command(line: &str) -> Command {
+        Command::parse_str(line).expect("command parses")
+    }
+
     fn mock_backend(next_id: PaneId) -> (Box<dyn PaneBackend>, MockBackendHandle) {
         let handle = MockBackendHandle::default();
         let backend = MockBackend {
@@ -1660,12 +2065,162 @@ mod tests {
 
     }
 
+    /// A two-pane session with focus on the pane spawned second (`%2`).
+    async fn two_pane_app() -> App {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.execute(command("split-v")).await.expect("split succeeds");
+        assert_eq!(app.current().focused, Some(PaneId(2)));
+
+        app
+    }
+
+    #[tokio::test]
+    async fn a_pane_id_target_acts_on_a_pane_that_is_not_focused() {
+        let mut app = two_pane_app().await;
+
+        app.execute(command("kill-pane -t %1"))
+            .await
+            .expect("kill succeeds");
+
+        assert!(
+            app.current().closing.contains(&PaneId(1)),
+            "`-t %1` should close the unfocused pane, not the focused one"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_window_targets_a_pane_that_is_not_focused() {
+        let mut app = two_pane_app().await;
+
+        app.execute(command("split-window -v -t %1"))
+            .await
+            .expect("split succeeds");
+
+        // The new pane is %1's sibling, so %1's half of the screen is the one
+        // that got divided.
+        let root = app.current().root.as_ref().expect("a layout exists");
+        let panes = app.current().leaf_panes();
+        assert_eq!(panes.len(), 3);
+        assert!(root.find_leaf(PaneId(3)).is_some());
+    }
+
+    /// A target naming something that is not there must be reported, not
+    /// fatal: a typo in a script cannot be allowed to take panes down with it.
+    #[tokio::test]
+    async fn an_unresolvable_target_leaves_the_session_untouched() {
+        let mut app = two_pane_app().await;
+
+        app.execute(command("kill-pane -t %99"))
+            .await
+            .expect("an unknown target is not a fatal error");
+
+        assert_eq!(app.panes.len(), 2);
+        assert!(app.current().closing.is_empty());
+        assert_eq!(app.exit, ExitState::Running);
+    }
+
+    #[tokio::test]
+    async fn a_target_naming_another_session_is_refused() {
+        let mut app = two_pane_app().await;
+        app.session_name = Some("dev".to_owned());
+
+        app.execute(command("kill-pane -t other:1.0"))
+            .await
+            .expect("a foreign session is rejected, not fatal");
+
+        assert!(app.current().closing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pane_index_targets_follow_layout_order() {
+        let mut app = two_pane_app().await;
+        let panes = app.current().leaf_panes();
+
+        app.execute(command("select-pane -t .0"))
+            .await
+            .expect("select succeeds");
+
+        assert_eq!(app.current().focused, Some(panes[0]));
+    }
+
+    #[tokio::test]
+    async fn last_target_returns_to_the_previously_focused_pane() {
+        let mut app = two_pane_app().await;
+
+        app.execute(command("select-pane -t %1"))
+            .await
+            .expect("select succeeds");
+        assert_eq!(app.current().focused, Some(PaneId(1)));
+
+        app.execute(command("select-pane -l"))
+            .await
+            .expect("select succeeds");
+
+        assert_eq!(app.current().focused, Some(PaneId(2)));
+    }
+
+    /// `%N` is absolute, so addressing a pane in another workspace brings that
+    /// workspace forward rather than failing.
+    #[tokio::test]
+    async fn a_pane_id_target_switches_to_the_window_holding_it() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("workspace-2"))
+            .await
+            .expect("switch succeeds");
+        assert_eq!(app.current_workspace, 1);
+
+        app.execute(command("select-pane -t %1"))
+            .await
+            .expect("select succeeds");
+
+        assert_eq!(app.current_workspace, 0);
+        assert_eq!(app.current().focused, Some(PaneId(1)));
+    }
+
+    #[tokio::test]
+    async fn select_window_last_returns_to_the_previous_workspace() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("workspace-3"))
+            .await
+            .expect("switch succeeds");
+        app.execute(command("select-window -l"))
+            .await
+            .expect("switch succeeds");
+
+        assert_eq!(app.current_workspace, 0);
+    }
+
+    /// Numbers are handed out in order and retired with their pane, so a `%N`
+    /// held by a script never silently starts pointing at a different pane.
+    #[tokio::test]
+    async fn pane_numbers_are_monotonic_and_never_reused() {
+        let mut app = two_pane_app().await;
+        assert_eq!(app.pane_number(PaneId(1)), Some(1));
+        assert_eq!(app.pane_number(PaneId(2)), Some(2));
+
+        app.remove_pane(PaneId(2));
+        assert_eq!(app.pane_number(PaneId(2)), None);
+
+        app.execute(command("split-v")).await.expect("split succeeds");
+
+        assert_eq!(
+            app.pane_number(PaneId(3)),
+            Some(3),
+            "a new pane takes the next number rather than the freed one"
+        );
+    }
+
     #[tokio::test]
     async fn execute_split_h_splits_focused_leaf_with_spawned_pane() {
         let (backend, handle) = mock_backend(PaneId(2));
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
 
-        app.execute(Command::SplitH).await.expect("split succeeds");
+        app.execute(command("split-h")).await.expect("split succeeds");
 
         let ws = &app.workspaces[app.current_workspace];
         match ws.root.clone().expect("root exists") {
@@ -1742,13 +2297,13 @@ mod tests {
     async fn focus_change_starts_border_tweens_and_reaches_targets() {
         let (backend, _handle) = mock_backend(PaneId(2));
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
-        app.execute(Command::SplitH).await.expect("split succeeds");
+        app.execute(command("split-h")).await.expect("split succeeds");
         assert_eq!(
             app.workspaces[app.current_workspace].focused,
             Some(PaneId(2))
         );
 
-        app.execute(Command::FocusUp).await.expect("focus succeeds");
+        app.execute(command("focus-up")).await.expect("focus succeeds");
 
         let focused = app.workspaces[app.current_workspace].focused;
         assert_eq!(focused, Some(PaneId(1)));
@@ -1801,7 +2356,7 @@ mod tests {
         let (backend, handle) = mock_backend(PaneId(2));
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
 
-        app.execute(Command::SplitV).await.expect("split succeeds");
+        app.execute(command("split-v")).await.expect("split succeeds");
         assert!(handle.resized().is_empty());
 
         let new_target = app
@@ -1851,13 +2406,13 @@ mod tests {
     async fn close_keeps_pane_mid_tween_and_removes_after_completion() {
         let (backend, handle) = mock_backend(PaneId(2));
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
-        app.execute(Command::SplitH).await.expect("split succeeds");
+        app.execute(command("split-h")).await.expect("split succeeds");
         app.advance_animations(OPEN_NEW_PANE_DURATION)
             .await
             .expect("open animation completes");
         handle.clear_resized();
 
-        app.execute(Command::Close).await.expect("close starts");
+        app.execute(command("close")).await.expect("close starts");
 
         assert!(app.workspaces[app.current_workspace]
             .root
@@ -1886,7 +2441,7 @@ mod tests {
         let (backend, _handle) = mock_backend(PaneId(2));
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
 
-        app.execute(Command::SwitchWorkspace(2))
+        app.execute(command("workspace-2"))
             .await
             .expect("switch succeeds");
 
@@ -1904,10 +2459,10 @@ mod tests {
         let (backend, _handle) = mock_backend(PaneId(2));
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
 
-        app.execute(Command::SwitchWorkspace(2))
+        app.execute(command("workspace-2"))
             .await
             .expect("switch to 2");
-        app.execute(Command::SwitchWorkspace(1))
+        app.execute(command("workspace-1"))
             .await
             .expect("switch back to 1");
 
@@ -1934,7 +2489,7 @@ mod tests {
         let (backend, _handle) = mock_backend(PaneId(2));
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
 
-        app.execute(Command::Detach).await.expect("detach succeeds");
+        app.execute(command("detach")).await.expect("detach succeeds");
 
         assert_eq!(app.exit, ExitState::Quit);
     }
@@ -2066,7 +2621,7 @@ mod tests {
             LaunchArgs::parse(["exec", "split-v"]).expect("launch args parse"),
             LaunchArgs::Exec(ExecArgs {
                 session_name: None,
-                command: Command::SplitV,
+                command: command("split-v"),
             })
         );
         assert_eq!(
@@ -2074,18 +2629,60 @@ mod tests {
                 .expect("launch args parse"),
             LaunchArgs::Exec(ExecArgs {
                 session_name: Some("main".to_owned()),
-                command: Command::SwitchWorkspace(3),
+                command: command("workspace-3"),
             })
         );
     }
 
     #[test]
+    fn launch_args_accept_tmux_verbs_with_flags() {
+        assert_eq!(
+            LaunchArgs::parse(["exec", "split-window", "-h", "-t", "%2"])
+                .expect("launch args parse"),
+            LaunchArgs::Exec(ExecArgs {
+                session_name: None,
+                command: command("split-window -h -t %2"),
+            })
+        );
+    }
+
+    /// `wv exec`'s own flags stop at the command name, so a command flag that
+    /// looks like one of weave's is passed through rather than swallowed.
+    #[test]
+    fn exec_flags_stop_at_the_command_name() {
+        assert_eq!(
+            LaunchArgs::parse(["exec", "--session", "main", "select-pane", "-l"])
+                .expect("launch args parse"),
+            LaunchArgs::Exec(ExecArgs {
+                session_name: Some("main".to_owned()),
+                command: command("select-pane -l"),
+            })
+        );
+
+        let error = LaunchArgs::parse(["exec", "-t", "%1", "select-pane"])
+            .expect_err("weave flags before the command are checked")
+            .to_string();
+        assert!(error.contains("before the command name"), "{error}");
+    }
+
+    #[test]
     fn launch_args_reject_unknown_exec_commands() {
-        let error = LaunchArgs::parse(["exec", "split-window"])
-            .expect_err("tmux verbs are no longer accepted")
+        let error = LaunchArgs::parse(["exec", "split-pane"])
+            .expect_err("unknown commands are rejected")
             .to_string();
 
         assert!(error.contains("unknown command"), "{error}");
+    }
+
+    /// An unsupported flag names the PR that brings it, so a user porting a
+    /// tmux script learns what is missing rather than that something failed.
+    #[test]
+    fn exec_reports_unsupported_flags_with_their_plan() {
+        let error = LaunchArgs::parse(["exec", "split-window", "-p", "30"])
+            .expect_err("sizing is not implemented yet")
+            .to_string();
+
+        assert!(error.contains("PR 5"), "{error}");
     }
 
     #[test]

@@ -146,14 +146,30 @@ The server ignores `SIGINT` and `SIGHUP`, so neither `Ctrl-C` nor closing the te
 `wv exec` sends a command to a running session over its socket. It is the same command enum the keybindings produce, so scripted changes animate exactly like typed ones.
 
 ```sh
-wv --bare --session main            # create an empty session, print its name
-wv exec --session main split-v      # ... drive its layout from anywhere
-wv exec --session main focus-left
-wv exec --session main workspace-2
-exec wv attach main                 # ... then take it over interactively
+wv --bare --session main                      # create an empty session, print its name
+wv exec --session main split-window -h        # ... drive its layout from anywhere
+wv exec --session main select-pane -t %1
+wv exec --session main select-window -t :2
+exec wv attach main                           # ... then take it over interactively
 ```
 
-Accepted commands: `split-h`, `split-v`, `focus-left`, `focus-right`, `focus-up`, `focus-down`, `close`, `detach`, `quit`, and `workspace-1` .. `workspace-9`. With no `--session`, the most recent live session is used.
+Commands use tmux's names and flags, including `-t session:window.pane` targets:
+
+- `split-window [-h|-v] [-t target]`
+- `select-pane [-L|-R|-U|-D] [-l] [-t target]`
+- `select-window [-t target] [-n|-p|-l]`
+- `kill-pane [-t target]`, `detach-client`, `kill-session`
+
+Targets accept pane ids (`%1`), pane indices (`.0`), window indices (`:2`), and the
+relative forms `+`, `-`, `!`, `{last}`, `{top}`, `{bottom}`, `{left}`, `{right}`.
+
+The older weave names still work: `split-h`, `split-v`, `focus-left`, `focus-right`,
+`focus-up`, `focus-down`, `close`, `detach`, `quit`, and `workspace-1` .. `workspace-9`.
+With no `--session`, the most recent live session is used.
+
+**Coming from tmux?** [`docs/TMUX_PARITY.md`](docs/TMUX_PARITY.md) is the full matrix of
+what is supported, what is planned, and the one trap worth knowing: `split-window -h`
+and weave's `split-h` mean opposite things, and both keep their original meaning.
 
 ## Logs
 
