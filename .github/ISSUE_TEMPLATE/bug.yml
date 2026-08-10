@@ -51,7 +51,6 @@ body:
     id: backend
     attributes:
       label: Backend
-      description: native or tmux
       placeholder: "native"
     validations:
       required: true
@@ -73,7 +72,6 @@ body:
         Run and paste:
         - `uname -a`
         - `echo $TERM $COLORTERM`
-        - `tmux -V` (if using the tmux backend)
         - rustc version if built from source
 
   - type: textarea

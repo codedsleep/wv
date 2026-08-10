@@ -1,46 +1,31 @@
 #!/usr/bin/env bash
-# weave-bootstrap.sh — populate a weave-flavoured tmux session with a 4-window
-# layout, then hand it over to `wv attach`.
+# Build a weave layout from a script, then hand it to an interactive client.
 #
-# Ported from a vanilla tmux.sh-style script. The only weave-specific lines are
-# the `wv --bare` line at the top and the `exec wv attach` line at the bottom;
-# everything in between is plain tmux.
-#
-# Run:   ./weave-bootstrap.sh
-# Re-run: `tmux kill-session -t weave-demo` first, or pass a different session
-#         name as $1.
-
+# `wv --bare` creates a session server without attaching and prints its name.
+# `wv exec` sends commands to that session over its socket -- the same commands
+# the keybindings produce, so every change animates exactly as if you had typed
+# it. The final `exec wv attach` replaces this shell with the client.
 set -euo pipefail
 
-SESSION="${1:-weave-demo}"
-CWD="${CWD:-$HOME}"
+session="${1:-dev}"
 
-# 1. create an empty, weave-marked tmux session and exit. --bare requires
-#    --backend tmux and an explicit --session name.
-wv --backend tmux --session "$SESSION" --bare
+# Create the session (a single shell pane) unless it is already running.
+if ! wv ls | awk '{print $1}' | grep -qx "$session"; then
+  wv --bare --session "$session" >/dev/null
+fi
 
-# 2. populate it with plain tmux commands. Every split / new-window emits a
-#    %layout-change that weave will reconcile when we attach in step 3.
+run() { wv exec --session "$session" "$1"; }
 
-tmux new-window   -t "$SESSION:1" -n "code"     -c "$CWD"
-tmux split-window -t "$SESSION:1" -v -l 10%     -c "$CWD"
+# Workspace 1: editor on the left, two stacked shells on the right.
+run split-v
+run focus-right
+run split-h
+run focus-left
 
-tmux new-window   -t "$SESSION:2" -n "terminal" -c "$CWD"
-tmux split-window -t "$SESSION:2" -h            -c "$CWD"
+# Workspace 2: a single wide pane for logs.
+run workspace-2
 
-tmux new-window   -t "$SESSION:3" -n "agents1"  -c "$CWD"
-tmux split-window -t "$SESSION:3" -h            -c "$CWD"
-tmux split-window -t "$SESSION:3" -h            -c "$CWD"
-tmux select-layout -t "$SESSION:3" even-horizontal
+# Back to the editor before attaching.
+run workspace-1
 
-tmux new-window   -t "$SESSION:4" -n "agents2"  -c "$CWD"
-tmux split-window -t "$SESSION:4" -h            -c "$CWD"
-tmux split-window -t "$SESSION:4" -h            -c "$CWD"
-tmux select-layout -t "$SESSION:4" even-horizontal
-
-tmux select-window -t "$SESSION:1"
-
-# 3. take over the session. wv hydrates the BSP forest from list-windows /
-#    list-panes on the first frame (no open-animations), then animates anything
-#    that happens after.
-exec wv attach "$SESSION"
+exec wv attach "$session"

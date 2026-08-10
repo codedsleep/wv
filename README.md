@@ -2,7 +2,7 @@
 
 An animated tiling terminal multiplexer in Rust.
 
-`wv` is a terminal-native tiling window manager + multiplexer with smooth, sub-cell-accurate motion at 60–160 FPS, recursive BSP splits, and both a native PTY backend and a `tmux -CC` backend for detach/reattach. Linux only.
+`wv` is a terminal-native tiling window manager + multiplexer with smooth, sub-cell-accurate motion at 60–160 FPS, recursive BSP splits, and its own client/server session layer for detach/reattach. No external multiplexer, no dependencies beyond the binary. Linux only.
 
 > _Demo cast: place a recording at `docs/demo.cast` (asciinema) — embed when the public release lands._
 >
@@ -13,7 +13,7 @@ An animated tiling terminal multiplexer in Rust.
 ## Features
 
 - **Smooth animated layout.** Every topology change is interpolated frame-by-frame with sub-cell precision. PTYs are resized only at tween completion, so children never see per-frame `SIGWINCH` storms.
-- **Two backends.** Native via [`portable-pty`](https://crates.io/crates/portable-pty), or `tmux -CC` for detach/reattach with state preserved.
+- **Detach and reattach.** A session server owns the PTYs, the terminal state and the layout; the client owns only your terminal. Close the terminal and the session keeps running.
 - **BSP splits.** Recursive horizontal/vertical splits with geometric focus navigation (`h/j/k/l`).
 - **Configurable themes.** Hex color overrides for borders, status bar, and accent; ships with `nord` and `tokyonight` presets (default `tokyonight`).
 - **Pane titles.** OSC 0/2 sequences (`printf '\e]2;hello\a'`) surface as centered top-border labels.
@@ -70,7 +70,7 @@ wv --debug
 | `Alt+V`                   | Split vertical               |
 | `Alt+H` / `J` / `K` / `L` | Focus left / down / up / right |
 | `Alt+Q`                   | Close focused pane           |
-| `Alt+D`                   | Detach (tmux backend only)   |
+| `Alt+D`                   | Detach, leaving the session running |
 | `Alt+Shift+Q`             | Quit                         |
 
 ## Animation
@@ -117,45 +117,43 @@ preset = "tokyonight"   # or "nord"
 
 The config parser currently accepts a single modifier (`Ctrl+` or `Alt+`). Multi-modifier chords aren't expressible yet.
 
-## Backends
+## Sessions
 
-`wv` ships with two pane backends, selected at launch:
+`wv` is a client/server program. The client owns your terminal — raw mode, the alternate screen, input events — and nothing else. Everything that has to survive a detach lives in a session server: the PTYs, each pane's terminal state, the layout tree, the animation timeline and the renderer itself. The server ships rendered frames down a unix socket and the client writes them to stdout.
 
-```sh
-wv                     # default: --backend native (portable-pty)
-wv --backend tmux      # tmux -CC control-mode backend
+```
+wv (client)                          wv --server --session NAME (daemon)
+  stdin  ── input / resize ────────►   keymap → command → layout → tween
+  stdout ◄── rendered frames ───────   owns every PTY, never dies with the client
 ```
 
-The native backend is the simplest path. The tmux backend drives a `tmux -CC` control-mode session, which adds:
-
-- **Detach.** `Alt+D` detaches the current `wv` session — tmux keeps it running in the background with all panes alive.
-- **Reattach.** `wv attach [name]` reconnects to a previously detached weave session. With no name, picks the most recent `weave-*` session.
-- **List.** `wv ls` enumerates `weave-*` tmux sessions so you can pick which to reattach.
-
-Each tmux session is auto-named `weave-<8-hex-uid>` so multiple parallel sessions coexist. Internal tmux chrome (`status`, `pane-border-status`) is disabled at startup — `wv` draws its own.
-
-The tmux backend parser is `#![forbid(unsafe_code)]` and covered by both unit tests and [proptest](https://crates.io/crates/proptest)-driven randomized robustness tests (`src/backend/tmux/parser.rs`). The protocol surface is modelled on [iTerm2's tmux integration](https://iterm2.com/documentation-tmux-integration.html).
-
-## Scripting weave with tmux
-
-When the tmux backend is active, external `tmux` commands drive the layout and weave reconciles + animates the result. tmux is the source of truth; both internal keybinds and external scripts flow through the same `%layout-change` path.
-
 ```sh
-wv --session main --bare &              # create empty session, set @weave-instance marker, exit
-tmux new-window  -t main -n code        # workspace 0 (window 1)
-tmux split-window -h -t main:code
-tmux new-window  -t main -n agents      # workspace 1 (window 2)
-exec wv attach main                     # weave takes over and animates into the built layout
+wv                     # start a session (auto-named weave-<uid>) and attach
+wv --session main      # start or attach to a session by name
+wv --bare              # create a session without attaching; prints its name
+wv attach [name]       # reattach; with no name, the most recent session
+wv ls                  # list live sessions
 ```
 
-- `wv --session <name>` picks a stable, scriptable name (default is `weave-<uid>`).
-- `wv --bare` creates the session, sets options, and exits without spawning a pane — leaving room for a script to populate.
-- `wv exec <tmux-args...>` resolves the active weave session and runs a tmux subcommand against it.
-- `wv ls --windows` lists windows including overflow windows 10+ (addressable via `Command::GotoWindow`).
+`Alt+D` detaches: the server keeps running with every pane alive, and the client restores your terminal and prints `[detached from NAME]`. `Alt+Shift+Q` quits, which shuts the session down and kills its panes.
 
-tmux windows `1..9` map 1:1 to weave workspaces `0..8`; windows `10+` are overflow. Layouts produced by `select-layout main-horizontal | tiled | even-vertical` are accepted and normalized into a right-leaning BSP — exact round-trip is not guaranteed.
+Sockets live in `$XDG_RUNTIME_DIR/weave/<name>.sock` (falling back to a private directory under `/tmp`). A socket whose server has gone away is unlinked automatically, so a name is never stuck. One client renders a session at a time: attaching from a second terminal takes over and the first client is told why it was dropped.
 
-Full safe-command contract and a worked example are in [`docs/tmux-scripting.md`](docs/tmux-scripting.md) and [`docs/examples/weave-bootstrap.sh`](docs/examples/weave-bootstrap.sh).
+The server ignores `SIGINT` and `SIGHUP`, so neither `Ctrl-C` nor closing the terminal can take a session down; `SIGTERM` shuts it down cleanly.
+
+## Scripting weave
+
+`wv exec` sends a command to a running session over its socket. It is the same command enum the keybindings produce, so scripted changes animate exactly like typed ones.
+
+```sh
+wv --bare --session main            # create an empty session, print its name
+wv exec --session main split-v      # ... drive its layout from anywhere
+wv exec --session main focus-left
+wv exec --session main workspace-2
+exec wv attach main                 # ... then take it over interactively
+```
+
+Accepted commands: `split-h`, `split-v`, `focus-left`, `focus-right`, `focus-up`, `focus-down`, `close`, `detach`, `quit`, and `workspace-1` .. `workspace-9`. With no `--session`, the most recent live session is used.
 
 ## Logs
 
@@ -178,14 +176,13 @@ cargo clippy -- -D warnings    # pedantic-clean
 - **No floating windows.** Pure tiling.
 - **No GPU.** Pure cell grid + diff. The "animation" is interpolated cell coordinates plus half-block sub-cell shading.
 - **No Windows or macOS in v1.** Linux only.
-- **No 1:1 tmux replacement.** The tmux backend exists so that detach/reattach come free; `wv` is not a tmux fork.
 - **No scrollback in v1.** Punted until later.
 
 ## FAQ
 
 **Why not just a tmux fork?**
 
-tmux is a process supervisor with a rendering layer bolted on. weave starts from the rendering layer (animated, sub-cell-accurate compositor) and treats process supervision as a backend (`PaneBackend` trait, with `NativeBackend` and `TmuxBackend` implementations). Forking tmux would mean fighting decades of assumptions about how the screen is drawn.
+tmux is a process supervisor with a rendering layer bolted on. weave starts from the rendering layer (animated, sub-cell-accurate compositor) and treats process supervision as a backend behind the `PaneBackend` trait. Forking tmux would mean fighting decades of assumptions about how the screen is drawn.
 
 **Why Linux only?**
 
@@ -199,9 +196,9 @@ Because instantaneous layout changes are jarring once you have more than two pan
 
 The animation budget is dominated by terminal output bandwidth (escape sequences to your host terminal), not by interpolation math. A GPU buys nothing when your bottleneck is `write(stdout)` on the other end of a Unicode-aware emulator.
 
-**Is the tmux backend supported on remote sessions?**
+**Does this work over SSH?**
 
-It should work over SSH or in any environment where you can run `tmux -CC` and pump bytes back and forth. Latency will show up in input lag and animation smoothness; the renderer is otherwise transport-agnostic.
+Yes — run `wv` on the remote host and the session lives there, so a dropped connection is just a detach. Latency shows up as input lag and less smooth animation; the renderer is otherwise transport-agnostic.
 
 ## License
 
@@ -215,6 +212,6 @@ at your option.
 ## Acknowledgements
 
 - [Hyprland](https://hypr.land) — motion-feel reference for the animation curves.
-- [iTerm2](https://iterm2.com) — `tmux -CC` integration documentation.
+- [Zellij](https://zellij.dev) — client/server session architecture reference.
 - [vt100](https://crates.io/crates/vt100) — VT escape sequence parser.
 - [portable-pty](https://crates.io/crates/portable-pty) — PTY abstraction.

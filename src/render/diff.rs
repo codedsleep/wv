@@ -63,6 +63,11 @@ impl DiffRenderer {
         Self::with_color_mode(ColorMode::from_env())
     }
 
+    /// Override the color depth, e.g. from an attached client's capabilities.
+    pub fn set_color_mode(&mut self, color_mode: ColorMode) {
+        self.color_mode = color_mode;
+    }
+
     pub const fn with_color_mode(color_mode: ColorMode) -> Self {
         Self {
             queue: Vec::new(),
