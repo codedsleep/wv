@@ -85,6 +85,29 @@ pub enum Command {
     },
     /// List panes, windows or sessions, one formatted line each.
     List { scope: ListScope, format: Option<String> },
+    /// Bind a key to a command.
+    BindKey {
+        table: String,
+        key: String,
+        repeat: bool,
+        command: Vec<String>,
+    },
+    /// Remove a binding, or every binding in a table.
+    UnbindKey {
+        table: String,
+        key: Option<String>,
+        all: bool,
+    },
+    /// Show the bindings, one per line.
+    ListKeys { table: Option<String> },
+    /// Set an option.
+    SetOption {
+        name: String,
+        value: String,
+        unset: bool,
+    },
+    /// Show the options, one per line.
+    ShowOptions { name: Option<String> },
     /// Close a pane.
     KillPane { target: Target },
     /// Leave the session running and disconnect the client.
@@ -258,6 +281,11 @@ pub const COMMAND_NAMES: &[&str] = &[
     "list-panes",
     "list-windows",
     "list-sessions",
+    "bind-key",
+    "unbind-key",
+    "list-keys",
+    "set-option",
+    "show-options",
 ];
 
 /// The pre-target weave names, still accepted.
@@ -321,6 +349,17 @@ impl Command {
             "list-windows" | "lsw" => parse_list(name, rest, ListKind::Windows),
             "list-sessions" | "ls" => parse_list(name, rest, ListKind::Sessions),
 
+            "bind-key" | "bind" => parse_bind_key(name, rest),
+            "unbind-key" | "unbind" => parse_unbind_key(name, rest),
+            "list-keys" | "lsk" => parse_list_keys(name, rest),
+            "set-option" | "set" | "setw" | "set-window-option" => parse_set_option(name, rest),
+            "show-options" | "show" | "showw" => parse_show_options(name, rest),
+            "set-environment" | "setenv" => Err(unsupported(
+                name,
+                "set-environment",
+                "PR 9: per-session environment",
+            )),
+
             "kill-pane" | "killp" | "close" => Ok(Self::KillPane {
                 target: parse_target_only(name, rest, TargetKind::Pane)?,
             }),
@@ -352,6 +391,14 @@ impl Command {
     pub fn parse_str(line: &str) -> Result<Self, CommandError> {
         Self::parse(line.split_whitespace())
     }
+}
+
+/// Whether an argument is a flag rather than a value.
+///
+/// A lone `-` is not: it is the name of the minus key (`bind - split-window`)
+/// and a relative target (`-t -`). Only `-x` and longer are flags.
+fn is_flag(arg: &str) -> bool {
+    arg.len() > 1 && arg.starts_with('-')
 }
 
 /// tmux's `-h`/`-v` name how the panes end up sitting; weave's [`Split`] names
@@ -412,7 +459,7 @@ fn parse_split_window(
                 spawn.argv.extend(args.cloned());
                 break;
             }
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -479,7 +526,7 @@ fn parse_send_keys(name: &str, args: &[String]) -> Result<Command, CommandError>
                 keys.extend(args.cloned());
                 break;
             }
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -518,7 +565,7 @@ fn parse_respawn_pane(name: &str, args: &[String]) -> Result<Command, CommandErr
                 spawn.argv.extend(args.cloned());
                 break;
             }
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -578,7 +625,7 @@ fn parse_resize_pane(name: &str, args: &[String]) -> Result<Command, CommandErro
                 ResizeChange::Height(parse_size(name, "-y", &value)?)
             }
             "-M" => return Err(unsupported(name, arg, "PR 11: mouse resizing")),
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -639,7 +686,7 @@ fn parse_swap_pane(name: &str, args: &[String]) -> Result<Command, CommandError>
             "-d" => keep_focus = true,
             "-U" => target = Some(relative_pane(PaneRef::Previous)),
             "-D" => target = Some(relative_pane(PaneRef::Next)),
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -679,7 +726,7 @@ fn parse_rotate_window(name: &str, args: &[String]) -> Result<Command, CommandEr
             "-U" => reverse = true,
             "-D" => reverse = false,
             "-Z" => return Err(unsupported(name, arg, "not planned: rotate does not unzoom")),
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -716,7 +763,7 @@ fn parse_select_layout(name: &str, args: &[String]) -> Result<Command, CommandEr
                     "not planned: weave keeps no layout history to step through",
                 ));
             }
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -775,7 +822,7 @@ fn parse_list(name: &str, args: &[String], kind: ListKind) -> Result<Command, Co
             "-a" => all = true,
             "-s" => return Err(unsupported(name, arg, "not planned: weave lists one session")),
             "-f" => return Err(unsupported(name, arg, "PR 9: list filters")),
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -841,7 +888,7 @@ fn parse_capture_pane(name: &str, args: &[String]) -> Result<Command, CommandErr
                     "not planned: paste buffers went with copy mode",
                 ));
             }
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -883,6 +930,199 @@ fn parse_capture_line(command: &str, flag: &str, value: &str) -> Result<u16, Com
         value: value.to_owned(),
         expected: "a line number on the visible screen".to_owned(),
     })
+}
+
+fn parse_bind_key(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut table = None;
+    let mut root = false;
+    let mut repeat = false;
+    let mut args = args.iter();
+    let mut key = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-T" => table = Some(next_value(name, &mut args, "-T")?),
+            "-n" => root = true,
+            "-r" => repeat = true,
+            "-N" => return Err(unsupported(name, arg, "PR 9: binding descriptions")),
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                key = Some(other.to_owned());
+                break;
+            }
+        }
+    }
+
+    let key = key.ok_or_else(|| CommandError::MissingValue {
+        flag: "a key to bind".to_owned(),
+    })?;
+    let command: Vec<String> = args.cloned().collect();
+    if command.is_empty() {
+        return Err(CommandError::MissingValue {
+            flag: "a command to bind the key to".to_owned(),
+        });
+    }
+
+    // `-n` and `-T` name the same thing two ways; `-n` is the root table.
+    let table = match (root, table) {
+        (true, _) => "root".to_owned(),
+        (false, Some(table)) => table,
+        (false, None) => "prefix".to_owned(),
+    };
+
+    Ok(Command::BindKey {
+        table,
+        key,
+        repeat,
+        command,
+    })
+}
+
+fn parse_unbind_key(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut table = None;
+    let mut root = false;
+    let mut all = false;
+    let mut key = None;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-T" => table = Some(next_value(name, &mut args, "-T")?),
+            "-n" => root = true,
+            "-a" => all = true,
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                if key.replace(other.to_owned()).is_some() {
+                    return Err(CommandError::UnexpectedArgument {
+                        command: name.to_owned(),
+                        argument: other.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    if key.is_none() && !all {
+        return Err(CommandError::MissingValue {
+            flag: "a key to unbind, or `-a`".to_owned(),
+        });
+    }
+
+    let table = match (root, table) {
+        (true, _) => "root".to_owned(),
+        (false, Some(table)) => table,
+        (false, None) => "prefix".to_owned(),
+    };
+
+    Ok(Command::UnbindKey { table, key, all })
+}
+
+fn parse_list_keys(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut table = None;
+    // `-T` consumes the next word, so this reads the iterator by hand.
+    let mut args = args.iter();
+
+    #[allow(clippy::while_let_on_iterator)]
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-T" => table = Some(next_value(name, &mut args, "-T")?),
+            "-N" | "-P" | "-1" => {
+                return Err(unsupported(name, arg, "PR 9: binding descriptions"));
+            }
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                return Err(CommandError::UnexpectedArgument {
+                    command: name.to_owned(),
+                    argument: other.to_owned(),
+                });
+            }
+        }
+    }
+
+    Ok(Command::ListKeys { table })
+}
+
+fn parse_set_option(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut unset = false;
+    let mut positional = Vec::new();
+
+    for arg in args {
+        match arg.as_str() {
+            // Scope flags are accepted and ignored: weave has one session, so
+            // global, window and pane options are the same set.
+            "-g" | "-w" | "-p" | "-s" | "-q" | "-a" => {}
+            "-u" => unset = true,
+            "-o" | "-F" => return Err(unsupported(name, arg, "PR 9: conditional option setting")),
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => positional.push(other.to_owned()),
+        }
+    }
+
+    let mut positional = positional.into_iter();
+    let option = positional.next().ok_or_else(|| CommandError::MissingValue {
+        flag: "an option name".to_owned(),
+    })?;
+    // tmux allows a flag option to be set with no value, meaning "on".
+    let value = positional.next().unwrap_or_else(|| "on".to_owned());
+
+    if let Some(extra) = positional.next() {
+        return Err(CommandError::UnexpectedArgument {
+            command: name.to_owned(),
+            argument: extra,
+        });
+    }
+
+    Ok(Command::SetOption {
+        name: option,
+        value,
+        unset,
+    })
+}
+
+fn parse_show_options(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut option = None;
+
+    for arg in args {
+        match arg.as_str() {
+            "-g" | "-w" | "-p" | "-s" | "-q" | "-v" | "-A" => {}
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                if option.replace(other.to_owned()).is_some() {
+                    return Err(CommandError::UnexpectedArgument {
+                        command: name.to_owned(),
+                        argument: other.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(Command::ShowOptions { name: option })
 }
 
 fn next_value<'a, I>(command: &str, args: &mut I, flag: &str) -> Result<String, CommandError>
@@ -927,7 +1167,7 @@ fn parse_select_pane(
             "-T" | "-P" | "-g" => {
                 return Err(unsupported(name, arg, "PR 7: pane titles and styles"));
             }
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -971,7 +1211,7 @@ fn parse_select_window(
             "-p" => window_target(WindowRef::Previous),
             "-l" => window_target(WindowRef::Last),
             "-T" => return Err(unsupported(name, arg, "PR 5: zoom toggle")),
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -1027,7 +1267,7 @@ fn parse_new_window(name: &str, args: &[String]) -> Result<Command, CommandError
                 spawn.argv.extend(args.cloned());
                 break;
             }
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -1057,7 +1297,7 @@ fn parse_rename_window(name: &str, args: &[String]) -> Result<Command, CommandEr
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-t" => target = Some(next_target(name, &mut args, "-t", TargetKind::Window)?),
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -1110,7 +1350,7 @@ fn parse_display_message(name: &str, args: &[String]) -> Result<Command, Command
             "-v" | "-a" | "-I" | "-N" | "-c" | "-d" => {
                 return Err(unsupported(name, arg, "PR 9: message routing and verbose output"));
             }
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -1190,7 +1430,7 @@ fn parse_target_only(
                 }
             }
             "-a" => return Err(unsupported(name, arg, "PR 5: kill all but the target")),
-            other if other.starts_with('-') => {
+            other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
                     flag: other.to_owned(),
@@ -1263,6 +1503,15 @@ mod tests {
 
     fn parse(line: &str) -> Command {
         Command::parse_str(line).expect("command parses")
+    }
+
+    impl Command {
+        fn as_select_window_target(&self) -> Option<WindowRef> {
+            match self {
+                Self::SelectWindow { target, .. } => target.window.clone(),
+                _ => None,
+            }
+        }
     }
 
     #[test]
@@ -1738,6 +1987,85 @@ mod tests {
                 format: None,
             }
         );
+    }
+
+    /// `-` is the minus key, not a flag — `bind - split-window -v` is a line
+    /// real tmux configs contain.
+    #[test]
+    fn a_lone_dash_is_a_value_not_a_flag() {
+        assert_eq!(
+            parse("bind-key - split-window -v"),
+            Command::BindKey {
+                table: "prefix".to_owned(),
+                key: "-".to_owned(),
+                repeat: false,
+                command: vec!["split-window".to_owned(), "-v".to_owned()],
+            }
+        );
+        assert_eq!(
+            parse("select-window -t -").as_select_window_target(),
+            Some(WindowRef::Previous)
+        );
+    }
+
+    #[test]
+    fn bind_key_defaults_to_the_prefix_table_and_n_means_root() {
+        let Command::BindKey { table, .. } = parse("bind-key x kill-pane") else {
+            panic!("expected a binding");
+        };
+        assert_eq!(table, "prefix");
+
+        let Command::BindKey { table, repeat, .. } = parse("bind-key -n -r M-h select-pane -L")
+        else {
+            panic!("expected a binding");
+        };
+        assert_eq!(table, "root");
+        assert!(repeat);
+    }
+
+    #[test]
+    fn bind_key_needs_a_key_and_a_command() {
+        assert!(matches!(
+            Command::parse_str("bind-key"),
+            Err(CommandError::MissingValue { .. })
+        ));
+        assert!(matches!(
+            Command::parse_str("bind-key x"),
+            Err(CommandError::MissingValue { .. })
+        ));
+    }
+
+    #[test]
+    fn set_option_defaults_a_missing_value_to_on() {
+        assert_eq!(
+            parse("set-option -g mouse"),
+            Command::SetOption {
+                name: "mouse".to_owned(),
+                value: "on".to_owned(),
+                unset: false,
+            }
+        );
+    }
+
+    /// Scope flags are accepted and ignored: weave has one session, so global,
+    /// window and pane options are the same set.
+    #[test]
+    fn set_option_scope_flags_are_accepted() {
+        for line in [
+            "set -g status on",
+            "setw -g status on",
+            "set -w status on",
+            "set -p status on",
+        ] {
+            assert_eq!(
+                Command::parse_str(line).expect("parses"),
+                Command::SetOption {
+                    name: "status".to_owned(),
+                    value: "on".to_owned(),
+                    unset: false,
+                }
+            );
+        }
     }
 
     #[test]

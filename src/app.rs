@@ -19,10 +19,11 @@ use crate::command::target::{Extreme, PaneRef, WindowRef};
 use crate::command::{
     Command, LayoutPreset, ListScope, PaneSelector, ResizeChange, SpawnCommand, SplitSize, Target,
 };
-use crate::config::{Config, ThemeConfig};
+use crate::config::{Config, Options, ThemeConfig};
 use crate::format::{expand as expand_format_impl, Variables};
 use crate::input;
-use crate::input::keymap::Keymap;
+use crate::input::keymap::{format_key, Binding, Keymap, PREFIX_TABLE, ROOT_TABLE};
+use crate::input::keys::parse_binding_key;
 use crate::layout::geometry::{Direction, FRect, Rect, Split};
 use crate::layout::tree::{self, Node};
 use crate::render::diff::{ColorMode, DiffRenderer};
@@ -232,6 +233,12 @@ pub struct App {
     diff: DiffRenderer,
     timeline: Timeline,
     keymap: Keymap,
+    options: Options,
+    /// Which key table the next keypress is looked up in.
+    ///
+    /// `root` normally; the prefix key switches it to `prefix` for one key,
+    /// or for as long as repeating bindings keep firing.
+    key_table: String,
     theme: ThemeConfig,
     status_bar: bool,
     pane_titles: bool,
@@ -612,6 +619,8 @@ impl App {
             diff: DiffRenderer::new(),
             timeline: Timeline::new(),
             keymap: config.keymap,
+            options: config.options,
+            key_table: ROOT_TABLE.to_owned(),
             theme: config.theme,
             status_bar,
             pane_titles,
@@ -1241,6 +1250,13 @@ impl App {
                 self.split_pane(pane, split, command.as_ref(), detached, size)
                     .await?;
             }
+            // Bindings and options are settings rather than actions, so they
+            // share a method the way the reshaping commands do.
+            settings @ (Command::BindKey { .. }
+            | Command::UnbindKey { .. }
+            | Command::ListKeys { .. }
+            | Command::SetOption { .. }
+            | Command::ShowOptions { .. }) => return self.execute_settings(settings),
             // Everything that reshapes an existing window shares a tail, so
             // it lives in one place rather than four arms of this match.
             reshape @ (Command::ResizePane { .. }
@@ -1584,6 +1600,76 @@ impl App {
         Ok(())
     }
 
+    /// Commands that change bindings or options rather than the session.
+    fn execute_settings(&mut self, cmd: Command) -> Result<String, ExecuteError> {
+        match cmd {
+            Command::BindKey {
+                table,
+                key,
+                repeat,
+                command,
+            } => {
+                let key = parse_binding_key(&key)
+                    .ok_or_else(|| Rejected::new(format!("`{key}` is not a key name")))?;
+                let bound = Command::parse(&command).map_err(|error| {
+                    Rejected::new(format!("cannot bind that command: {error}"))
+                })?;
+                let binding = if repeat {
+                    Binding::repeating(bound)
+                } else {
+                    Binding::new(bound)
+                };
+                self.keymap.bind(&table, key, binding);
+            }
+            Command::UnbindKey { table, key, all } => {
+                if all {
+                    self.keymap.unbind_all(&table);
+                } else if let Some(key) = key {
+                    let parsed = parse_binding_key(&key)
+                        .ok_or_else(|| Rejected::new(format!("`{key}` is not a key name")))?;
+                    if !self.keymap.unbind(&table, parsed) {
+                        return Err(Rejected::new(format!(
+                            "`{key}` is not bound in table `{table}`"
+                        ))
+                        .into());
+                    }
+                }
+            }
+            Command::ListKeys { table } => {
+                let lines = self
+                    .keymap
+                    .all_bindings()
+                    .into_iter()
+                    .filter(|(name, _, _)| table.as_ref().map_or(true, |wanted| wanted == name))
+                    .map(|(name, key, binding)| {
+                        format!(
+                            "bind-key -T {name} {}{}",
+                            format_key(&key),
+                            if binding.repeat { " -r" } else { "" }
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                return Ok(lines.join("\n"));
+            }
+            Command::SetOption { name, value, unset } => {
+                return self.set_option(&name, &value, unset).map(|()| String::new());
+            }
+            Command::ShowOptions { name } => {
+                return Ok(match name {
+                    Some(name) => self
+                        .options
+                        .get(&name)
+                        .ok_or_else(|| Rejected::new(format!("unknown option `{name}`")))?
+                        .to_owned(),
+                    None => self.options.show().join("\n"),
+                });
+            }
+            other => unreachable!("execute_settings got {other:?}"),
+        }
+
+        Ok(String::new())
+    }
+
     /// Commands that rearrange a window without adding or removing panes.
     async fn execute_reshape(&mut self, cmd: Command) -> Result<(), ExecuteError> {
         match cmd {
@@ -1622,6 +1708,60 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Apply an option, honouring the live ones and warning about the rest.
+    fn set_option(&mut self, name: &str, value: &str, unset: bool) -> Result<(), ExecuteError> {
+        let value = if unset {
+            crate::config::options::spec(name)
+                .map(|spec| spec.default)
+                .unwrap_or_default()
+        } else {
+            value
+        };
+
+        let spec = self
+            .options
+            .set(name, value)
+            .map_err(|error| Rejected::new(error.to_string()))?;
+
+        match spec.status {
+            crate::config::options::OptionStatus::Live => self.apply_live_option(spec.name),
+            // Accepted so a real `.tmux.conf` loads, but say so once rather
+            // than letting the user wonder why nothing changed.
+            crate::config::options::OptionStatus::Inert(reason) => {
+                tracing::warn!("`{name}` is accepted but does nothing: {reason}");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Push an option's new value into the state that reads it.
+    fn apply_live_option(&mut self, name: &str) {
+        match name {
+            "prefix" | "prefix2" => {
+                let keys = ["prefix", "prefix2"]
+                    .into_iter()
+                    .filter_map(|option| self.options.get(option))
+                    .filter(|value| !value.is_empty())
+                    .filter_map(parse_binding_key)
+                    .collect::<Vec<_>>();
+                self.keymap.set_prefix(&keys);
+            }
+            "status" => self.status_bar = self.options.flag("status"),
+            "pane-border-status" => self.pane_titles = self.options.flag("pane-border-status"),
+            "target-fps" => {
+                if let Some(fps) = self.options.number("target-fps") {
+                    let fps = u16::try_from(fps).unwrap_or(crate::config::DEFAULT_TARGET_FPS);
+                    self.tick_interval = frame_interval(fps);
+                }
+            }
+            // `repeat-time`, `default-shell` and `automatic-rename` are read
+            // where they are used rather than cached here.
+            _ => {}
+        }
+        self.dirty = true;
     }
 
     /// Read a pane's visible screen.
@@ -2271,9 +2411,7 @@ impl App {
             return Ok(());
         }
 
-        if let Some(command) = self.keymap.command_for(&key) {
-            self.dirty = true;
-            self.execute(command).await?;
+        if self.handle_key_binding(key).await? {
             return Ok(());
         }
 
@@ -2288,6 +2426,46 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Route a keypress through the prefix state machine.
+    ///
+    /// Returns whether the key was consumed as a binding. Anything that falls
+    /// through reaches the focused pane, which is what keeps typing working.
+    async fn handle_key_binding(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<bool> {
+        // Waiting for the key after a prefix: look it up in the prefix table
+        // and return to root afterwards, unless the binding repeats.
+        if self.key_table != ROOT_TABLE {
+            let table = std::mem::replace(&mut self.key_table, ROOT_TABLE.to_owned());
+
+            if let Some(binding) = self.keymap.lookup(&table, &key).cloned() {
+                if binding.repeat {
+                    self.key_table = table;
+                }
+                self.dirty = true;
+                self.execute(binding.command).await?;
+                return Ok(true);
+            }
+
+            // An unbound key after the prefix is swallowed, as in tmux:
+            // `C-b` then a typo must not leak the typo into the pane.
+            tracing::debug!("no binding for {} in table `{table}`", format_key(&key));
+            self.dirty = true;
+            return Ok(true);
+        }
+
+        if self.keymap.is_prefix(&key) {
+            PREFIX_TABLE.clone_into(&mut self.key_table);
+            return Ok(true);
+        }
+
+        if let Some(binding) = self.keymap.lookup(ROOT_TABLE, &key).cloned() {
+            self.dirty = true;
+            self.execute(binding.command).await?;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     async fn handle_resize(&mut self) {
@@ -2612,6 +2790,8 @@ impl App {
             diff: DiffRenderer::new(),
             timeline: Timeline::new(),
             keymap: Keymap::default(),
+            options: Options::default(),
+            key_table: ROOT_TABLE.to_owned(),
             theme: test_theme(),
             status_bar: true,
             pane_titles: true,
@@ -3614,6 +3794,147 @@ mod tests {
         // Past the end is empty rather than an error: a script polling a quiet
         // pane should see nothing and carry on.
         assert_eq!(app.request_output("capture-pane -p -S 99").await, "");
+    }
+
+    /// A key in no table reaches the pane; a bound one does not.
+    #[tokio::test]
+    async fn the_prefix_swallows_its_key_and_the_next_one() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        // A plain letter goes to the pane.
+        app.handle_input(Some(Ok(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )))))
+        .await
+        .expect("input handled");
+        assert_eq!(handle.written_to(PaneId(1)), b"a".to_vec());
+
+        // The prefix does not, and neither does the key after it.
+        for key in [
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('%'), KeyModifiers::NONE),
+        ] {
+            app.handle_input(Some(Ok(crossterm::event::Event::Key(key))))
+                .await
+                .expect("input handled");
+        }
+
+        assert_eq!(
+            handle.written_to(PaneId(1)),
+            b"a".to_vec(),
+            "neither the prefix nor its key should reach the pane"
+        );
+        assert_eq!(app.current().leaf_panes().len(), 2, "C-b % should split");
+        assert_eq!(app.key_table, "root", "the table resets after one key");
+    }
+
+    /// An unbound key after the prefix is swallowed rather than leaking into
+    /// the pane, so a mistyped chord cannot corrupt what you are editing.
+    #[tokio::test]
+    async fn an_unbound_key_after_the_prefix_is_swallowed() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('~'), KeyModifiers::NONE),
+        ] {
+            app.handle_input(Some(Ok(crossterm::event::Event::Key(key))))
+                .await
+                .expect("input handled");
+        }
+
+        assert!(handle.written_to(PaneId(1)).is_empty());
+        assert_eq!(app.key_table, "root");
+    }
+
+    #[tokio::test]
+    async fn bind_key_and_list_keys_round_trip() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("bind-key -n M-s split-window -h"))
+            .await
+            .expect("bind succeeds");
+
+        let listed = app.request_output("list-keys -T root").await;
+        assert!(listed.contains("M-s"), "{listed}");
+
+        app.execute(command("unbind-key -n M-s"))
+            .await
+            .expect("unbind succeeds");
+        let listed = app.request_output("list-keys -T root").await;
+        assert!(!listed.contains("M-s"), "{listed}");
+    }
+
+    #[tokio::test]
+    async fn unbinding_a_key_that_is_not_bound_is_reported() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        let result = app
+            .execute_request(command("unbind-key -n M-nope"))
+            .await
+            .expect("the request completes");
+
+        assert!(!result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn setting_the_prefix_at_runtime_takes_effect() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("set-option -g prefix C-a"))
+            .await
+            .expect("set succeeds");
+
+        assert!(app
+            .keymap
+            .is_prefix(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+        assert!(!app
+            .keymap
+            .is_prefix(&KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)));
+    }
+
+    #[tokio::test]
+    async fn setting_status_off_hides_the_status_bar() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        assert!(app.status_bar);
+
+        app.execute(command("set-option -g status off"))
+            .await
+            .expect("set succeeds");
+
+        assert!(!app.status_bar);
+    }
+
+    /// An inert option is stored so `show-options` round-trips, but an unknown
+    /// one is a typo and must fail.
+    #[tokio::test]
+    async fn inert_options_are_stored_and_unknown_ones_rejected() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("set-option -g history-limit 5000"))
+            .await
+            .expect("inert options are accepted");
+        assert_eq!(app.request_output("show-options history-limit").await, "5000");
+
+        let result = app
+            .execute_request(command("set-option -g nonsense on"))
+            .await
+            .expect("the request completes");
+        assert!(!result.is_ok());
     }
 
     /// A waiting caller gets the command's output, not just "it ran".

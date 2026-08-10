@@ -115,7 +115,28 @@ preset = "tokyonight"   # or "nord"
 # accent           = "#f7768e"
 ```
 
-The config parser currently accepts a single modifier (`Ctrl+` or `Alt+`). Multi-modifier chords aren't expressible yet.
+The TOML parser accepts a single modifier (`Ctrl+` or `Alt+`). Multi-modifier chords aren't expressible there — use the tmux-syntax file below, which takes `M-C-x`.
+
+### tmux-syntax config
+
+`wv` also reads `$XDG_CONFIG_HOME/weave/weave.conf` (or `~/.config/weave/weave.conf`), applied after the TOML so it wins:
+
+```sh
+set -g prefix C-a
+unbind C-b
+bind C-a send-keys C-a
+
+bind -n M-Left  select-pane -L
+bind '|' split-window -h
+bind '-' split-window -v
+bind -r H resize-pane -L 5
+
+source-file extra.conf
+```
+
+Lines that can't be honoured are logged with their file and line number rather than aborting the file. Options weave accepts but doesn't act on say so explicitly — `history-limit` warns that there's no scrollback rather than silently doing nothing. See [`docs/TMUX_PARITY.md`](docs/TMUX_PARITY.md).
+
+`C-b` is the prefix, with tmux's default bindings behind it (`c`, `%`, `"`, `x`, `z`, `&`, `d`, `n`/`p`/`l`, digits, arrows). The `Alt` chords below still work with no prefix.
 
 ## Sessions
 

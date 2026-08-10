@@ -57,8 +57,8 @@ means the current one.
 | `select-pane -LRUD` | `focus-left`… | yes | Geometric, walks the layout tree |
 | `select-pane -t` | — | yes | |
 | `select-pane -l` | — | yes | |
-| `select-pane -Z` | — | PR 7 | Use `resize-pane -Z` |
-| `select-pane -T/-P` | — | PR 7 | Titles and styles |
+| `select-pane -Z` | — | no | Use `resize-pane -Z` |
+| `select-pane -T/-P` | — | no | Pane titles come from OSC, and styles from the theme |
 | `next-layout` | — | no | |
 | `select-window -t/-n/-p/-l` | `workspace-1`…`workspace-9` | yes | Fails on a missing window; the alias creates one |
 | `next-window`, `previous-window`, `last-window` | — | yes | |
@@ -84,14 +84,22 @@ means the current one.
 | `list-sessions [-F]` | `wv ls` | partial | The command describes the session it runs in; `wv ls` lists them all |
 | `list-*  -f` filters | — | PR 9 | |
 | `display-message -p [-F]` | — | yes | Expands formats |
-| `display-message` without `-p` | — | PR 7 | Needs a status line message area |
+| `display-message` without `-p` | — | PR 9 | Needs a status line message area |
 | `capture-pane [-p] [-t] [-S n] [-E n]` | — | yes | Visible screen only |
 | `capture-pane -S -` / negative lines | — | no | Needs scrollback |
 | `capture-pane -e/-C/-J/-b/-a` | — | PR 9 / no | Escapes and joining are PR 9; buffers went with copy mode |
 | `has-session [-t]` | `wv has-session [name]` | yes | Exit status is the answer, as in tmux |
 | `kill-server` | `wv kill-server` | yes | |
 | `rename-session` | — | no | The socket is named after the session; renaming would break every attached client |
-| `bind-key`, `unbind-key`, prefix key, `set-option`, `source-file` | TOML config | PR 7 | |
+| `bind-key [-n] [-r] [-T]` | — | yes | |
+| `unbind-key [-n] [-T] [-a]` | — | yes | |
+| `list-keys [-T]` | — | yes | |
+| `set-option [-g/-w/-p] [-u]` | TOML config | yes | Scope flags accepted and ignored — weave has one session |
+| `show-options [name]` | — | yes | |
+| Prefix key, `prefix`/`prefix2` | — | yes | `C-b` by default, with tmux's default bindings behind it |
+| `source-file` | — | yes | Relative to the file that names it; `~` expands |
+| `set-environment` | — | PR 9 | |
+| `bind-key -N`, `list-keys -N` | — | PR 9 | Binding descriptions |
 | `copy-mode`, buffers, scrollback, search | — | no | Dropped: a phase of its own, not a PR |
 | `run-shell`, `if-shell`, `set-hook`, `pipe-pane` | — | PR 9 | |
 | `wait-for` | — | PR 9 | Moved from PR 2: it needs `run-shell -b` to be useful |
@@ -123,6 +131,50 @@ What follows from that:
 - `select-window` **fails** on a window that does not exist, as in tmux. The
   `workspace-N` aliases behind `Alt+N` create one instead — that is how weave
   has always behaved and the keybindings keep it.
+
+## Configuration
+
+weave reads two files, both optional:
+
+| File | Syntax | Applied |
+|---|---|---|
+| `$XDG_CONFIG_HOME/weave/config.toml` | TOML | first |
+| `$XDG_CONFIG_HOME/weave/weave.conf` | tmux | second, so it wins |
+
+The `.conf` file is a list of commands in the same language `wv exec` speaks.
+`set`, `setw`, `bind`, `unbind` and `source` expand to their full names, `#`
+starts a comment at a word boundary, and quotes and backslashes work as in a
+shell — so `bind '#' ...` and `-F "#{pane_id}"` survive.
+
+Only commands that configure weave are honoured there. A `split-window` in a
+config file is refused with an explanation, because a config is read before any
+session exists.
+
+**A line that cannot be honoured does not abort the file.** Each one is logged
+with its file and line number, so one unsupported option in a long `.tmux.conf`
+costs you that line and nothing else.
+
+### Options are live, inert, or unknown
+
+- **live** — weave reads it: `prefix`, `prefix2`, `status`,
+  `pane-border-status`, `repeat-time`, `default-shell`, `automatic-rename`,
+  `target-fps`.
+- **inert** — a real tmux option weave stores so `show-options` round-trips,
+  but nothing reads. Setting one logs *why*: `history-limit` does nothing
+  because there is no scrollback, `base-index` because windows are fixed slots.
+- **unknown** — not a tmux option at all, so it is a typo and it fails.
+
+### Keys
+
+`C-b` is the prefix, with tmux's defaults behind it: `c` new-window, `%` and
+`"` split, `x` kill-pane, `z` zoom, `&` kill-window, `d` detach, `n`/`p`/`l`
+window movement, `o` next pane, `{`/`}` swap, digits select windows, arrows
+move focus and `C-`arrows resize (repeating, via `-r`).
+
+weave's own `Alt` chords keep working with no prefix, in the `root` table —
+which is also where `bind -n` binds. A key in no table reaches the pane. A key
+pressed after the prefix is swallowed whether or not it is bound, so a mistyped
+chord cannot leak into what you are editing.
 
 ## Format strings
 

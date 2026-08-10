@@ -178,23 +178,29 @@ nothing: a silently empty field in a listing is worse than a failed command.
   lists them all. A session server does not know about its neighbours.
 - `rename-session` is won't-do: the socket is named after the session.
 
-# PR 7 — Prefix key, `bind-key`, runtime options, config parity
+# PR 7 — Prefix key, bindings, options, tmux config — **SHIPPED**
 
-**What lets you hand me a `.tmux.conf` and get a faithful translation.**
+What closes the loop on the original question: hand weave a `.tmux.conf` and it
+reads it.
 
-- Modal prefix state machine (`C-b` default, `prefix`/`prefix2` options), `-n` (root table)
-  and `-r` (repeat) bindings, named key tables (`copy-mode`, `root`, custom `switch-client -T`).
-  Today's Alt-chords stay as the default *root* table so nothing breaks.
-- `bind-key` / `unbind-key` / `list-keys`, at runtime and from config.
-- Typed option registry: `set-option -g/-w/-p`, `show-options`, `set-environment`.
-  Covers `mouse`, `base-index`, `escape-time`, `history-limit`, `status-*`, `pane-border-*`,
-  `default-shell`, `default-command`, plus weave-native (`target_fps`, theme).
-- tmux-syntax config parser + `source-file`; TOML remains supported and takes precedence.
-- Optional: `tmux2weave` converter emitting a diff of unsupported directives.
+**Shipped:** key tables with a `root`/`prefix` split and the prefix state
+machine; tmux's default prefix bindings; `bind-key`/`unbind-key`/`list-keys`;
+the option registry with `set-option`/`show-options`; and a tmux-syntax config
+parser with `source-file`.
 
-**Files:** new `src/config/tmux_conf.rs`, `src/config.rs`, `src/input/keymap.rs`, `src/app.rs`.
+**The option registry's three states** are the load-bearing idea. Erroring on
+every option weave lacks would make a real config fail on its first line;
+ignoring them all would let a config quietly not work. So each option is
+**live** (read), **inert** (stored, with a logged reason nothing reads it), or
+**unknown** (a typo, refused).
 
----
+Config files apply TOML first, then `.conf`, so the imperative file wins. A
+line that cannot be honoured is logged with its location rather than aborting
+the file.
+
+**Won't do, moved out of this PR:** `select-pane -T/-P` (pane titles come from
+OSC, styles from the theme). **PR 9:** `set-environment`, binding descriptions
+(`-N`), and `display-message` without `-p`.
 
 # PR 8 — Scrollback and copy-mode — **DROPPED**
 

@@ -10,6 +10,22 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+/// Parse a key name as `bind-key` means it, where a bare character is a key.
+///
+/// `send-keys` and `bind-key` disagree about a lone `c`: for `send-keys` it is
+/// text to type, for `bind-key` it is the C key. Same names otherwise.
+pub fn parse_binding_key(name: &str) -> Option<KeyEvent> {
+    if let Some(key) = parse_key_name(name) {
+        return Some(key);
+    }
+
+    let mut chars = name.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => Some(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+        _ => None,
+    }
+}
+
 /// Parse one tmux key name.
 ///
 /// Returns `None` for anything that is not a key name; `send-keys` treats that
@@ -166,6 +182,21 @@ mod tests {
     #[test]
     fn meta_prefixes_the_escape_byte() {
         assert_eq!(bytes("M-x"), vec![0x1b, b'x']);
+    }
+
+    /// `bind-key c` means the C key, while `send-keys c` types a letter.
+    #[test]
+    fn binding_keys_accept_a_bare_character() {
+        use super::parse_binding_key;
+
+        assert_eq!(
+            parse_binding_key("c"),
+            Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+        );
+        assert_eq!(parse_binding_key("Enter"), parse_key_name("Enter"));
+        assert_eq!(parse_binding_key("C-a"), parse_key_name("C-a"));
+        // Still not a key: more than one character and no modifier.
+        assert_eq!(parse_binding_key("hello"), None);
     }
 
     /// A bare word is text to type, not a key — this is what lets

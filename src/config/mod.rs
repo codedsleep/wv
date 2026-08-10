@@ -1,4 +1,4 @@
-//! TOML config schema + loader.
+//! Config: the TOML schema, the tmux-syntax file, and the option registry.
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
@@ -8,8 +8,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::Color;
 use serde::Deserialize;
 
+pub mod options;
+pub mod tmux_conf;
+
 use crate::command::Command;
 use crate::input::keymap::Keymap;
+pub use options::{OptionError, Options};
 
 pub const DEFAULT_TARGET_FPS: u16 = 160;
 pub const MIN_TARGET_FPS: u16 = 30;
@@ -18,8 +22,14 @@ pub const MAX_TARGET_FPS: u16 = 240;
 #[derive(Clone)]
 pub struct Config {
     pub keymap: Keymap,
+    pub options: Options,
     pub ui: UiConfig,
     pub theme: ThemeConfig,
+    /// Config lines that could not be honoured, with where they came from.
+    ///
+    /// Collected rather than fatal: one unsupported line in a long
+    /// `.tmux.conf` should not cost you the other forty.
+    pub diagnostics: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,7 +64,23 @@ pub enum ConfigError {
 }
 
 impl Config {
+    /// Load the TOML config, then the tmux-syntax one over it.
+    ///
+    /// Both are optional. The `.conf` file is applied second and therefore
+    /// wins, because it is the imperative one: its lines are commands, and a
+    /// command that runs later is the one that took effect.
     pub fn load() -> Self {
+        let mut config = Self::load_toml();
+        config.apply_conf_file(&tmux_conf::conf_path());
+
+        for diagnostic in &config.diagnostics {
+            tracing::warn!("{diagnostic}");
+        }
+
+        config
+    }
+
+    fn load_toml() -> Self {
         let path = config_path();
         let source = match std::fs::read_to_string(&path) {
             Ok(source) => source,
@@ -71,6 +97,113 @@ impl Config {
                 tracing::warn!("failed to parse config {}: {error}", path.display());
                 Self::default()
             }
+        }
+    }
+
+    /// Apply a tmux-syntax config file, if it is there.
+    pub fn apply_conf_file(&mut self, path: &std::path::Path) {
+        let lines = match tmux_conf::load(path) {
+            Ok(lines) => lines,
+            Err(tmux_conf::ConfError::Io { source, .. })
+                if source.kind() == ErrorKind::NotFound =>
+            {
+                return;
+            }
+            Err(error) => {
+                self.diagnostics.push(error.to_string());
+                return;
+            }
+        };
+
+        for line in lines {
+            if let Err(message) = self.apply_conf_line(&line.words) {
+                self.diagnostics.push(format!(
+                    "{}:{}: {message}",
+                    line.source.display(),
+                    line.number
+                ));
+            }
+        }
+    }
+
+    /// Apply one config line.
+    ///
+    /// Only the commands that configure weave are honoured here — a config
+    /// file is read before any session exists, so a `split-window` in one has
+    /// nothing to act on.
+    fn apply_conf_line(&mut self, words: &[String]) -> Result<(), String> {
+        let command = Command::parse(words).map_err(|error| error.to_string())?;
+
+        match command {
+            Command::SetOption { name, value, unset } => {
+                let value = if unset {
+                    options::spec(&name).map_or("", |spec| spec.default)
+                } else {
+                    &value
+                };
+                let spec = self.options.set(&name, value).map_err(|e| e.to_string())?;
+                self.apply_option(spec.name);
+                if let options::OptionStatus::Inert(reason) = spec.status {
+                    return Err(format!("`{name}` is accepted but does nothing: {reason}"));
+                }
+                Ok(())
+            }
+            Command::BindKey {
+                table,
+                key,
+                repeat,
+                command,
+            } => {
+                let key = crate::input::keys::parse_binding_key(&key)
+                    .ok_or_else(|| format!("`{key}` is not a key name"))?;
+                let bound = Command::parse(&command).map_err(|error| error.to_string())?;
+                let binding = if repeat {
+                    crate::input::keymap::Binding::repeating(bound)
+                } else {
+                    crate::input::keymap::Binding::new(bound)
+                };
+                self.keymap.bind(&table, key, binding);
+                Ok(())
+            }
+            Command::UnbindKey { table, key, all } => {
+                if all {
+                    self.keymap.unbind_all(&table);
+                    return Ok(());
+                }
+                let key = key.ok_or("nothing to unbind")?;
+                let parsed = crate::input::keys::parse_binding_key(&key)
+                    .ok_or_else(|| format!("`{key}` is not a key name"))?;
+                self.keymap.unbind(&table, parsed);
+                Ok(())
+            }
+            other => Err(format!(
+                "`{}` cannot be used in a config file; it needs a running session",
+                config_command_name(&other)
+            )),
+        }
+    }
+
+    /// Push a config-time option into the settings that read it.
+    fn apply_option(&mut self, name: &str) {
+        match name {
+            "prefix" | "prefix2" => {
+                let keys = ["prefix", "prefix2"]
+                    .into_iter()
+                    .filter_map(|option| self.options.get(option))
+                    .filter(|value| !value.is_empty())
+                    .filter_map(crate::input::keys::parse_binding_key)
+                    .collect::<Vec<_>>();
+                self.keymap.set_prefix(&keys);
+            }
+            "status" => self.ui.status_bar = self.options.flag("status"),
+            "pane-border-status" => self.ui.pane_titles = self.options.flag("pane-border-status"),
+            "target-fps" => {
+                if let Some(fps) = self.options.number("target-fps") {
+                    self.ui.target_fps =
+                        normalize_target_fps(u16::try_from(fps).unwrap_or(DEFAULT_TARGET_FPS));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -122,6 +255,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             keymap: Keymap::default(),
+            options: Options::default(),
+            diagnostics: Vec::new(),
             ui: UiConfig {
                 border_color: Color::Cyan,
                 status_bar: true,
@@ -130,6 +265,35 @@ impl Default for Config {
             },
             theme: ThemePreset::TokyoNight.theme(),
         }
+    }
+}
+
+/// A command's name, for the "not usable in a config file" message.
+fn config_command_name(command: &Command) -> &'static str {
+    match command {
+        Command::SplitWindow { .. } => "split-window",
+        Command::SelectPane { .. } => "select-pane",
+        Command::SelectWindow { .. } => "select-window",
+        Command::KillPane { .. } => "kill-pane",
+        Command::DetachClient => "detach-client",
+        Command::KillSession { .. } => "kill-session",
+        Command::DisplayMessage { .. } => "display-message",
+        Command::SendKeys { .. } => "send-keys",
+        Command::RespawnPane { .. } => "respawn-pane",
+        Command::NewWindow { .. } => "new-window",
+        Command::KillWindow { .. } => "kill-window",
+        Command::RenameWindow { .. } => "rename-window",
+        Command::ResizePane { .. } => "resize-pane",
+        Command::SwapPane { .. } => "swap-pane",
+        Command::RotateWindow { .. } => "rotate-window",
+        Command::SelectLayout { .. } => "select-layout",
+        Command::CapturePane { .. } => "capture-pane",
+        Command::List { .. } => "list",
+        Command::ListKeys { .. } => "list-keys",
+        Command::ShowOptions { .. } => "show-options",
+        Command::BindKey { .. } => "bind-key",
+        Command::UnbindKey { .. } => "unbind-key",
+        Command::SetOption { .. } => "set-option",
     }
 }
 
@@ -366,6 +530,77 @@ mod tests {
 
     fn command(line: &str) -> Command {
         Command::parse_str(line).expect("command parses")
+    }
+
+    /// The end-to-end shape of PR 7: a tmux-syntax file changes the prefix,
+    /// rebinds keys and reports what it could not honour.
+    #[test]
+    fn a_tmux_syntax_config_is_applied_and_reports_what_it_could_not() {
+        let dir = std::env::temp_dir().join(format!("weave-conf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("weave.conf");
+        std::fs::write(
+            &path,
+            "# comment\n\
+             set -g prefix C-a\n\
+             unbind -n M-v\n\
+             bind -n M-s split-window -h\n\
+             bind -r H resize-pane -L 5\n\
+             set -g history-limit 5000\n\
+             set -g not-an-option yes\n",
+        )
+        .expect("write config");
+
+        let mut config = Config::default();
+        config.apply_conf_file(&path);
+
+        // The prefix moved.
+        assert!(config.keymap.is_prefix(&KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL
+        )));
+        // A new root binding took, and an old one went.
+        assert_eq!(
+            config.keymap.command_for(&alt('s')),
+            Some(command("split-window -h"))
+        );
+        assert_eq!(config.keymap.command_for(&alt('v')), None);
+        // `-r` survived the round trip.
+        let binding = config
+            .keymap
+            .lookup("prefix", &KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE))
+            .expect("H is bound");
+        assert!(binding.repeat);
+
+        // Two diagnostics: one inert option, one that does not exist.
+        assert_eq!(config.diagnostics.len(), 2, "{:?}", config.diagnostics);
+        assert!(config.diagnostics[0].contains("history-limit"));
+        assert!(config.diagnostics[1].contains("not-an-option"));
+        // An inert option is still stored, so `show-options` round-trips.
+        assert_eq!(config.options.get("history-limit"), Some("5000"));
+
+        std::fs::remove_dir_all(dir).expect("clean up");
+    }
+
+    /// A config that names a session command is refused with an explanation
+    /// rather than silently doing nothing at startup.
+    #[test]
+    fn session_commands_are_refused_in_a_config_file() {
+        let mut config = Config::default();
+
+        let error = config
+            .apply_conf_line(&["split-window".to_owned(), "-h".to_owned()])
+            .expect_err("not usable in a config");
+
+        assert!(error.contains("needs a running session"), "{error}");
+    }
+
+    #[test]
+    fn a_missing_config_file_is_not_an_error() {
+        let mut config = Config::default();
+        config.apply_conf_file(std::path::Path::new("/nonexistent/weave.conf"));
+
+        assert!(config.diagnostics.is_empty());
     }
 
     #[test]
