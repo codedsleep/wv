@@ -157,14 +157,22 @@ Commands use tmux's names and flags, including `-t session:window.pane` targets:
 
 - `split-window [-h|-v] [-d] [-c dir] [-t target] [command...]`
 - `select-pane [-L|-R|-U|-D] [-l] [-t target]`
-- `select-window [-t target] [-n|-p|-l]`
+- `select-window [-t target] [-n|-p|-l]`, `next-window`, `previous-window`, `last-window`
+- `new-window [-d] [-n name] [-c dir] [-t target] [command...]`
+- `kill-window [-t target]`, `rename-window [-t target] <name>`
 - `kill-pane [-t target]`, `detach-client`, `kill-session`
 - `display-message -p [-t target] [text]`
 - `send-keys [-l] [-t target] <keys...>`
 - `respawn-pane [-k] [-c dir] [-t target] [command...]`
 
-Targets accept pane ids (`%1`), pane indices (`.0`), window indices (`:2`), and the
-relative forms `+`, `-`, `!`, `{last}`, `{top}`, `{bottom}`, `{left}`, `{right}`.
+Targets accept pane ids (`%1`), pane indices (`.0`), window indices (`:2`), window
+names (`:build`), and the relative forms `+`, `-`, `!`, `{last}`, `{top}`,
+`{bottom}`, `{left}`, `{right}`.
+
+Windows are nine numbered slots. A window with no name of its own takes one from
+its focused pane's title, so `-t :vim` finds the window running vim;
+`rename-window` pins a name against that. See
+[`docs/TMUX_PARITY.md`](docs/TMUX_PARITY.md) for what that trades away.
 
 The older weave names still work: `split-h`, `split-v`, `focus-left`, `focus-right`,
 `focus-up`, `focus-down`, `close`, `detach`, `quit`, and `workspace-1` .. `workspace-9`.

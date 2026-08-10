@@ -36,9 +36,9 @@ already animates an arbitrary `ratio` — so resize and zoom are tween wiring, n
 2. **Multi-client attach.** tmux allows N clients per session; weave evicts
    (`ExitReason::TakenOver`, `src/session/protocol.rs:60`). Parity means multi-client with
    per-client size negotiation (smallest-wins). *Assumed:* out of scope, tracked as PR 10.
-3. **Workspaces → windows.** Fixed 1–9 workspaces become dynamic windows in PR 4.
-   `workspace-N` survives as an alias. This is a breaking state/protocol change — land it
-   before anyone depends on scripted sessions.
+3. **Workspaces → windows.** ~~Fixed 1–9 workspaces become dynamic windows in PR 4.~~
+   **Resolved 2026-08-11:** they do not. The nine slots stay and gain names.
+   See PR 4 below for why, and what that trades away.
 4. **Explicit non-goals.** tmux control mode (`-CC`), TPM/plugins, `#{}` arithmetic and
    conditionals beyond simple substitution, tmux's own socket protocol wire-compat.
 
@@ -111,22 +111,30 @@ send-keys `C-c` interrupts a `sleep`.
 
 ---
 
-# PR 4 — Windows replace workspaces
+# PR 4 — Named windows — **REVISED AND SHIPPED**
 
-**Breaking state change — land early, before scripted sessions proliferate.**
+Originally "windows replace workspaces": a dynamic `Vec<Window>` with stable
+`@id`s, indices distinct from positions, `move-window` and renumbering. Cut
+down on 2026-08-11 after the question "do we really need to replace
+workspaces?" — and the answer was no.
 
-- `Vec<Workspace>` (fixed 9, `src/app.rs:41`) becomes a dynamic, ordered window list with
-  ids, indices, and names; `base-index` option honored.
-- `new-window`, `select-window`, `next/previous/last-window`, `rename-window`,
-  `move-window`, `kill-window`.
-- OSC 0/2 title handling extends to automatic window naming (`automatic-rename`).
-- Status bar renders a tmux-style window list; `workspace-N` aliases `select-window -t N`.
+The two things were conflated. **Names** are what tmux configs and scripts
+actually use (`-t dev:build`, `rename-window`, a status bar that says `build`
+rather than `3`). **A dynamic window list** is what makes the refactor big, and
+weave's `Alt+1`–`Alt+9` model gains little from an unbounded count.
 
-**Files:** `src/app.rs`, `src/render/chrome.rs`, `src/session/protocol.rs`.
-**Risk:** the biggest state refactor in the plan. Keep the BSP tree per-window untouched —
-this is a container change, not a layout change.
+**What shipped:** a `name: Option<String>` on the existing nine workspaces,
+plus `new-window`, `kill-window`, `rename-window`, `next/previous/last-window`,
+window-name targeting, automatic naming from the focused pane's OSC title, and
+names in the status bar. `select-window` fails on a missing window as tmux
+does; the `workspace-N` aliases behind `Alt+N` still create one.
 
----
+**What was given up, and is now documented as won't-do:** `@id` targeting (an
+index is already stable, so `:N` serves), `move-window` and `swap-window`,
+renumbering, and more than nine windows.
+
+**Cost:** about a third of the original estimate, and none of the
+index-versus-position risk that made the original the highest-risk PR here.
 
 # PR 5 — Sizing, zoom, pane manipulation
 

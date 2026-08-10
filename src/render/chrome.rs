@@ -28,9 +28,10 @@ pub struct DebugOverlay {
     pub dirty_cells: usize,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceIndicator {
     pub number: u8,
+    pub name: String,
     pub is_current: bool,
     pub pane_count: usize,
 }
@@ -104,7 +105,13 @@ pub fn draw_status_bar(
         if x >= max_x {
             break;
         }
-        let label = format!(" {} ", ws.number);
+        // `1:build` — the number stays because `Alt+1` and `-t :1` still
+        // address it; the name is what makes a window recognisable.
+        let label = if ws.name.is_empty() {
+            format!(" {} ", ws.number)
+        } else {
+            format!(" {}:{} ", ws.number, ws.name)
+        };
         let (fg, bg) = if ws.is_current {
             (theme.status_bg, theme.accent)
         } else {
@@ -424,11 +431,13 @@ mod tests {
         let workspaces = [
             super::WorkspaceIndicator {
                 number: 1,
+                name: String::new(),
                 is_current: true,
                 pane_count: 2,
             },
             super::WorkspaceIndicator {
                 number: 3,
+                name: "build".to_owned(),
                 is_current: false,
                 pane_count: 1,
             },
@@ -440,8 +449,9 @@ mod tests {
             .map(|x| surface.get(x, surface.height - 1).expect("cell exists").ch)
             .collect();
         assert!(bottom.starts_with("[NORMAL] "));
+        // A named window shows its name; an unnamed one is just its number.
+        assert!(bottom.contains("3:build"), "{bottom}");
         assert!(bottom.contains(" 1 "));
-        assert!(bottom.contains(" 3 "));
         assert!(bottom.contains("14:23:11"));
 
         // Find the cell rendering the current workspace digit '1' and verify

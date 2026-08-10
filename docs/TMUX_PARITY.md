@@ -36,8 +36,8 @@ means the current one.
 | `{top}` `{bottom}` `{left}` `{right}` | yes | Extreme pane by geometry |
 | `:N` window index | yes | One-based; maps to workspaces 1–9 |
 | `{start}` `{end}` | yes | Lowest/highest occupied workspace |
-| `@N` window id | PR 4 | Needs real windows |
-| `:name` window name | PR 4 | Needs real windows |
+| `:name` window name | yes | Automatic from the pane title, or set by `rename-window` |
+| `@N` window id | no | Windows are fixed slots, so an index already is a stable id — use `:N` |
 | `session:` | partial | Accepted and checked; a foreign session is refused, not forwarded (PR 6) |
 
 ## Commands
@@ -58,12 +58,16 @@ means the current one.
 | `select-pane -l` | — | yes | |
 | `select-pane -Z` | — | PR 5 | Zoom |
 | `select-pane -T/-P` | — | PR 7 | Titles and styles |
-| `select-window -t/-n/-p/-l` | `workspace-1`…`workspace-9` | yes | Windows are the nine workspaces until PR 4 |
+| `select-window -t/-n/-p/-l` | `workspace-1`…`workspace-9` | yes | Fails on a missing window; the alias creates one |
+| `next-window`, `previous-window`, `last-window` | — | yes | |
+| `new-window [-d] [-n] [-c] [-t] [cmd]` | — | yes | Takes the lowest free window unless `-t` says otherwise |
+| `kill-window [-t]` | — | yes | |
+| `rename-window [-t] <name>` | — | yes | Pins the name against automatic renaming |
+| `move-window`, `swap-window`, renumbering | — | no | Windows are fixed slots |
 | `kill-pane -t` | `close` | yes | |
 | `kill-pane -a` | — | PR 5 | |
 | `detach-client` | `detach` | yes | `-t`/`-a` need multi-client (PR 10) |
 | `kill-session` | `quit` | yes | |
-| `new-window`, `rename-window`, `next-window`, `previous-window`, `kill-window`, `move-window` | — | PR 4 | |
 | `resize-pane`, `swap-pane`, `rotate-window`, `break-pane`, `join-pane`, `select-layout` | — | PR 5 | |
 | `list-sessions`, `list-windows`, `list-panes`, `-F` formats | `wv ls` (sessions only) | PR 6 | |
 | `display-message -p` | — | yes | Literal text; `#{...}` variables in PR 6 |
@@ -81,6 +85,27 @@ means the current one.
 Scrollback and copy-mode are **not planned**. `capture-pane` will read the
 visible screen only, the mouse wheel is forwarded to the pane rather than
 scrolling weave's own history, and `history-limit` is accepted but inert.
+
+## Windows are nine named slots
+
+weave has nine windows, numbered 1–9, addressed by `Alt+1`–`Alt+9` and `-t :N`.
+They are fixed slots rather than tmux's dynamic list, which is a deliberate
+divergence: `Alt+N` reaching window N is worth more here than an unbounded
+window count, and it keeps indices stable for the life of a session.
+
+What follows from that:
+
+- A window's **index is its identity**. There is no separate `@id` space, and
+  no `move-window` or renumbering, because nothing ever shifts.
+- **Names work as they do in tmux.** A window with no name takes it from the
+  focused pane's OSC title, so a window running `vim` labels itself `vim`.
+  `rename-window` pins the name and stops it following the title. Either way
+  `-t :build` finds it, and the status bar shows `3:build`.
+- `new-window` takes the **lowest-numbered free window**, or the one `-t`
+  names if it is free. With all nine in use it fails and says so.
+- `select-window` **fails** on a window that does not exist, as in tmux. The
+  `workspace-N` aliases behind `Alt+N` create one instead — that is how weave
+  has always behaved and the keybindings keep it.
 
 ## Panes inherit where you are
 

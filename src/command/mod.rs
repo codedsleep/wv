@@ -34,8 +34,30 @@ pub enum Command {
     },
     /// Move focus.
     SelectPane { selector: PaneSelector },
-    /// Switch to another window (today: a workspace).
-    SelectWindow { target: Target },
+    /// Switch to another window.
+    SelectWindow {
+        target: Target,
+        /// Create the window if it does not exist yet.
+        ///
+        /// tmux's `select-window` fails on a missing window, and so does ours.
+        /// The `workspace-N` aliases and the `Alt+N` bindings set this, which
+        /// is what keeps "jump to window 5, making it if need be" working the
+        /// way it always has in weave.
+        create: bool,
+    },
+    /// Create a window and switch to it.
+    NewWindow {
+        /// Where to put it. `None` means the lowest-numbered free window.
+        target: Target,
+        name: Option<String>,
+        command: Option<SpawnCommand>,
+        /// `-d`: make it but stay where you are.
+        detached: bool,
+    },
+    /// Close a window and everything in it.
+    KillWindow { target: Target },
+    /// Name a window, pinning it against automatic renaming.
+    RenameWindow { target: Target, name: String },
     /// Close a pane.
     KillPane { target: Target },
     /// Leave the session running and disconnect the client.
@@ -135,6 +157,9 @@ pub const COMMAND_NAMES: &[&str] = &[
     "display-message",
     "send-keys",
     "respawn-pane",
+    "new-window",
+    "kill-window",
+    "rename-window",
 ];
 
 /// The pre-target weave names, still accepted.
@@ -178,6 +203,15 @@ impl Command {
             "focus-down" => parse_select_pane(name, rest, Some(Direction::Down)),
 
             "select-window" | "selectw" => parse_select_window(name, rest, None),
+            "next-window" | "nextw" => Ok(relative_window(WindowRef::Next)),
+            "previous-window" | "prevw" => Ok(relative_window(WindowRef::Previous)),
+            "last-window" => Ok(relative_window(WindowRef::Last)),
+
+            "new-window" | "neww" => parse_new_window(name, rest),
+            "kill-window" | "killw" => Ok(Self::KillWindow {
+                target: parse_target_only(name, rest, TargetKind::Window)?,
+            }),
+            "rename-window" | "renamew" => parse_rename_window(name, rest),
 
             "kill-pane" | "killp" | "close" => Ok(Self::KillPane {
                 target: parse_target_only(name, rest, TargetKind::Pane)?,
@@ -484,6 +518,92 @@ fn parse_select_window(
 
     Ok(Command::SelectWindow {
         target: target.unwrap_or_default(),
+        create: false,
+    })
+}
+
+fn relative_window(window: WindowRef) -> Command {
+    Command::SelectWindow {
+        target: window_target(window),
+        create: false,
+    }
+}
+
+fn parse_new_window(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut target = None;
+    let mut window_name = None;
+    let mut detached = false;
+    let mut spawn = SpawnCommand::default();
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-t" => target = Some(next_target(name, &mut args, "-t", TargetKind::Window)?),
+            "-n" => window_name = Some(next_value(name, &mut args, "-n")?),
+            "-c" => spawn.cwd = Some(PathBuf::from(next_value(name, &mut args, "-c")?)),
+            "-d" => detached = true,
+            "-a" | "-b" => return Err(unsupported(name, arg, "not planned: windows are fixed slots, so there is nothing to insert before or after")),
+            "-k" => return Err(unsupported(name, arg, "PR 9: replacing an existing window")),
+            "-P" | "-F" => return Err(unsupported(name, arg, "PR 6: format strings")),
+            "-S" => return Err(unsupported(name, arg, "PR 9: select if the window already exists")),
+            "--" => {
+                spawn.argv.extend(args.cloned());
+                break;
+            }
+            other if other.starts_with('-') => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                spawn.argv.push(other.to_owned());
+                spawn.argv.extend(args.cloned());
+                break;
+            }
+        }
+    }
+
+    Ok(Command::NewWindow {
+        target: target.unwrap_or_default(),
+        name: window_name,
+        command: (!spawn.is_empty()).then_some(spawn),
+        detached,
+    })
+}
+
+fn parse_rename_window(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut target = None;
+    let mut new_name = None;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-t" => target = Some(next_target(name, &mut args, "-t", TargetKind::Window)?),
+            other if other.starts_with('-') => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                if new_name.replace(other.to_owned()).is_some() {
+                    return Err(CommandError::UnexpectedArgument {
+                        command: name.to_owned(),
+                        argument: other.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    let new_name = new_name.ok_or_else(|| CommandError::MissingValue {
+        flag: "a new window name".to_owned(),
+    })?;
+
+    Ok(Command::RenameWindow {
+        target: target.unwrap_or_default(),
+        name: new_name,
     })
 }
 
@@ -556,6 +676,8 @@ fn parse_workspace_alias(name: &str) -> Option<Command> {
             window: Some(WindowRef::Index(index)),
             ..Target::default()
         },
+        // `Alt+3` has always opened window 3 whether or not it existed.
+        create: true,
     })
 }
 
@@ -795,6 +917,7 @@ mod tests {
                     window: Some(WindowRef::Index(3)),
                     ..Target::default()
                 },
+                create: true,
             }
         );
         assert!(Command::parse_str("workspace-0").is_err());
@@ -815,6 +938,7 @@ mod tests {
                         window: Some(window),
                         ..Target::default()
                     },
+                    create: false,
                 }
             );
         }

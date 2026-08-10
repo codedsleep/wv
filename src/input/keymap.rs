@@ -93,6 +93,8 @@ fn select_window(index: u32) -> Command {
             window: Some(WindowRef::Index(index)),
             ..Target::default()
         },
+        // Alt+N opens window N whether or not anything is in it yet.
+        create: true,
     }
 }
 

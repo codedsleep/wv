@@ -257,6 +257,7 @@ mod tests {
                         window: Some(WindowRef::Index(3)),
                         ..Target::default()
                     },
+                    create: false,
                 },
             },
             ClientToServer::Detach,

@@ -148,10 +148,12 @@ impl Target {
             validate_session_name(name)?;
         }
 
-        // With a session given, everything after `:` addresses a window even
-        // when the command wanted a pane, matching tmux's reading of `dev:1`.
-        let effective_kind = if session.is_some() && kind == TargetKind::Session {
-            TargetKind::Session
+        // A `:` puts everything after it in window position, so `:1` and
+        // `dev:1` name window 1 even for a command that wanted a pane. Without
+        // the colon the command's own kind decides, so `kill-pane -t 1` still
+        // means pane 1.
+        let effective_kind = if value.contains(':') {
+            TargetKind::Window
         } else {
             kind
         };
@@ -303,6 +305,25 @@ mod tests {
 
     fn window(value: &str) -> Target {
         Target::parse(value, TargetKind::Window).expect("target parses")
+    }
+
+    /// A colon puts what follows in window position. Without this, a pane
+    /// command reads `:1` as pane 1 and quietly acts on the wrong thing.
+    #[test]
+    fn a_colon_forces_the_rest_into_window_position() {
+        let target = pane(":1");
+        assert_eq!(target.window, Some(WindowRef::Index(1)));
+        assert_eq!(target.pane, None);
+
+        let target = pane("dev:build");
+        assert_eq!(target.session.as_deref(), Some("dev"));
+        assert_eq!(target.window, Some(WindowRef::Name("build".to_owned())));
+        assert_eq!(target.pane, None);
+
+        // The pane half still parses when it is spelled out.
+        let target = pane(":1.2");
+        assert_eq!(target.window, Some(WindowRef::Index(1)));
+        assert_eq!(target.pane, Some(PaneRef::Index(2)));
     }
 
     #[test]

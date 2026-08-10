@@ -48,8 +48,16 @@ type BoxedBackend = Box<dyn PaneBackend>;
 /// Workspaces addressable with `Alt+1` .. `Alt+9`.
 pub const WORKSPACE_COUNT: usize = 9;
 
+/// What a window is called before anything names it.
+const DEFAULT_WINDOW_NAME: &str = "shell";
+
 #[derive(Default)]
 struct Workspace {
+    /// The name `rename-window` gave it, if any.
+    ///
+    /// `None` means the name is automatic: it follows the focused pane's OSC
+    /// title, which is tmux's `automatic-rename`. Naming a window pins it.
+    name: Option<String>,
     root: Option<Node>,
     focused: Option<PaneId>,
     /// The pane focused before the current one, for `select-pane -l` / `{last}`.
@@ -514,6 +522,7 @@ impl App {
         let mut workspaces: Vec<Workspace> =
             (0..WORKSPACE_COUNT).map(|_| Workspace::default()).collect();
         workspaces[0] = Workspace {
+            name: None,
             root,
             focused,
             last_focused: None,
@@ -649,12 +658,13 @@ impl App {
             }),
             WindowRef::Start => Ok(occupied.first().copied().unwrap_or(self.current_workspace)),
             WindowRef::End => Ok(occupied.last().copied().unwrap_or(self.current_workspace)),
-            // Workspaces are numbered slots, not named objects, until PR 4.
+            WindowRef::Name(name) => self.window_by_name(name).ok_or_else(|| {
+                Rejected::new(format!("no window named `{name}`"))
+            }),
+            // Windows are fixed slots, so an index already identifies one for
+            // life; there is no separate id space to address.
             WindowRef::Id(id) => Err(Rejected::new(format!(
-                "window ids are not available yet (`@{id}`); address a workspace by index, like `:2`"
-            ))),
-            WindowRef::Name(name) => Err(Rejected::new(format!(
-                "window names are not available yet (`:{name}`); address a workspace by index, like `:2`"
+                "weave has no window ids (`@{id}`); a window's index is stable, so use `:{id}`"
             ))),
         }
     }
@@ -755,6 +765,7 @@ impl App {
                 }
                 Some(chrome::WorkspaceIndicator {
                     number: u8::try_from(idx + 1).unwrap_or(u8::MAX),
+                    name: self.window_name(idx),
                     is_current,
                     pane_count: ws.pane_count(),
                 })
@@ -762,10 +773,146 @@ impl App {
             .collect()
     }
 
+    /// What window `index` is called.
+    ///
+    /// A renamed window keeps its name. Otherwise the name follows the focused
+    /// pane's OSC title, so a window running `vim` labels itself `vim` without
+    /// anyone having to say so — tmux's `automatic-rename`.
+    fn window_name(&self, index: usize) -> String {
+        let Some(workspace) = self.workspaces.get(index) else {
+            return DEFAULT_WINDOW_NAME.to_owned();
+        };
+
+        if let Some(name) = workspace.name.as_deref() {
+            return name.to_owned();
+        }
+
+        workspace
+            .focused
+            .and_then(|pane| self.pane(pane))
+            .and_then(Pane::title)
+            .map_or_else(|| DEFAULT_WINDOW_NAME.to_owned(), str::to_owned)
+    }
+
+    /// The window a name refers to, searching current-first so an ambiguous
+    /// name resolves to the one you are looking at.
+    fn window_by_name(&self, name: &str) -> Option<usize> {
+        let matches = |index: usize| self.window_name(index) == name;
+
+        if matches(self.current_workspace) {
+            return Some(self.current_workspace);
+        }
+
+        (0..WORKSPACE_COUNT).find(|&index| {
+            // An empty window has no panes and no identity worth matching.
+            !self.workspaces[index].is_empty() && matches(index)
+        })
+    }
+
+    /// The lowest-numbered window with nothing in it, for `new-window`.
+    fn first_free_window(&self) -> Option<usize> {
+        (0..WORKSPACE_COUNT).find(|&index| self.workspaces[index].is_empty())
+    }
+
     /// Show workspace `target`, given as a zero-based index.
     ///
     /// Targets are resolved to an index before they get here, so an
     /// out-of-range value is a bug rather than a user error.
+    /// Create a window and, unless `detached`, switch to it.
+    ///
+    /// With no `-t`, the window goes in the lowest-numbered free slot, which
+    /// is how tmux picks an index too.
+    async fn new_window(
+        &mut self,
+        target: &Target,
+        name: Option<String>,
+        command: Option<&SpawnCommand>,
+        detached: bool,
+    ) -> Result<(), ExecuteError> {
+        let workspace = if target.window.is_some() {
+            let requested = self.resolve_window(target)?;
+            if !self.workspaces[requested].is_empty() {
+                return Err(Rejected::new(format!(
+                    "window {} already exists; `kill-window` frees it first",
+                    requested + 1
+                ))
+                .into());
+            }
+            requested
+        } else {
+            self.first_free_window().ok_or_else(|| {
+                Rejected::new(format!("all {WORKSPACE_COUNT} windows are in use"))
+            })?
+        };
+
+        // Spawning happens against the outgoing window, so the new pane
+        // inherits the directory you were working in.
+        let pane_id = self.spawn_pane(false, command).await?;
+        let previous = self.current_workspace;
+        self.current_workspace = workspace;
+        let root_rect = self.root_rect();
+        let ws = &mut self.workspaces[workspace];
+        ws.name = name;
+        ws.root = Some(Node::Leaf {
+            pane: pane_id,
+            rect_current: FRect::from(root_rect),
+            rect_target: root_rect,
+        });
+        ws.set_focus(Some(pane_id));
+
+        // `switch_workspace` does the animation snapshotting and PTY resizing,
+        // so route through it rather than repeating that here.
+        self.current_workspace = previous;
+        if detached {
+            self.resize_pane(pane_id, root_rect.w, root_rect.h).await?;
+            if let Some(pane) = self.pane_mut(pane_id) {
+                pane.resize(root_rect.w, root_rect.h);
+            }
+        } else {
+            self.switch_workspace(workspace).await?;
+        }
+        self.dirty = true;
+
+        Ok(())
+    }
+
+    /// Close a window and every pane in it.
+    ///
+    /// Unlike `kill-pane` this does not animate: the whole window is going
+    /// away, so there is nothing left on screen to animate into.
+    async fn kill_window(&mut self, workspace: usize) -> Result<(), ExecuteError> {
+        if self.workspaces[workspace].is_empty() {
+            return Err(Rejected::new(format!("window {} is empty", workspace + 1)).into());
+        }
+
+        for pane in self.workspaces[workspace].leaf_panes() {
+            let _ = self.backend.kill(pane).await;
+            self.remove_pane(pane);
+        }
+
+        let ws = &mut self.workspaces[workspace];
+        ws.root = None;
+        ws.set_focus(None);
+        ws.last_focused = None;
+        ws.closing.clear();
+        ws.name = None;
+
+        if self.workspaces.iter().all(Workspace::is_empty) {
+            // The last window is gone, so there is no session left to show.
+            self.exit = ExitState::Quit;
+        } else if workspace == self.current_workspace {
+            let next = self
+                .workspaces
+                .iter()
+                .position(|ws| !ws.is_empty())
+                .unwrap_or(0);
+            self.switch_workspace(next).await?;
+        }
+        self.dirty = true;
+
+        Ok(())
+    }
+
     async fn switch_workspace(&mut self, target: usize) -> anyhow::Result<()> {
         if target >= WORKSPACE_COUNT || target == self.current_workspace {
             return Ok(());
@@ -1049,9 +1196,34 @@ impl App {
                 self.respawn_pane(pane, kill, command.as_ref()).await?;
             }
             Command::SelectPane { selector } => self.select_pane(selector).await?,
-            Command::SelectWindow { target } => {
+            Command::SelectWindow { target, create } => {
                 let workspace = self.resolve_window(&target)?;
+                if !create && self.workspaces[workspace].is_empty() {
+                    return Err(Rejected::new(format!(
+                        "window {} does not exist; `new-window` makes one",
+                        workspace + 1
+                    ))
+                    .into());
+                }
                 self.switch_workspace(workspace).await?;
+            }
+            Command::NewWindow {
+                target,
+                name,
+                command,
+                detached,
+            } => {
+                self.new_window(&target, name, command.as_ref(), detached)
+                    .await?;
+            }
+            Command::KillWindow { target } => {
+                let workspace = self.resolve_window(&target)?;
+                self.kill_window(workspace).await?;
+            }
+            Command::RenameWindow { target, name } => {
+                let workspace = self.resolve_window(&target)?;
+                self.workspaces[workspace].name = Some(name);
+                self.dirty = true;
             }
             Command::KillPane { target } => {
                 let (workspace, pane) = self.resolve_pane(&target)?;
@@ -1884,6 +2056,10 @@ impl App {
         self.panes.iter().map(Pane::id).collect()
     }
 
+    fn pane(&self, id: PaneId) -> Option<&Pane> {
+        self.panes.iter().find(|pane| pane.id() == id)
+    }
+
     fn pane_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
         self.panes.iter_mut().find(|pane| pane.id() == id)
     }
@@ -1923,6 +2099,7 @@ impl App {
         let mut workspaces: Vec<Workspace> =
             (0..WORKSPACE_COUNT).map(|_| Workspace::default()).collect();
         workspaces[0] = Workspace {
+            name: None,
             root: Some(Node::Leaf {
                 pane: pane_id,
                 rect_current: FRect::from(root_rect),
@@ -2473,6 +2650,144 @@ mod tests {
 
         assert!(!result.is_ok());
         assert!(handle.killed().is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_window_takes_the_lowest_free_slot_and_switches_to_it() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("new-window -n build"))
+            .await
+            .expect("new-window succeeds");
+
+        assert_eq!(app.current_workspace, 1, "window 1 was taken");
+        assert_eq!(app.window_name(1), "build");
+        assert_eq!(app.current().leaf_panes(), vec![PaneId(2)]);
+    }
+
+    #[tokio::test]
+    async fn new_window_d_stays_where_it_is() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("new-window -d -n build"))
+            .await
+            .expect("new-window succeeds");
+
+        assert_eq!(app.current_workspace, 0);
+        assert_eq!(app.window_name(1), "build");
+        assert!(!app.workspaces[1].is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_window_runs_a_command_and_refuses_an_occupied_slot() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("new-window -d -t :2 -- htop"))
+            .await
+            .expect("new-window succeeds");
+        assert_eq!(handle.spawned().last().expect("spawned").program, "htop");
+
+        let result = app
+            .execute_request(command("new-window -t :2"))
+            .await
+            .expect("the request completes");
+        assert!(!result.is_ok(), "an occupied window must not be reused");
+    }
+
+    /// This is what the whole PR is for: addressing a window by name.
+    #[tokio::test]
+    async fn a_window_can_be_addressed_by_name() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("new-window -d -n build"))
+            .await
+            .expect("new-window succeeds");
+        app.execute(command("select-window -t :build"))
+            .await
+            .expect("select by name succeeds");
+
+        assert_eq!(app.current_workspace, 1);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_window_name_is_rejected() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        let result = app
+            .execute_request(command("select-window -t :nope"))
+            .await
+            .expect("the request completes");
+
+        assert!(!result.is_ok());
+        assert_eq!(app.current_workspace, 0);
+    }
+
+    #[tokio::test]
+    async fn rename_window_pins_the_name_against_pane_titles() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        // A window with no name follows its focused pane's title.
+        assert_eq!(app.window_name(0), "shell");
+        app.execute(command("rename-window editor"))
+            .await
+            .expect("rename succeeds");
+
+        assert_eq!(app.window_name(0), "editor");
+        assert_eq!(app.workspaces[0].name.as_deref(), Some("editor"));
+    }
+
+    /// `select-window` fails on a window that is not there, as tmux does,
+    /// while the `workspace-N` alias behind `Alt+N` still creates one.
+    #[tokio::test]
+    async fn select_window_does_not_create_but_the_alias_does() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        let result = app
+            .execute_request(command("select-window -t :4"))
+            .await
+            .expect("the request completes");
+        assert!(!result.is_ok());
+        assert_eq!(app.current_workspace, 0);
+
+        app.execute(command("workspace-4"))
+            .await
+            .expect("the alias creates");
+        assert_eq!(app.current_workspace, 3);
+    }
+
+    #[tokio::test]
+    async fn kill_window_closes_every_pane_in_it() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("new-window -d -n build"))
+            .await
+            .expect("new-window succeeds");
+        app.execute(command("kill-window -t :build"))
+            .await
+            .expect("kill-window succeeds");
+
+        assert!(app.workspaces[1].is_empty());
+        assert!(handle.killed().contains(&PaneId(2)));
+        assert_eq!(app.current_workspace, 0, "we were never in it");
+        assert_eq!(app.exit, ExitState::Running);
+    }
+
+    #[tokio::test]
+    async fn killing_the_last_window_ends_the_session() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("kill-window")).await.expect("kill succeeds");
+
+        assert_eq!(app.exit, ExitState::Quit);
     }
 
     /// A waiting caller gets the command's output, not just "it ran".
