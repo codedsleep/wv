@@ -78,7 +78,11 @@ pub fn generate_session_name() -> String {
         .as_nanos()
         .hash(&mut hasher);
 
-    format!("{SESSION_PREFIX}{:08x}", hasher.finish() as u32)
+    // The low 32 bits are plenty for a human-typeable name; a collision only
+    // matters if the socket is already live, which the server checks on bind.
+    let short = u32::try_from(hasher.finish() & u64::from(u32::MAX)).unwrap_or(u32::MAX);
+
+    format!("{SESSION_PREFIX}{short:08x}")
 }
 
 /// A session socket found on disk.

@@ -367,14 +367,14 @@ impl LaunchArgs {
 }
 
 impl App {
-    pub async fn new(width: u16, height: u16, args: Args) -> anyhow::Result<Self> {
-        Ok(Self::from_backend(
+    pub fn new(width: u16, height: u16, args: &Args) -> Self {
+        Self::from_backend(
             width,
             height,
             args.debug,
             build_backend(),
             Vec::new(),
-        ))
+        )
     }
 
     /// Run this app as a session server: no client yet, socket events routed
@@ -617,7 +617,7 @@ impl App {
                     }
                 }
                 Some(event) = self.event_rx.recv() => {
-                    self.handle_backend_event(event).await?;
+                    self.handle_backend_event(event);
                 }
                 Some(event) = next_session_event(&mut self.session_rx) => {
                     self.handle_session_event(event).await?;
@@ -701,7 +701,7 @@ impl App {
             Command::FocusUp => self.focus(Direction::Up),
             Command::FocusDown => self.focus(Direction::Down),
             Command::Close => self.close_focused().await?,
-            Command::Detach => self.detach().await?,
+            Command::Detach => self.detach(),
             Command::Quit => self.exit = ExitState::Quit,
             Command::SwitchWorkspace(n) => self.switch_workspace(n).await?,
         }
@@ -735,7 +735,7 @@ impl App {
         Ok(pane_id)
     }
 
-    async fn detach(&mut self) -> anyhow::Result<()> {
+    fn detach(&mut self) {
         if self.session_rx.is_some() {
             // Detaching is purely a rendering concern: drop the client and
             // keep every pane running.
@@ -744,8 +744,6 @@ impl App {
             tracing::warn!("detach requires a weave session server; quitting");
             self.exit = ExitState::Quit;
         }
-
-        Ok(())
     }
 
     /// Take over rendering for a newly attached client.
@@ -1027,7 +1025,7 @@ impl App {
         Ok(())
     }
 
-    async fn handle_backend_event(&mut self, event: BackendEvent) -> anyhow::Result<()> {
+    fn handle_backend_event(&mut self, event: BackendEvent) {
         match event {
             BackendEvent::PaneDied(id) => {
                 tracing::info!("pane died: {id:?}");
@@ -1058,8 +1056,6 @@ impl App {
                 self.exit = ExitState::Quit;
             }
         }
-
-        Ok(())
     }
 
     async fn handle_input(&mut self, event: Option<io::Result<Event>>) -> anyhow::Result<()> {
@@ -1591,7 +1587,7 @@ mod tests {
     use crate::anim::tween::Easing;
     use crate::backend::{PaneBackend, PaneCommand, PaneId};
     use crate::command::Command;
-    use crate::layout::geometry::{FRect, Rect, Split};
+    use crate::layout::geometry::{FRect, Split};
     use crate::layout::tree::Node;
     use tokio::time::Duration;
 
@@ -1937,7 +1933,7 @@ mod tests {
 
     #[test]
     fn frame_interval_uses_configured_fps() {
-        assert_eq!(frame_interval(160), Duration::from_nanos(6_250_000));
+        assert_eq!(frame_interval(160), Duration::from_micros(6_250));
     }
 
     #[test]

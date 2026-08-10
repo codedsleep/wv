@@ -91,7 +91,8 @@ pub fn encode<T: Serialize>(message: &T) -> anyhow::Result<Vec<u8>> {
         );
     }
 
-    let length = u32::try_from(payload.len()).expect("payload length checked against frame limit");
+    let length = u32::try_from(payload.len())
+        .context("session message length does not fit a frame prefix")?;
     let mut frame = Vec::with_capacity(LENGTH_PREFIX_BYTES + payload.len());
     frame.extend_from_slice(&length.to_le_bytes());
     frame.extend_from_slice(&payload);

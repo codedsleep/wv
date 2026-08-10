@@ -35,7 +35,7 @@ async fn session_survives_detach_and_serves_one_client_at_a_time() -> anyhow::Re
         session_name: Some(name.to_owned()),
         ..Args::default()
     };
-    let app = App::new(80, 24, args).await?.into_session(session_rx);
+    let app = App::new(80, 24, &args).into_session(session_rx);
     let session = tokio::spawn(async move { app.run().await });
 
     // Attach, and confirm the server paints the screen for its new client.
@@ -129,11 +129,9 @@ async fn expect_message(stream: &mut UnixStream) -> anyhow::Result<ServerToClien
 
 /// Read until a rendered frame arrives, returning its bytes.
 async fn next_frame(stream: &mut UnixStream) -> anyhow::Result<Vec<u8>> {
-    loop {
-        match expect_message(stream).await? {
-            ServerToClient::Frame(bytes) => return Ok(bytes),
-            other => anyhow::bail!("expected a frame, got {other:?}"),
-        }
+    match expect_message(stream).await? {
+        ServerToClient::Frame(bytes) => Ok(bytes),
+        other => anyhow::bail!("expected a frame, got {other:?}"),
     }
 }
 

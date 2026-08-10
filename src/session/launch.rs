@@ -90,7 +90,7 @@ pub async fn run_server(args: &Args) -> anyhow::Result<()> {
     let (session_rx, _socket_guard) = server.start();
 
     // Size is provisional until a client attaches and reports its terminal.
-    let app = App::new(80, 24, args.clone()).await?.into_session(session_rx);
+    let app = App::new(80, 24, args).into_session(session_rx);
     app.run().await?;
     tracing::info!("session {name} shut down");
 
