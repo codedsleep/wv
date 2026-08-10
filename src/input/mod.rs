@@ -3,6 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 pub mod keymap;
+pub mod keys;
 
 pub fn encode(event: &KeyEvent) -> Option<Vec<u8>> {
     if matches!(event.kind, KeyEventKind::Release) {

@@ -155,11 +155,13 @@ exec wv attach main                           # ... then take it over interactiv
 
 Commands use tmux's names and flags, including `-t session:window.pane` targets:
 
-- `split-window [-h|-v] [-t target]`
+- `split-window [-h|-v] [-d] [-c dir] [-t target] [command...]`
 - `select-pane [-L|-R|-U|-D] [-l] [-t target]`
 - `select-window [-t target] [-n|-p|-l]`
 - `kill-pane [-t target]`, `detach-client`, `kill-session`
 - `display-message -p [-t target] [text]`
+- `send-keys [-l] [-t target] <keys...>`
+- `respawn-pane [-k] [-c dir] [-t target] [command...]`
 
 Targets accept pane ids (`%1`), pane indices (`.0`), window indices (`:2`), and the
 relative forms `+`, `-`, `!`, `{last}`, `{top}`, `{bottom}`, `{left}`, `{right}`.
@@ -167,6 +169,15 @@ relative forms `+`, `-`, `!`, `{last}`, `{top}`, `{bottom}`, `{left}`, `{right}`
 The older weave names still work: `split-h`, `split-v`, `focus-left`, `focus-right`,
 `focus-up`, `focus-down`, `close`, `detach`, `quit`, and `workspace-1` .. `workspace-9`.
 With no `--session`, the most recent live session is used.
+
+New panes open in the focused pane's current directory, and `send-keys` puts
+exactly the bytes on the PTY that pressing the keys would:
+
+```sh
+wv exec --session main split-window -h -d -- npm run dev
+wv exec --session main send-keys -t %1 'cargo test' Enter
+wv exec --session main send-keys -t %2 C-c
+```
 
 `wv exec` reports what the command produced: output on stdout, failures on
 stderr with a non-zero exit, so a script can branch on it.

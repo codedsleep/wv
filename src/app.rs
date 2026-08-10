@@ -16,7 +16,7 @@ use crate::anim::tween::Easing;
 use crate::backend::native::NativeBackend;
 use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::target::{Extreme, PaneRef, WindowRef};
-use crate::command::{Command, PaneSelector, Target};
+use crate::command::{Command, PaneSelector, SpawnCommand, Target};
 use crate::config::{Config, ThemeConfig};
 use crate::input;
 use crate::input::keymap::Keymap;
@@ -1020,10 +1020,33 @@ impl App {
     /// `display-message -p` has output today.
     async fn execute_now(&mut self, cmd: Command) -> Result<String, ExecuteError> {
         match cmd {
-            Command::SplitWindow { split, target } => {
+            Command::SplitWindow {
+                split,
+                target,
+                command,
+                detached,
+            } => {
                 let (workspace, pane) = self.resolve_pane(&target)?;
                 self.switch_workspace(workspace).await?;
-                self.split_pane(pane, split).await?;
+                self.split_pane(pane, split, command.as_ref(), detached)
+                    .await?;
+            }
+            Command::SendKeys {
+                target,
+                keys,
+                literal,
+            } => {
+                let (_, pane) = self.resolve_pane(&target)?;
+                self.send_keys(pane, &keys, literal).await?;
+            }
+            Command::RespawnPane {
+                target,
+                kill,
+                command,
+            } => {
+                let (workspace, pane) = self.resolve_pane(&target)?;
+                self.switch_workspace(workspace).await?;
+                self.respawn_pane(pane, kill, command.as_ref()).await?;
             }
             Command::SelectPane { selector } => self.select_pane(selector).await?,
             Command::SelectWindow { target } => {
@@ -1091,15 +1114,35 @@ impl App {
     }
 
     async fn spawn_shell_pane(&mut self, resize_immediately: bool) -> anyhow::Result<PaneId> {
-        let mut cmd = default_pane_command();
-        if let Some(focused) = self.current().focused {
-            match self.backend.pane_cwd(focused).await {
-                Ok(Some(cwd)) => cmd.cwd = Some(cwd),
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::debug!(?error, ?focused, "failed to query pane cwd before spawn");
+        self.spawn_pane(resize_immediately, None).await
+    }
+
+    /// Spawn a pane process, defaulting to the user's shell.
+    ///
+    /// `spec` is what `split-window`'s `-c` and trailing command line said. A
+    /// pane with no explicit cwd inherits the focused pane's, so a new split
+    /// opens where you were working.
+    async fn spawn_pane(
+        &mut self,
+        resize_immediately: bool,
+        spec: Option<&SpawnCommand>,
+    ) -> anyhow::Result<PaneId> {
+        let mut cmd = pane_command_for(spec);
+
+        if cmd.cwd.is_none() {
+            if let Some(focused) = self.current().focused {
+                match self.backend.pane_cwd(focused).await {
+                    Ok(Some(cwd)) => cmd.cwd = Some(cwd),
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::debug!(?error, ?focused, "failed to query pane cwd before spawn");
+                    }
                 }
             }
+        }
+        // Last resort: the directory the session server itself started in.
+        if cmd.cwd.is_none() {
+            cmd.cwd = std::env::current_dir().ok();
         }
 
         let pane_id = self.backend.spawn(cmd).await?;
@@ -1244,27 +1287,144 @@ impl App {
         Ok(())
     }
 
-    /// Split `pane` in two, spawning a shell in the new half.
+    /// Split `pane` in two, spawning a process in the new half.
     ///
     /// The pane is passed in rather than read from the workspace so `-t` can
-    /// split something other than the focused pane.
-    async fn split_pane(&mut self, pane: PaneId, split: Split) -> anyhow::Result<()> {
+    /// split something other than the focused pane. `detached` is tmux's `-d`:
+    /// make the pane but leave focus alone.
+    async fn split_pane(
+        &mut self,
+        pane: PaneId,
+        split: Split,
+        command: Option<&SpawnCommand>,
+        detached: bool,
+    ) -> anyhow::Result<()> {
         let focused = pane;
         let Some(old_parent_rect) = self.leaf_rect_target(focused) else {
             return Ok(());
         };
-        let new_pane = self.spawn_shell_pane(false).await?;
+        let new_pane = self.spawn_pane(false, command).await?;
 
         let ws = self.current_mut();
         if let Some(root) = ws.root.as_mut() {
             root.split_focused(focused, split, new_pane);
-            ws.set_focus(Some(new_pane));
+            if !detached {
+                ws.set_focus(Some(new_pane));
+            }
             self.recompute_layout();
             self.start_open_tweens(focused, new_pane, split, old_parent_rect);
             self.dirty = true;
         }
 
         Ok(())
+    }
+
+    /// Type `keys` into `pane`, producing exactly the bytes the keyboard would.
+    ///
+    /// Each argument is a key name when it parses as one and literal text
+    /// otherwise, so `send-keys 'npm run dev' Enter` reads the way it looks.
+    /// `-l` forces every argument to be literal.
+    async fn send_keys(
+        &mut self,
+        pane: PaneId,
+        keys: &[String],
+        literal: bool,
+    ) -> Result<(), ExecuteError> {
+        let mut bytes = Vec::new();
+
+        for key in keys {
+            match (literal, crate::input::keys::parse_key_name(key)) {
+                (false, Some(event)) => match crate::input::encode(&event) {
+                    Some(encoded) => bytes.extend(encoded),
+                    None => {
+                        return Err(Rejected::new(format!(
+                            "key `{key}` has no terminal encoding"
+                        ))
+                        .into())
+                    }
+                },
+                _ => bytes.extend(key.as_bytes()),
+            }
+        }
+
+        self.backend
+            .write(pane, &bytes)
+            .await
+            .with_context(|| format!("failed to send keys to pane {pane:?}"))?;
+
+        Ok(())
+    }
+
+    /// Restart a pane's process, keeping the pane where it is in the layout.
+    ///
+    /// The pane keeps its `%N` and its rectangle; only the process behind it
+    /// is replaced, so a respawn does not animate.
+    async fn respawn_pane(
+        &mut self,
+        pane: PaneId,
+        kill: bool,
+        command: Option<&SpawnCommand>,
+    ) -> Result<(), ExecuteError> {
+        if !kill {
+            // tmux refuses to respawn a pane whose process is still alive
+            // unless `-k` says to kill it first.
+            return Err(Rejected::new(
+                "pane is still running; pass `-k` to kill it first".to_owned(),
+            )
+            .into());
+        }
+
+        let number = self.pane_number(pane);
+        let cwd = self.backend.pane_cwd(pane).await.ok().flatten();
+        self.backend
+            .kill(pane)
+            .await
+            .with_context(|| format!("failed to kill pane {pane:?} before respawning"))?;
+
+        // Inherit the dead pane's directory unless the caller named one.
+        let mut spec = command.cloned().unwrap_or_default();
+        if spec.cwd.is_none() {
+            spec.cwd = cwd;
+        }
+
+        let replacement = self.spawn_pane(false, Some(&spec)).await?;
+        self.replace_pane(pane, replacement);
+        if let Some(number) = number {
+            // The pane the user addressed is still the pane they see, so it
+            // keeps its number rather than appearing to have been replaced.
+            self.pane_numbers.remove(&replacement);
+            self.pane_numbers.insert(replacement, number);
+        }
+        self.dirty = true;
+
+        Ok(())
+    }
+
+    /// Swap `replacement` in wherever `pane` sat: layout, focus and panes list.
+    fn replace_pane(&mut self, pane: PaneId, replacement: PaneId) {
+        let rect = self.leaf_rect_target(pane);
+
+        for workspace in &mut self.workspaces {
+            if let Some(root) = workspace.root.as_mut() {
+                if let Some(Node::Leaf { pane: leaf, .. }) = root.find_leaf_mut(pane) {
+                    *leaf = replacement;
+                }
+            }
+            if workspace.focused == Some(pane) {
+                workspace.focused = Some(replacement);
+            }
+            if workspace.last_focused == Some(pane) {
+                workspace.last_focused = Some(replacement);
+            }
+        }
+
+        self.panes.retain(|existing| existing.id() != pane);
+        self.pane_numbers.remove(&pane);
+        let (cols, rows) = rect.map_or((self.back.width, self.back.height), |rect| {
+            (rect.w, rect.h)
+        });
+        self.panes.push(Pane::new(replacement, cols, rows));
+        self.recompute_layout();
     }
 
     fn start_open_tweens(
@@ -1837,12 +1997,26 @@ async fn next_session_event(rx: &mut Option<mpsc::Receiver<SessionEvent>>) -> Op
     }
 }
 
-fn default_pane_command() -> PaneCommand {
+/// Build the process to run in a new pane.
+///
+/// With no command the pane runs the user's login shell. With one, the first
+/// word is the program and the rest are its arguments — the caller's shell has
+/// already done the quoting, so weave does no word splitting of its own.
+fn pane_command_for(spec: Option<&SpawnCommand>) -> PaneCommand {
+    let default_shell = || std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+
+    let (program, args) = match spec.map(|spec| spec.argv.as_slice()) {
+        Some([program, args @ ..]) => (program.clone(), args.to_vec()),
+        _ => (default_shell(), Vec::new()),
+    };
+
     PaneCommand {
-        program: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned()),
-        args: Vec::new(),
+        program,
+        args,
         env: Vec::new(),
-        cwd: std::env::current_dir().ok(),
+        // Left as given: `None` means "wherever the focused pane is", which
+        // only `spawn_pane` can work out.
+        cwd: spec.and_then(|spec| spec.cwd.clone()),
     }
 }
 
@@ -2049,14 +2223,23 @@ mod tests {
     use crate::layout::tree::Node;
     use tokio::time::Duration;
 
+    /// Every write the app made, in order, tagged with its pane.
+    type WriteLog = Arc<Mutex<Vec<(PaneId, Vec<u8>)>>>;
+
     struct MockBackend {
         next_id: PaneId,
         resized: Arc<Mutex<Vec<(PaneId, u16, u16)>>>,
+        spawned: Arc<Mutex<Vec<PaneCommand>>>,
+        written: WriteLog,
+        killed: Arc<Mutex<Vec<PaneId>>>,
     }
 
     #[derive(Clone, Default)]
     struct MockBackendHandle {
         resized: Arc<Mutex<Vec<(PaneId, u16, u16)>>>,
+        spawned: Arc<Mutex<Vec<PaneCommand>>>,
+        written: WriteLog,
+        killed: Arc<Mutex<Vec<PaneId>>>,
     }
 
     impl MockBackendHandle {
@@ -2066,6 +2249,23 @@ mod tests {
 
         fn clear_resized(&self) {
             lock_resized(&self.resized).clear();
+        }
+
+        fn spawned(&self) -> Vec<PaneCommand> {
+            lock_vec(&self.spawned).clone()
+        }
+
+        /// Every byte written to `pane`, concatenated in order.
+        fn written_to(&self, pane: PaneId) -> Vec<u8> {
+            lock_vec(&self.written)
+                .iter()
+                .filter(|(id, _)| *id == pane)
+                .flat_map(|(_, bytes)| bytes.clone())
+                .collect()
+        }
+
+        fn killed(&self) -> Vec<PaneId> {
+            lock_vec(&self.killed).clone()
         }
     }
 
@@ -2083,9 +2283,18 @@ mod tests {
         let backend = MockBackend {
             next_id,
             resized: Arc::clone(&handle.resized),
+            spawned: Arc::clone(&handle.spawned),
+            written: Arc::clone(&handle.written),
+            killed: Arc::clone(&handle.killed),
         };
 
         (Box::new(backend), handle)
+    }
+
+    fn lock_vec<T>(values: &Mutex<Vec<T>>) -> std::sync::MutexGuard<'_, Vec<T>> {
+        values
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn lock_resized(
@@ -2098,13 +2307,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PaneBackend for MockBackend {
-        async fn spawn(&mut self, _cmd: PaneCommand) -> Result<PaneId, Error> {
+        async fn spawn(&mut self, cmd: PaneCommand) -> Result<PaneId, Error> {
+            lock_vec(&self.spawned).push(cmd);
             let pane_id = self.next_id;
             self.next_id = PaneId(self.next_id.0.saturating_add(1));
             Ok(pane_id)
         }
 
-        async fn write(&mut self, _id: PaneId, _data: &[u8]) -> Result<(), Error> {
+        async fn write(&mut self, id: PaneId, data: &[u8]) -> Result<(), Error> {
+            lock_vec(&self.written).push((id, data.to_vec()));
             Ok(())
         }
 
@@ -2113,7 +2324,8 @@ mod tests {
             Ok(())
         }
 
-        async fn kill(&mut self, _id: PaneId) -> Result<(), Error> {
+        async fn kill(&mut self, id: PaneId) -> Result<(), Error> {
+            lock_vec(&self.killed).push(id);
             Ok(())
         }
 
@@ -2127,6 +2339,140 @@ mod tests {
         assert_eq!(app.current().focused, Some(PaneId(2)));
 
         app
+    }
+
+    #[tokio::test]
+    async fn split_window_runs_the_command_it_was_given() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("split-window -h npm run dev"))
+            .await
+            .expect("split succeeds");
+
+        let spawned = handle.spawned();
+        let last = spawned.last().expect("a pane was spawned");
+        assert_eq!(last.program, "npm");
+        assert_eq!(last.args, vec!["run", "dev"]);
+    }
+
+    #[tokio::test]
+    async fn split_window_without_a_command_runs_the_shell() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("split-h")).await.expect("split succeeds");
+
+        let expected = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+        assert_eq!(handle.spawned().last().expect("spawned").program, expected);
+    }
+
+    #[tokio::test]
+    async fn split_window_c_sets_the_new_panes_directory() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("split-window -c /srv"))
+            .await
+            .expect("split succeeds");
+
+        assert_eq!(
+            handle.spawned().last().expect("spawned").cwd,
+            Some(std::path::PathBuf::from("/srv"))
+        );
+    }
+
+    /// `-d` is what lets a script build a layout without the focus jumping
+    /// around underneath it.
+    #[tokio::test]
+    async fn detached_split_leaves_focus_alone() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("split-window -d"))
+            .await
+            .expect("split succeeds");
+
+        assert_eq!(app.current().focused, Some(PaneId(1)));
+        assert_eq!(app.current().leaf_panes().len(), 2);
+    }
+
+    /// send-keys must be indistinguishable from typing, so it is asserted
+    /// against the very encoder the keyboard path uses.
+    #[tokio::test]
+    async fn send_keys_writes_the_same_bytes_as_typing() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("send-keys -t %1 echo Enter"))
+            .await
+            .expect("send-keys succeeds");
+
+        let typed_enter = crate::input::encode(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .expect("Enter encodes");
+        let mut expected = b"echo".to_vec();
+        expected.extend(typed_enter);
+
+        assert_eq!(handle.written_to(PaneId(1)), expected);
+    }
+
+    #[tokio::test]
+    async fn send_keys_l_sends_a_key_name_as_text() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("send-keys -l Enter"))
+            .await
+            .expect("send-keys succeeds");
+
+        assert_eq!(handle.written_to(PaneId(1)), b"Enter".to_vec());
+    }
+
+    #[tokio::test]
+    async fn send_keys_encodes_control_keys() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("send-keys C-c"))
+            .await
+            .expect("send-keys succeeds");
+
+        assert_eq!(handle.written_to(PaneId(1)), vec![0x03]);
+    }
+
+    #[tokio::test]
+    async fn respawn_pane_replaces_the_process_but_keeps_the_pane_number() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("respawn-pane -k -t %1 htop"))
+            .await
+            .expect("respawn succeeds");
+
+        assert_eq!(handle.killed(), vec![PaneId(1)]);
+        assert_eq!(handle.spawned().last().expect("spawned").program, "htop");
+        // The pane the script addressed is still the pane it sees.
+        assert_eq!(app.pane_number(PaneId(2)), Some(1));
+        assert_eq!(app.current().focused, Some(PaneId(2)));
+        assert_eq!(app.current().leaf_panes(), vec![PaneId(2)]);
+    }
+
+    /// Without `-k`, tmux refuses rather than killing something silently.
+    #[tokio::test]
+    async fn respawn_pane_without_k_is_refused() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        let result = app
+            .execute_request(command("respawn-pane -t %1"))
+            .await
+            .expect("the request completes");
+
+        assert!(!result.is_ok());
+        assert!(handle.killed().is_empty());
     }
 
     /// A waiting caller gets the command's output, not just "it ran".

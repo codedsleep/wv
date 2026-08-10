@@ -82,6 +82,8 @@ fn split(split: Split) -> Command {
     Command::SplitWindow {
         split,
         target: Target::current(),
+        command: None,
+        detached: false,
     }
 }
 

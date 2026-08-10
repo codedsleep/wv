@@ -13,6 +13,8 @@
 
 pub mod target;
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::layout::geometry::{Direction, Split};
@@ -21,8 +23,15 @@ pub use target::{Extreme, PaneRef, Target, TargetError, TargetKind, WindowRef};
 /// A command, with everything it needs to run.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Command {
-    /// Split a pane in two and spawn a shell in the new half.
-    SplitWindow { split: Split, target: Target },
+    /// Split a pane in two and spawn something in the new half.
+    SplitWindow {
+        split: Split,
+        target: Target,
+        /// What to run. `None` means the user's shell.
+        command: Option<SpawnCommand>,
+        /// `-d`: leave focus where it is.
+        detached: bool,
+    },
     /// Move focus.
     SelectPane { selector: PaneSelector },
     /// Switch to another window (today: a workspace).
@@ -33,12 +42,46 @@ pub enum Command {
     DetachClient,
     /// Shut the session down, killing every pane.
     KillSession { target: Target },
+    /// Type keys into a pane, as if the user had pressed them.
+    SendKeys {
+        target: Target,
+        /// Each argument is a key name (`C-c`, `Enter`) or, when it is not one,
+        /// literal text to type.
+        keys: Vec<String>,
+        /// `-l`: treat every argument as literal text, even `Enter`.
+        literal: bool,
+    },
+    /// Restart a pane's process in place, keeping its position in the layout.
+    RespawnPane {
+        target: Target,
+        /// `-k`: kill the existing process instead of refusing while it lives.
+        kill: bool,
+        command: Option<SpawnCommand>,
+    },
     /// Print a message back to the caller.
     ///
     /// `display-message -p` is how a script asks the session a question. The
     /// message is literal text for now; the `#{...}` variables that make it
     /// useful for introspection arrive with the format engine in PR 6.
     DisplayMessage { message: String, target: Target },
+}
+
+/// What to run in a pane, and where.
+///
+/// A `None` program means the user's shell; `cwd` overrides where it starts.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SpawnCommand {
+    /// The command line, already split into words by the caller's shell.
+    /// Empty means "run the default shell".
+    pub argv: Vec<String>,
+    /// `-c`: the directory to start in.
+    pub cwd: Option<PathBuf>,
+}
+
+impl SpawnCommand {
+    pub fn is_empty(&self) -> bool {
+        self.argv.is_empty() && self.cwd.is_none()
+    }
 }
 
 /// How `select-pane` picks its new focus.
@@ -90,6 +133,8 @@ pub const COMMAND_NAMES: &[&str] = &[
     "detach-client",
     "kill-session",
     "display-message",
+    "send-keys",
+    "respawn-pane",
 ];
 
 /// The pre-target weave names, still accepted.
@@ -149,6 +194,10 @@ impl Command {
 
             "display-message" | "display" => parse_display_message(name, rest),
 
+            "send-keys" | "send" => parse_send_keys(name, rest),
+
+            "respawn-pane" | "respawnp" => parse_respawn_pane(name, rest),
+
             other => parse_workspace_alias(other)
                 .ok_or_else(|| CommandError::UnknownCommand(other.to_owned())),
         }
@@ -182,6 +231,8 @@ fn parse_split_window(
 ) -> Result<Command, CommandError> {
     let mut split = fixed;
     let mut target = None;
+    let mut detached = false;
+    let mut spawn = SpawnCommand::default();
     let mut args = args.iter();
 
     while let Some(arg) = args.next() {
@@ -195,11 +246,16 @@ fn parse_split_window(
             "-h" => set_split(name, &mut split, Split::Vertical)?,
             "-v" => set_split(name, &mut split, Split::Horizontal)?,
             "-t" => target = Some(next_target(name, &mut args, "-t", TargetKind::Pane)?),
-            // Sizing, cwd, detached-spawn and shell commands all land in later
-            // PRs; say so rather than silently ignoring them.
+            "-c" => spawn.cwd = Some(PathBuf::from(next_value(name, &mut args, "-c")?)),
+            "-d" => detached = true,
             "-p" | "-l" | "-f" => return Err(unsupported(name, arg, "PR 5: pane sizing")),
-            "-c" | "-d" | "-b" => {
-                return Err(unsupported(name, arg, "PR 3: spawn control"));
+            "-b" => return Err(unsupported(name, arg, "PR 5: split placement")),
+            "-P" | "-F" => return Err(unsupported(name, arg, "PR 6: format strings")),
+            "--" => {
+                // Everything after `--` is the command, even if it looks like
+                // a flag: `split-window -- ls -la`.
+                spawn.argv.extend(args.cloned());
+                break;
             }
             other if other.starts_with('-') => {
                 return Err(CommandError::UnknownFlag {
@@ -208,11 +264,11 @@ fn parse_split_window(
                 });
             }
             other => {
-                return Err(CommandError::UnsupportedFlag {
-                    command: name.to_owned(),
-                    flag: other.to_owned(),
-                    plan: "PR 3: running a command in the new pane".to_owned(),
-                });
+                // The first bare word starts the command; the rest are its
+                // arguments, flags and all.
+                spawn.argv.push(other.to_owned());
+                spawn.argv.extend(args.cloned());
+                break;
             }
         }
     }
@@ -221,7 +277,108 @@ fn parse_split_window(
         // tmux defaults to a stacked split when neither flag is given.
         split: split.unwrap_or_else(|| split_from_tmux_flag(false)),
         target: target.unwrap_or_default(),
+        command: (!spawn.is_empty()).then_some(spawn),
+        detached,
     })
+}
+
+fn parse_send_keys(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut target = None;
+    let mut literal = false;
+    let mut keys = Vec::new();
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-t" => {
+                if target
+                    .replace(next_target(name, &mut args, "-t", TargetKind::Pane)?)
+                    .is_some()
+                {
+                    return Err(CommandError::ConflictingFlags {
+                        command: name.to_owned(),
+                        flags: "`-t`".to_owned(),
+                    });
+                }
+            }
+            "-l" => literal = true,
+            "-H" => return Err(unsupported(name, arg, "PR 9: hex key arguments")),
+            "-R" | "-M" | "-X" | "-N" => {
+                return Err(unsupported(name, arg, "PR 8: copy mode and pane reset"));
+            }
+            "--" => {
+                keys.extend(args.cloned());
+                break;
+            }
+            other if other.starts_with('-') => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => keys.push(other.to_owned()),
+        }
+    }
+
+    if keys.is_empty() {
+        return Err(CommandError::MissingValue {
+            flag: "keys to send".to_owned(),
+        });
+    }
+
+    Ok(Command::SendKeys {
+        target: target.unwrap_or_default(),
+        keys,
+        literal,
+    })
+}
+
+fn parse_respawn_pane(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut target = None;
+    let mut kill = false;
+    let mut spawn = SpawnCommand::default();
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-t" => target = Some(next_target(name, &mut args, "-t", TargetKind::Pane)?),
+            "-k" => kill = true,
+            "-c" => spawn.cwd = Some(PathBuf::from(next_value(name, &mut args, "-c")?)),
+            "-e" => return Err(unsupported(name, arg, "PR 7: per-pane environment")),
+            "--" => {
+                spawn.argv.extend(args.cloned());
+                break;
+            }
+            other if other.starts_with('-') => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                spawn.argv.push(other.to_owned());
+                spawn.argv.extend(args.cloned());
+                break;
+            }
+        }
+    }
+
+    Ok(Command::RespawnPane {
+        target: target.unwrap_or_default(),
+        kill,
+        command: (!spawn.is_empty()).then_some(spawn),
+    })
+}
+
+fn next_value<'a, I>(command: &str, args: &mut I, flag: &str) -> Result<String, CommandError>
+where
+    I: Iterator<Item = &'a String>,
+{
+    args.next()
+        .cloned()
+        .ok_or_else(|| CommandError::MissingValue {
+            flag: format!("{command} {flag}"),
+        })
 }
 
 fn set_split(name: &str, slot: &mut Option<Split>, split: Split) -> Result<(), CommandError> {
@@ -508,6 +665,8 @@ mod tests {
             Command::SplitWindow {
                 split: Split::Vertical,
                 target: Target::current(),
+                command: None,
+                detached: false,
             }
         );
         assert_eq!(
@@ -515,6 +674,8 @@ mod tests {
             Command::SplitWindow {
                 split: Split::Horizontal,
                 target: Target::current(),
+                command: None,
+                detached: false,
             }
         );
     }
@@ -526,6 +687,8 @@ mod tests {
             Command::SplitWindow {
                 split: Split::Horizontal,
                 target: Target::current(),
+                command: None,
+                detached: false,
             }
         );
     }
@@ -539,6 +702,8 @@ mod tests {
             Command::SplitWindow {
                 split: Split::Horizontal,
                 target: Target::current(),
+                command: None,
+                detached: false,
             }
         );
         assert_eq!(
@@ -546,6 +711,8 @@ mod tests {
             Command::SplitWindow {
                 split: Split::Vertical,
                 target: Target::current(),
+                command: None,
+                detached: false,
             }
         );
     }
@@ -672,15 +839,102 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("-p"), "{message}");
         assert!(message.contains("PR 5"), "{message}");
+    }
 
-        let error = Command::parse_str("split-window -c /srv").expect_err("not supported yet");
-        assert!(error.to_string().contains("PR 3"), "{error}");
+    /// The first bare word starts the command line; everything after it
+    /// belongs to that command, flags included.
+    #[test]
+    fn a_trailing_command_line_becomes_the_pane_process() {
+        let Command::SplitWindow { command, .. } = parse("split-window -h npm run dev") else {
+            panic!("expected a split");
+        };
+        let command = command.expect("a command was given");
+        assert_eq!(command.argv, vec!["npm", "run", "dev"]);
+        assert_eq!(command.cwd, None);
     }
 
     #[test]
-    fn shell_command_arguments_are_named_as_planned() {
-        let error = Command::parse_str("split-window npm run dev").expect_err("not supported yet");
-        assert!(error.to_string().contains("PR 3"), "{error}");
+    fn a_command_keeps_flags_that_look_like_weaves() {
+        let Command::SplitWindow { command, .. } = parse("split-window ls -la -t") else {
+            panic!("expected a split");
+        };
+        assert_eq!(
+            command.expect("a command was given").argv,
+            vec!["ls", "-la", "-t"]
+        );
+    }
+
+    #[test]
+    fn a_double_dash_starts_the_command_even_for_a_leading_flag() {
+        let Command::SplitWindow { command, .. } = parse("split-window -- -weird-program") else {
+            panic!("expected a split");
+        };
+        assert_eq!(
+            command.expect("a command was given").argv,
+            vec!["-weird-program"]
+        );
+    }
+
+    #[test]
+    fn split_window_takes_a_cwd_and_a_detached_flag() {
+        let Command::SplitWindow {
+            command, detached, ..
+        } = parse("split-window -d -c /srv")
+        else {
+            panic!("expected a split");
+        };
+        assert!(detached);
+        assert_eq!(
+            command.expect("a cwd was given").cwd,
+            Some(std::path::PathBuf::from("/srv"))
+        );
+    }
+
+    #[test]
+    fn send_keys_collects_key_names_and_text() {
+        assert_eq!(
+            parse("send-keys -t %2 npm Enter"),
+            Command::SendKeys {
+                target: Target {
+                    pane: Some(PaneRef::Id(2)),
+                    ..Target::default()
+                },
+                keys: vec!["npm".to_owned(), "Enter".to_owned()],
+                literal: false,
+            }
+        );
+    }
+
+    #[test]
+    fn send_keys_literal_flag_is_carried_through() {
+        let Command::SendKeys { literal, keys, .. } = parse("send-keys -l Enter") else {
+            panic!("expected send-keys");
+        };
+        assert!(literal);
+        assert_eq!(keys, vec!["Enter"]);
+    }
+
+    #[test]
+    fn send_keys_needs_something_to_send() {
+        assert!(matches!(
+            Command::parse_str("send-keys -t %1"),
+            Err(CommandError::MissingValue { .. })
+        ));
+    }
+
+    #[test]
+    fn respawn_pane_requires_k_to_be_meaningful_later() {
+        assert_eq!(
+            parse("respawn-pane -k -t %1"),
+            Command::RespawnPane {
+                target: Target {
+                    pane: Some(PaneRef::Id(1)),
+                    ..Target::default()
+                },
+                kill: true,
+                command: None,
+            }
+        );
     }
 
     #[test]

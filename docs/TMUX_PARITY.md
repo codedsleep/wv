@@ -46,9 +46,12 @@ means the current one.
 |---|---|---|---|
 | `split-window [-hv] [-t]` | `split-h`, `split-v` | yes | |
 | `split-window -p/-l` | — | PR 5 | Sizing; splits are even for now |
-| `split-window -c` | — | PR 3 | cwd; new panes inherit the focused pane's cwd already |
-| `split-window -d` | — | PR 3 | |
-| `split-window <command>` | — | PR 3 | Panes always run `$SHELL` for now |
+| `split-window -c` | — | yes | |
+| `split-window -d` | — | yes | |
+| `split-window <command>` | — | yes | Trailing words are the command; `--` forces it |
+| `send-keys [-l] [-t]` | — | yes | Key names, or literal text when not one |
+| `send-keys -H/-R/-M/-X` | — | PR 8/9 | |
+| `respawn-pane [-k] [-c]` | — | yes | Keeps the pane's `%N` and its place in the layout |
 | `select-pane -LRUD` | `focus-left`… | yes | Geometric, walks the layout tree |
 | `select-pane -t` | — | yes | |
 | `select-pane -l` | — | yes | |
@@ -61,7 +64,6 @@ means the current one.
 | `kill-session` | `quit` | yes | |
 | `new-window`, `rename-window`, `next-window`, `previous-window`, `kill-window`, `move-window` | — | PR 4 | |
 | `resize-pane`, `swap-pane`, `rotate-window`, `break-pane`, `join-pane`, `select-layout` | — | PR 5 | |
-| `send-keys`, `respawn-pane` | — | PR 3 | |
 | `list-sessions`, `list-windows`, `list-panes`, `-F` formats | `wv ls` (sessions only) | PR 6 | |
 | `display-message -p` | — | yes | Literal text; `#{...}` variables in PR 6 |
 | `display-message` without `-p` | — | PR 7 | Needs a status line message area |
@@ -74,6 +76,13 @@ means the current one.
 | `switch-client`, `attach -d`, multiple clients per session | — | PR 10 | One client at a time today |
 | Mouse support | — | PR 11 | |
 | Control mode (`-CC`), TPM/plugins, tmux wire compatibility | — | no | Explicit non-goals |
+
+## Panes inherit where you are
+
+A new pane starts in the focused pane's current directory, read from
+`/proc/<pid>/cwd`, so `split-window` opens where you were working rather than
+where the session was started. `-c` overrides it. If the directory cannot be
+read the pane falls back to the session server's own directory.
 
 ## Command results
 
