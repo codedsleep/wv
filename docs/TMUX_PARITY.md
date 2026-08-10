@@ -50,7 +50,8 @@ means the current one.
 | `split-window -d` | — | yes | |
 | `split-window <command>` | — | yes | Trailing words are the command; `--` forces it |
 | `send-keys [-l] [-t]` | — | yes | Key names, or literal text when not one |
-| `send-keys -H/-R/-M/-X` | — | PR 8/9 | |
+| `send-keys -H` | — | PR 9 | |
+| `send-keys -R/-M/-X` | — | no | Copy mode is out of scope |
 | `respawn-pane [-k] [-c]` | — | yes | Keeps the pane's `%N` and its place in the layout |
 | `select-pane -LRUD` | `focus-left`… | yes | Geometric, walks the layout tree |
 | `select-pane -t` | — | yes | |
@@ -70,12 +71,16 @@ means the current one.
 | `capture-pane` | — | PR 6 | |
 | `has-session`, `rename-session`, `kill-server` | — | PR 6 | |
 | `bind-key`, `unbind-key`, prefix key, `set-option`, `source-file` | TOML config | PR 7 | |
-| `copy-mode`, buffers, scrollback | — | PR 8 | |
+| `copy-mode`, buffers, scrollback, search | — | no | Dropped: a phase of its own, not a PR |
 | `run-shell`, `if-shell`, `set-hook`, `pipe-pane` | — | PR 9 | |
 | `wait-for` | — | PR 9 | Moved from PR 2: it needs `run-shell -b` to be useful |
 | `switch-client`, `attach -d`, multiple clients per session | — | PR 10 | One client at a time today |
 | Mouse support | — | PR 11 | |
 | Control mode (`-CC`), TPM/plugins, tmux wire compatibility | — | no | Explicit non-goals |
+
+Scrollback and copy-mode are **not planned**. `capture-pane` will read the
+visible screen only, the mouse wheel is forwarded to the pane rather than
+scrolling weave's own history, and `history-limit` is accepted but inert.
 
 ## Panes inherit where you are
 

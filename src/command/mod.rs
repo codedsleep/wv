@@ -304,7 +304,11 @@ fn parse_send_keys(name: &str, args: &[String]) -> Result<Command, CommandError>
             "-l" => literal = true,
             "-H" => return Err(unsupported(name, arg, "PR 9: hex key arguments")),
             "-R" | "-M" | "-X" | "-N" => {
-                return Err(unsupported(name, arg, "PR 8: copy mode and pane reset"));
+                return Err(unsupported(
+                    name,
+                    arg,
+                    "not planned: these drive copy mode, which weave does not have",
+                ));
             }
             "--" => {
                 keys.extend(args.cloned());

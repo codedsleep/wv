@@ -19,7 +19,7 @@
 | Sizing | `-p/-l`, `resize-pane`, `-Z` zoom | even BSP only; `ratio`/`ratio_target` exist but are always 0.5 |
 | Introspection | `list-*` with `-F` formats, `capture-pane` | `wv ls` only |
 | Keys | prefix-modal, `bind-key`, runtime `set-option` | direct Alt-chords, static TOML (`src/config.rs:127`) |
-| Scrollback | full, plus copy-mode and buffers | none (explicit v1 non-goal) |
+| Scrollback | full, plus copy-mode and buffers | none — and staying that way (PR 8 dropped) |
 
 **Good news:** the hard parts are already in place. `PaneCommand` carries `program/args/env/cwd`
 (`src/backend/mod.rs:21`), `PaneBackend::pane_cwd` is a defined hook, the protocol is a typed
@@ -48,7 +48,7 @@ already animates an arbitrary `ratio` — so resize and zoom are tween wiring, n
 
 **PRs 1, 2, 3, 6** are the minimum for real scripting. After those, `send-keys`,
 `capture-pane`, targets, and command output all work — the agent-harness loop is portable.
-PRs 4, 5, 7 make it comfortable. PRs 8+ are the long tail.
+PRs 4, 5, 7 make it comfortable. PRs 9, 10, 11 are the long tail. PR 8 is dropped.
 
 ---
 
@@ -157,7 +157,8 @@ this is a container change, not a layout change.
   `list-*`, `display-message -p`, and the status bar (PR 7's `status-left/right`).
 - `capture-pane [-p] [-t] [-S start] [-E end] [-e]` reading the pane's vt100 grid
   (`src/term/pane.rs:52`). Pre-scrollback this covers the visible screen only —
-  document the limit; `-S -N` lands with PR 8.
+  document the limit. Capturing history needs scrollback, which is out of
+  scope (see "Dropped" below).
 - `has-session`, `kill-session`, `rename-session`, `kill-server`.
 
 **Files:** new `src/format.rs`, `src/app.rs`, `src/session/paths.rs`, `src/term/pane.rs`.
@@ -182,19 +183,24 @@ this is a container change, not a layout change.
 
 ---
 
-# PR 8 — Scrollback and copy-mode
+# PR 8 — Scrollback and copy-mode — **DROPPED**
 
-**Largest single chunk; explicitly deferred past v1. Ship the rest first.**
+Removed from this plan on 2026-08-11. It is a phase, not a PR: it needs either
+`vt100`'s scrollback driven through the compositor and diff renderer, or the
+`alacritty_terminal` swap [SCOPE.md](./SCOPE.md) already defers, *plus*
+copy-mode's key table, selection model, search, and paste buffers. It also
+touches the render hot path everything else is built on.
 
-- Scrollback buffer per pane (`history-limit`), `vt100` scrollback or the deferred
-  `alacritty_terminal` swap already flagged in SCOPE.md.
-- `copy-mode` key table, cursor movement, selection, search (`/`, `?`, `n`),
-  `copy-selection`, paste buffers (`set-buffer`, `load-buffer`, `save-buffer`,
-  `paste-buffer`, `list-buffers`), `choose-tree`.
-- Interacts hard with the render pipeline: a scrolled pane must compose from history
-  without invalidating the diff fast path.
+The numbering below is deliberately left alone. PR 5, 6, 7 and 9 are already
+named in shipped error messages, docs, and commit messages; renumbering would
+make those references lie.
 
----
+**What stays missing without it:** `copy-mode`, `paste-buffer` and the buffer
+commands, search, `capture-pane -S/-E` beyond the visible screen, and
+wheel-scroll in PR 11's mouse support. `history-limit` is accepted as an
+option in PR 7 but does nothing.
+
+If it comes back, it wants its own scope document.
 
 # PR 9 — Shell glue and hooks
 
@@ -218,7 +224,8 @@ this is a container change, not a layout change.
 
 - SGR mouse reporting in the client, forwarded through the protocol.
 - `mouse` option: click-to-focus, drag borders to resize (feeding PR 5's tweens),
-  wheel-scroll into copy-mode (needs PR 8), status-bar clicks.
+  status-bar clicks. Wheel-scroll needs scrollback, which is out of scope, so
+  the wheel is forwarded to the pane as an escape sequence instead.
 
 ---
 
@@ -229,8 +236,9 @@ PR 1 (command model) ──┬── PR 2 (req/resp) ──┬── PR 3 (spawn
                        │                     └── PR 6 (list/capture/formats) ← harness works
                        ├── PR 4 (windows)  ────── PR 5 (sizing/zoom)
                        └── PR 7 (prefix/bind/options)  [needs 1; wants 6 for formats]
-                                   PR 8 (copy-mode) → PR 11 (mouse)
-                                   PR 9 (hooks), PR 10 (multi-client) — independent
+                                   PR 9 (hooks), PR 10 (multi-client), PR 11 (mouse)
+                                   — independent of each other
+                                   PR 8 (copy-mode) — dropped, see above
 ```
 
 ## Cross-cutting requirements for every PR
