@@ -4,11 +4,13 @@ use crossterm::style::Color as TermColor;
 
 use crate::backend::PaneId;
 use crate::term::cell::{Cell, CellAttrs};
+use crate::term::query::{self, QueryScanner, Segment};
 use crate::term::surface::Surface;
 
 pub struct Pane {
     id: PaneId,
     parser: vt100::Parser,
+    scanner: QueryScanner,
     dirty: bool,
 }
 
@@ -17,13 +19,34 @@ impl Pane {
         Self {
             id,
             parser: vt100::Parser::new(rows, cols, 0),
+            scanner: QueryScanner::default(),
             dirty: true,
         }
     }
 
-    pub fn process(&mut self, bytes: &[u8]) {
-        self.parser.process(bytes);
+    /// Feed pane output to the emulator, returning any bytes owed back to it.
+    ///
+    /// Programs block on terminal queries — a shell holds its prompt until its
+    /// DA1 probe is answered — so the caller must write the returned bytes to
+    /// the pane's PTY.
+    pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut replies = Vec::new();
+
+        for segment in self.scanner.feed(bytes) {
+            match segment {
+                Segment::Data(data) => self.parser.process(&data),
+                Segment::Query(kind) => {
+                    // Answered against the cursor as of this point in the
+                    // stream, which is what the program asked about.
+                    let (row, col) = self.parser.screen().cursor_position();
+                    replies.extend_from_slice(&query::reply(kind, row, col));
+                }
+            }
+        }
+
         self.dirty = true;
+
+        replies
     }
 
     pub fn screen(&self) -> &vt100::Screen {
@@ -136,6 +159,24 @@ mod tests {
             assert_eq!(cell.ch, ch);
             assert_eq!(cell.fg, Color::AnsiValue(1));
         }
+    }
+
+    /// A shell holds its prompt until its DA1 probe is answered, so the pane
+    /// must hand the reply back rather than swallowing the query.
+    #[test]
+    fn process_answers_a_device_attributes_query() {
+        let mut pane = Pane::new(PaneId(1), 80, 24);
+
+        assert_eq!(pane.process(b"hello"), Vec::new());
+        assert_eq!(pane.process(b"\x1b[0c"), b"\x1b[?1;2c".to_vec());
+    }
+
+    #[test]
+    fn process_answers_a_cursor_position_query_with_the_live_cursor() {
+        let mut pane = Pane::new(PaneId(1), 80, 24);
+
+        // Three columns of text, then ask where the cursor ended up.
+        assert_eq!(pane.process(b"abc\x1b[6n"), b"\x1b[1;4R".to_vec());
     }
 
     #[test]
