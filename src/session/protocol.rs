@@ -236,6 +236,45 @@ mod tests {
         assert_eq!(received, Some(message));
     }
 
+    /// `read_frame` is built on `read_exact`, which is not cancel-safe: a read
+    /// dropped mid-frame takes the bytes it already consumed with it. Callers
+    /// must therefore never poll it from a `select!` arm — the client reads
+    /// frames on a dedicated task and selects on the channel instead.
+    #[tokio::test]
+    async fn a_read_cancelled_mid_frame_loses_the_bytes_it_consumed() {
+        use std::time::Duration;
+
+        use tokio::io::AsyncWriteExt;
+
+        let (mut writer, mut reader) = duplex(4096);
+        let message = ServerToClient::Frame(vec![7u8; 32]);
+        let bytes = encode(&message).expect("message encoded");
+        let (head, tail) = bytes.split_at(8);
+
+        writer.write_all(head).await.expect("head written");
+        writer.flush().await.expect("head flushed");
+
+        // Drop the read while it is still waiting on the payload, exactly as a
+        // `select!` arm losing the race would.
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(50),
+            read_frame::<_, ServerToClient>(&mut reader),
+        )
+        .await;
+        assert!(cancelled.is_err(), "the read should still be pending");
+
+        writer.write_all(tail).await.expect("tail written");
+        writer.flush().await.expect("tail flushed");
+
+        // The stream is now desynced: the consumed prefix is unrecoverable.
+        if let Ok(Some(resumed)) = read_frame::<_, ServerToClient>(&mut reader).await {
+            assert_ne!(
+                resumed, message,
+                "a cancelled read must not appear to be recoverable"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn rejects_an_oversized_length_prefix() {
         use tokio::io::AsyncWriteExt;
