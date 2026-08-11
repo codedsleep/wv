@@ -51,7 +51,7 @@ means the current one.
 | `split-window -d` | — | yes | |
 | `split-window <command>` | — | yes | Trailing words are the command; `--` forces it |
 | `send-keys [-l] [-t]` | — | yes | Key names, or literal text when not one |
-| `send-keys -H` | — | PR 9 | |
+| `send-keys -H` | — | no | Hex key arguments |
 | `send-keys -R/-M/-X` | — | no | Copy mode is out of scope |
 | `respawn-pane [-k] [-c]` | — | yes | Keeps the pane's `%N` and its place in the layout |
 | `select-pane -LRUD` | `focus-left`… | yes | Geometric, walks the layout tree |
@@ -67,27 +67,29 @@ means the current one.
 | `rename-window [-t] <name>` | — | yes | Pins the name against automatic renaming |
 | `move-window`, `swap-window`, renumbering | — | no | Windows are fixed slots |
 | `kill-pane -t` | `close` | yes | |
-| `kill-pane -a` | — | PR 9 | |
+| `kill-pane -a` | — | yes | |
 | `detach-client` | `detach` | yes | `-t`/`-a` need multi-client (PR 10) |
 | `kill-session` | `quit` | yes | |
 | `resize-pane -L/-R/-U/-D [n]` | — | yes | Moves a border; which side the pane is on decides if it grows |
 | `resize-pane -x/-y` | — | yes | |
 | `resize-pane -Z` | — | yes | Zoom; the layout tree is untouched so unzoom animates back |
-| `resize-pane -M` | — | PR 11 | Mouse |
+| `resize-pane -M` | — | no | Mouse support is out of scope |
 | `swap-pane [-U/-D/-s/-t/-d]` | — | yes | Both panes must be in one window |
 | `rotate-window [-U/-D]` | — | yes | |
 | `select-layout` | — | yes | `even-horizontal`, `even-vertical`, `main-vertical`, `main-horizontal`, `tiled` |
 | `select-layout -p/-o/-E`, layout strings | — | no | weave keeps no layout history |
-| `break-pane`, `join-pane` | — | PR 9 | Moving panes between windows |
+| `break-pane [-s] [-t] [-n] [-d]` | — | yes | The pane moves; it is not killed and respawned |
+| `join-pane`/`move-pane [-s] [-t] [-hv] [-d]` | — | yes | |
 | `list-panes [-a] [-t] [-F]` | — | yes | |
 | `list-windows [-t] [-F]` | — | yes | |
 | `list-sessions [-F]` | `wv ls` | partial | The command describes the session it runs in; `wv ls` lists them all |
-| `list-*  -f` filters | — | PR 9 | |
+| `list-*  -f` filters | — | no | Filter with `-F` and your shell |
 | `display-message -p [-F]` | — | yes | Expands formats |
-| `display-message` without `-p` | — | PR 9 | Needs a status line message area |
+| `display-message` without `-p` | — | yes | Shows on the status line for 3 seconds |
 | `capture-pane [-p] [-t] [-S n] [-E n]` | — | yes | Visible screen only |
 | `capture-pane -S -` / negative lines | — | no | Needs scrollback |
-| `capture-pane -e/-C/-J/-b/-a` | — | PR 9 / no | Escapes and joining are PR 9; buffers went with copy mode |
+| `capture-pane -e/-C/-J` | — | no | Captures are plain text |
+| `capture-pane -b/-a` | — | no | Buffers went with copy mode |
 | `has-session [-t]` | `wv has-session [name]` | yes | Exit status is the answer, as in tmux |
 | `kill-server` | `wv kill-server` | yes | |
 | `rename-session` | — | no | The socket is named after the session; renaming would break every attached client |
@@ -99,12 +101,17 @@ means the current one.
 | Prefix key, `prefix`/`prefix2` | — | yes | `C-b` by default, with tmux's default bindings behind it |
 | `source-file` | — | yes | Relative to the file that names it; `~` expands |
 | `set-environment` | — | PR 9 | |
-| `bind-key -N`, `list-keys -N` | — | PR 9 | Binding descriptions |
+| `bind-key -N`, `list-keys -N` | — | no | Binding descriptions |
 | `copy-mode`, buffers, scrollback, search | — | no | Dropped: a phase of its own, not a PR |
-| `run-shell`, `if-shell`, `set-hook`, `pipe-pane` | — | PR 9 | |
-| `wait-for` | — | PR 9 | Moved from PR 2: it needs `run-shell -b` to be useful |
+| `run-shell [-b]` | — | yes | Returns stdout; a non-zero exit is an error result |
+| `if-shell [-b]` | — | yes | The condition runs inline; `-b` only skips waiting on the branch |
+| `wait-for [-S]` | — | yes | Signals only; `wv exec wait-for` blocks with no timeout |
+| `wait-for -L/-U` | — | no | Locks; signals cover the coordination cases |
+| `set-hook`, `show-hooks` | — | no | Deferred out of PR 9 — see the plan |
+| `pipe-pane` | — | no | Deferred out of PR 9 — use `capture-pane` |
+| `set-environment` | — | no | Deferred out of PR 9 |
 | `switch-client`, `attach -d`, multiple clients per session | — | PR 10 | One client at a time today |
-| Mouse support | — | PR 11 | |
+| Mouse support | — | no | Dropped: weave is keyboard-driven, and wheel-scroll would need scrollback |
 | Control mode (`-CC`), TPM/plugins, tmux wire compatibility | — | no | Explicit non-goals |
 
 Scrollback and copy-mode are **not planned**. `capture-pane` will read the
@@ -194,6 +201,27 @@ a silently empty field is worse than a failed command.
 `pane_current_command` reports the **pane's own process**, not the foreground
 job inside it. A pane whose shell is running vim reports the shell; a pane
 spawned as `split-window npm run dev` reports `npm`.
+
+## Moving panes between windows
+
+`break-pane` and `join-pane` **move** a pane. It keeps running, keeps its `%N`,
+and is never killed and respawned, so a script holding `%2` still means the
+same pane after the move.
+
+## Coordinating with the shell
+
+`run-shell` returns the command's stdout, and a non-zero exit becomes an error
+result — so `wv exec run-shell 'test -d /srv'` can be branched on.
+
+`wait-for` blocks until something signals the channel:
+
+```sh
+wv exec wait-for -S build-done &   # from wherever the build finishes
+wv exec wait-for build-done        # blocks here until then
+```
+
+A waiting `wv exec` has **no timeout** — waiting is the point — while every
+other command still gives up after ten seconds rather than hanging a script.
 
 ## Reading a pane back out
 

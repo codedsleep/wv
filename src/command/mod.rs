@@ -108,8 +108,41 @@ pub enum Command {
     },
     /// Show the options, one per line.
     ShowOptions { name: Option<String> },
-    /// Close a pane.
-    KillPane { target: Target },
+    /// Move a pane into a window of its own.
+    BreakPane {
+        source: Target,
+        target: Target,
+        name: Option<String>,
+        detached: bool,
+    },
+    /// Move a pane out of its window and into another.
+    JoinPane {
+        source: Target,
+        target: Target,
+        split: Split,
+        detached: bool,
+    },
+    /// Run a shell command outside any pane.
+    RunShell {
+        command: String,
+        /// `-b`: do not wait for it to finish.
+        background: bool,
+    },
+    /// Run a weave command depending on a shell command's exit status.
+    IfShell {
+        condition: String,
+        then_command: Vec<String>,
+        else_command: Option<Vec<String>>,
+        background: bool,
+    },
+    /// Block until a channel is signalled, or signal one.
+    WaitFor { channel: String, action: WaitAction },
+    /// Close a pane, or every pane except it.
+    KillPane {
+        target: Target,
+        /// `-a`: kill every *other* pane in the window instead.
+        all_but_target: bool,
+    },
     /// Leave the session running and disconnect the client.
     DetachClient,
     /// Shut the session down, killing every pane.
@@ -135,7 +168,13 @@ pub enum Command {
     /// `display-message -p` is how a script asks the session a question. The
     /// message is a format string, so `-p "#{pane_current_path}"` reads a
     /// value back out.
-    DisplayMessage { message: String, target: Target },
+    DisplayMessage {
+        message: String,
+        target: Target,
+        /// `-p`: return the text to the caller. Without it the message goes to
+        /// the status line for the attached client to read.
+        print: bool,
+    },
 }
 
 /// How big a new pane should be, from `-p` or `-l`.
@@ -176,6 +215,15 @@ pub enum ResizeChange {
     Height(u16),
     /// Toggle the pane filling its window.
     ToggleZoom,
+}
+
+/// What a `wait-for` does to its channel.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum WaitAction {
+    /// Block until someone signals the channel.
+    Wait,
+    /// Release everyone waiting on it.
+    Signal,
 }
 
 /// What a `list-*` command enumerates.
@@ -286,6 +334,11 @@ pub const COMMAND_NAMES: &[&str] = &[
     "list-keys",
     "set-option",
     "show-options",
+    "break-pane",
+    "join-pane",
+    "run-shell",
+    "if-shell",
+    "wait-for",
 ];
 
 /// The pre-target weave names, still accepted.
@@ -354,15 +407,26 @@ impl Command {
             "list-keys" | "lsk" => parse_list_keys(name, rest),
             "set-option" | "set" | "setw" | "set-window-option" => parse_set_option(name, rest),
             "show-options" | "show" | "showw" => parse_show_options(name, rest),
+
+            "break-pane" | "breakp" => parse_break_pane(name, rest),
+            "join-pane" | "joinp" | "move-pane" | "movep" => parse_join_pane(name, rest),
+            "run-shell" | "run" => parse_run_shell(name, rest),
+            "if-shell" | "if" => parse_if_shell(name, rest),
+            "wait-for" | "wait" => parse_wait_for(name, rest),
             "set-environment" | "setenv" => Err(unsupported(
                 name,
                 "set-environment",
                 "PR 9: per-session environment",
             )),
 
-            "kill-pane" | "killp" | "close" => Ok(Self::KillPane {
-                target: parse_target_only(name, rest, TargetKind::Pane)?,
-            }),
+            "kill-pane" | "killp" | "close" => {
+                let (target, all_but_target) =
+                    parse_target_only_with_all(name, rest, TargetKind::Pane)?;
+                Ok(Self::KillPane {
+                    target,
+                    all_but_target,
+                })
+            }
 
             "detach-client" | "detach" => {
                 reject_extra_args(name, rest)?;
@@ -624,7 +688,7 @@ fn parse_resize_pane(name: &str, args: &[String]) -> Result<Command, CommandErro
                 let value = next_value(name, &mut args, "-y")?;
                 ResizeChange::Height(parse_size(name, "-y", &value)?)
             }
-            "-M" => return Err(unsupported(name, arg, "PR 11: mouse resizing")),
+            "-M" => return Err(unsupported(name, arg, "not planned: weave has no mouse support")),
             other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
@@ -1125,6 +1189,216 @@ fn parse_show_options(name: &str, args: &[String]) -> Result<Command, CommandErr
     Ok(Command::ShowOptions { name: option })
 }
 
+fn parse_break_pane(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut source = None;
+    let mut target = None;
+    let mut window_name = None;
+    let mut detached = false;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-s" => source = Some(next_target(name, &mut args, "-s", TargetKind::Pane)?),
+            "-t" => target = Some(next_target(name, &mut args, "-t", TargetKind::Window)?),
+            "-n" => window_name = Some(next_value(name, &mut args, "-n")?),
+            "-d" => detached = true,
+            "-P" | "-F" => return Err(unsupported(name, arg, "not planned: printing the new window")),
+            "-a" | "-b" => {
+                return Err(unsupported(
+                    name,
+                    arg,
+                    "not planned: windows are fixed slots, so there is nothing to insert before or after",
+                ));
+            }
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                return Err(CommandError::UnexpectedArgument {
+                    command: name.to_owned(),
+                    argument: other.to_owned(),
+                });
+            }
+        }
+    }
+
+    Ok(Command::BreakPane {
+        source: source.unwrap_or_default(),
+        target: target.unwrap_or_default(),
+        name: window_name,
+        detached,
+    })
+}
+
+fn parse_join_pane(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut source = None;
+    let mut target = None;
+    let mut split = None;
+    let mut detached = false;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-s" => source = Some(next_target(name, &mut args, "-s", TargetKind::Pane)?),
+            "-t" => target = Some(next_target(name, &mut args, "-t", TargetKind::Pane)?),
+            // Same inversion as `split-window`: `-h` is side by side.
+            "-h" => split = Some(Split::Vertical),
+            "-v" => split = Some(Split::Horizontal),
+            "-d" => detached = true,
+            "-p" | "-l" => return Err(unsupported(name, arg, "not planned: joined panes split evenly")),
+            "-b" | "-f" => {
+                return Err(unsupported(name, arg, "not planned: the joined pane always goes second"));
+            }
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                return Err(CommandError::UnexpectedArgument {
+                    command: name.to_owned(),
+                    argument: other.to_owned(),
+                });
+            }
+        }
+    }
+
+    Ok(Command::JoinPane {
+        source: source.unwrap_or_default(),
+        target: target.unwrap_or_default(),
+        split: split.unwrap_or(Split::Horizontal),
+        detached,
+    })
+}
+
+fn parse_run_shell(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut background = false;
+    let mut command = None;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-b" => background = true,
+            "-t" => {
+                // Accepted and ignored: a run-shell has no pane to act in.
+                let _ = next_value(name, &mut args, "-t")?;
+            }
+            "-d" | "-C" => return Err(unsupported(name, arg, "not planned: delayed and in-session commands")),
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                if command.replace(other.to_owned()).is_some() {
+                    return Err(CommandError::UnexpectedArgument {
+                        command: name.to_owned(),
+                        argument: other.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    let command = command.ok_or_else(|| CommandError::MissingValue {
+        flag: "a shell command".to_owned(),
+    })?;
+
+    Ok(Command::RunShell {
+        command,
+        background,
+    })
+}
+
+fn parse_if_shell(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut background = false;
+    let mut positional = Vec::new();
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-b" => background = true,
+            "-F" => return Err(unsupported(name, arg, "not planned: format conditions")),
+            "-t" => {
+                let _ = next_value(name, &mut args, "-t")?;
+            }
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => positional.push(other.to_owned()),
+        }
+    }
+
+    let mut positional = positional.into_iter();
+    let condition = positional.next().ok_or_else(|| CommandError::MissingValue {
+        flag: "a shell command to test".to_owned(),
+    })?;
+    let then_command = positional.next().ok_or_else(|| CommandError::MissingValue {
+        flag: "a command to run when the test succeeds".to_owned(),
+    })?;
+    let else_command = positional.next();
+
+    // The branches are whole command lines in one argument, as tmux writes
+    // them: `if-shell "test -d /srv" "new-window -c /srv"`.
+    Ok(Command::IfShell {
+        condition,
+        then_command: shell_words(&then_command),
+        else_command: else_command.as_deref().map(shell_words),
+        background,
+    })
+}
+
+/// Split a quoted command line the way a config file would.
+fn shell_words(line: &str) -> Vec<String> {
+    line.split_whitespace().map(str::to_owned).collect()
+}
+
+fn parse_wait_for(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut action = WaitAction::Wait;
+    let mut channel = None;
+
+    for arg in args {
+        match arg.as_str() {
+            "-S" => action = WaitAction::Signal,
+            "-L" | "-U" => {
+                return Err(unsupported(
+                    name,
+                    arg,
+                    "not planned: weave has signals but no wait-for locks",
+                ));
+            }
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                if channel.replace(other.to_owned()).is_some() {
+                    return Err(CommandError::UnexpectedArgument {
+                        command: name.to_owned(),
+                        argument: other.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    let channel = channel.ok_or_else(|| CommandError::MissingValue {
+        flag: "a channel name".to_owned(),
+    })?;
+
+    Ok(Command::WaitFor { channel, action })
+}
+
 fn next_value<'a, I>(command: &str, args: &mut I, flag: &str) -> Result<String, CommandError>
 where
     I: Iterator<Item = &'a String>,
@@ -1367,19 +1641,10 @@ fn parse_display_message(name: &str, args: &[String]) -> Result<Command, Command
         }
     }
 
-    // Without `-p` the message belongs on the status line, which has no
-    // message area until PR 7. Saying so beats printing somewhere unexpected.
-    if !print {
-        return Err(CommandError::UnsupportedFlag {
-            command: name.to_owned(),
-            flag: "without -p".to_owned(),
-            plan: "PR 7: the status line message area. Use `-p` to print to stdout".to_owned(),
-        });
-    }
-
     Ok(Command::DisplayMessage {
         message: message.unwrap_or_default(),
         target: target.unwrap_or_default(),
+        print,
     })
 }
 
@@ -1408,12 +1673,16 @@ fn window_target(window: WindowRef) -> Target {
     }
 }
 
-fn parse_target_only(
+/// Parse a command whose only arguments are `-t` and, for `kill-pane`, `-a`.
+///
+/// Returns the target and whether `-a` was given.
+fn parse_target_only_with_all(
     name: &str,
     args: &[String],
     kind: TargetKind,
-) -> Result<Target, CommandError> {
+) -> Result<(Target, bool), CommandError> {
     let mut target = None;
+    let mut all_but_target = false;
     let mut args = args.iter();
 
     while let Some(arg) = args.next() {
@@ -1429,7 +1698,7 @@ fn parse_target_only(
                     });
                 }
             }
-            "-a" => return Err(unsupported(name, arg, "PR 5: kill all but the target")),
+            "-a" => all_but_target = true,
             other if is_flag(other) => {
                 return Err(CommandError::UnknownFlag {
                     command: name.to_owned(),
@@ -1445,7 +1714,23 @@ fn parse_target_only(
         }
     }
 
-    Ok(target.unwrap_or_default())
+    Ok((target.unwrap_or_default(), all_but_target))
+}
+
+fn parse_target_only(
+    name: &str,
+    args: &[String],
+    kind: TargetKind,
+) -> Result<Target, CommandError> {
+    let (target, all) = parse_target_only_with_all(name, args, kind)?;
+    if all {
+        return Err(CommandError::UnknownFlag {
+            command: name.to_owned(),
+            flag: "-a".to_owned(),
+        });
+    }
+
+    Ok(target)
 }
 
 fn reject_extra_args(name: &str, args: &[String]) -> Result<(), CommandError> {
@@ -1687,6 +1972,7 @@ mod tests {
             parse("close"),
             Command::KillPane {
                 target: Target::current(),
+                all_but_target: false,
             }
         );
         assert_eq!(parse("detach"), Command::DetachClient);
@@ -1700,10 +1986,18 @@ mod tests {
 
     #[test]
     fn planned_flags_say_which_pr_brings_them() {
-        let error = Command::parse_str("resize-pane -M").expect_err("not supported yet");
+        let error = Command::parse_str("new-window -S").expect_err("not supported yet");
         let message = error.to_string();
-        assert!(message.contains("-M"), "{message}");
-        assert!(message.contains("PR 11"), "{message}");
+        assert!(message.contains("-S"), "{message}");
+        assert!(message.contains("PR 9"), "{message}");
+    }
+
+    /// A flag weave will never grow says so, rather than naming a PR that is
+    /// not coming.
+    #[test]
+    fn dropped_features_say_not_planned() {
+        let error = Command::parse_str("resize-pane -M").expect_err("no mouse");
+        assert!(error.to_string().contains("not planned"), "{error}");
     }
 
     #[test]
@@ -1912,23 +2206,26 @@ mod tests {
     }
 
     #[test]
-    fn display_message_needs_p_to_print() {
+    fn display_message_p_prints_and_without_it_shows() {
         assert_eq!(
             parse("display-message -p hello"),
             Command::DisplayMessage {
                 message: "hello".to_owned(),
                 target: Target::current(),
+                print: true,
             }
         );
-
-        // Without `-p` the message belongs on a status line we do not have.
-        let error = Command::parse_str("display-message hello").expect_err("needs -p");
-        assert!(error.to_string().contains("PR 7"), "{error}");
+        // Without `-p` the message goes to the status line instead.
+        let Command::DisplayMessage { print, .. } = parse("display-message hello") else {
+            panic!("expected a display-message");
+        };
+        assert!(!print);
     }
 
     #[test]
     fn display_message_takes_a_target_and_defaults_to_empty() {
-        let Command::DisplayMessage { message, target } = parse("display-message -p -t %3") else {
+        let Command::DisplayMessage { message, target, .. } = parse("display-message -p -t %3")
+        else {
             panic!("expected a display-message");
         };
         assert_eq!(message, "");

@@ -294,6 +294,11 @@ fn config_command_name(command: &Command) -> &'static str {
         Command::BindKey { .. } => "bind-key",
         Command::UnbindKey { .. } => "unbind-key",
         Command::SetOption { .. } => "set-option",
+        Command::BreakPane { .. } => "break-pane",
+        Command::JoinPane { .. } => "join-pane",
+        Command::RunShell { .. } => "run-shell",
+        Command::IfShell { .. } => "if-shell",
+        Command::WaitFor { .. } => "wait-for",
     }
 }
 

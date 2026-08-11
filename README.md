@@ -192,6 +192,10 @@ Commands use tmux's names and flags, including `-t session:window.pane` targets:
 - `select-layout even-horizontal|even-vertical|main-vertical|main-horizontal|tiled`
 - `capture-pane [-p] [-S n] [-E n] [-t target]`
 - `list-panes [-a] [-F fmt]`, `list-windows [-F fmt]`, `list-sessions [-F fmt]`
+- `break-pane [-s src] [-t dst] [-n name] [-d]`, `join-pane [-s src] [-t dst] [-h|-v] [-d]`
+- `run-shell [-b] <command>`, `if-shell [-b] <test> <then> [else]`
+- `wait-for [-S] <channel>`
+- `bind-key`, `unbind-key`, `list-keys`, `set-option`, `show-options`
 
 Targets accept pane ids (`%1`), pane indices (`.0`), window indices (`:2`), window
 names (`:build`), and the relative forms `+`, `-`, `!`, `{last}`, `{top}`,

@@ -187,7 +187,7 @@ mod tests {
     fn process_answers_a_device_attributes_query() {
         let mut pane = Pane::new(PaneId(1), 80, 24);
 
-        assert_eq!(pane.process(b"hello"), Vec::new());
+        assert_eq!(pane.process(b"hello"), Vec::<u8>::new());
         assert_eq!(pane.process(b"\x1b[0c"), b"\x1b[?1;2c".to_vec());
     }
 

@@ -18,6 +18,7 @@ use crate::backend::{BackendEvent, PaneBackend, PaneCommand, PaneId};
 use crate::command::target::{Extreme, PaneRef, WindowRef};
 use crate::command::{
     Command, LayoutPreset, ListScope, PaneSelector, ResizeChange, SpawnCommand, SplitSize, Target,
+    WaitAction,
 };
 use crate::config::{Config, Options, ThemeConfig};
 use crate::format::{expand as expand_format_impl, Variables};
@@ -44,6 +45,8 @@ const CLOSE_PANE_DURATION: Duration = Duration::from_millis(180);
 /// Shorter than opening a pane: nothing is appearing, so a long tween just
 /// feels like lag when you are holding down a resize key.
 const RESIZE_DURATION: Duration = Duration::from_millis(140);
+/// How long a `display-message` stays on the status line.
+const MESSAGE_DURATION: Duration = Duration::from_secs(3);
 /// The share `main-vertical` and `main-horizontal` give their main pane.
 const MAIN_PANE_RATIO: f32 = 0.5;
 /// How long shutdown waits for socket writers to flush their last frame.
@@ -164,10 +167,21 @@ enum ExitState {
     Detached,
 }
 
+/// The shell to run `run-shell` and `if-shell` commands with.
+fn shell_program() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())
+}
+
 /// Expand a format string, turning a bad one into a rejection rather than a
 /// fatal error: a malformed `-F` is the caller's typo, not a session failure.
 fn expand_format(template: &str, vars: &Variables) -> Result<String, Rejected> {
     expand_format_impl(template, vars).map_err(|error| Rejected::new(error.to_string()))
+}
+
+/// A message shown on the status line instead of returned to a caller.
+struct StatusMessage {
+    text: String,
+    shown_for: Duration,
 }
 
 /// A command the session declined to run, with a message meant for the user.
@@ -234,6 +248,13 @@ pub struct App {
     timeline: Timeline,
     keymap: Keymap,
     options: Options,
+    /// A message to show on the status line, and how long it has been up.
+    message: Option<StatusMessage>,
+    /// Callers parked on a `wait-for` channel, by channel name.
+    ///
+    /// A waiting request does not reply until someone signals it, so the reply
+    /// channel is held here instead of being answered.
+    wait_channels: HashMap<String, Vec<tokio::sync::oneshot::Sender<CommandResult>>>,
     /// Which key table the next keypress is looked up in.
     ///
     /// `root` normally; the prefix key switches it to `prefix` for one key,
@@ -620,6 +641,8 @@ impl App {
             timeline: Timeline::new(),
             keymap: config.keymap,
             options: config.options,
+            message: None,
+            wait_channels: HashMap::new(),
             key_table: ROOT_TABLE.to_owned(),
             theme: config.theme,
             status_bar,
@@ -932,10 +955,7 @@ impl App {
         // so route through it rather than repeating that here.
         self.current_workspace = previous;
         if detached {
-            self.resize_pane(pane_id, root_rect.w, root_rect.h).await?;
-            if let Some(pane) = self.pane_mut(pane_id) {
-                pane.resize(root_rect.w, root_rect.h);
-            }
+            self.fit_pane_to_window(pane_id, root_rect).await?;
         } else {
             self.switch_workspace(workspace).await?;
         }
@@ -1235,7 +1255,13 @@ impl App {
     /// Run a command, returning whatever it printed.
     ///
     /// Most commands print nothing and return an empty string; only
-    /// `display-message -p` has output today.
+    /// `display-message -p` and the listings have output.
+    ///
+    /// This is long because it is a dispatch table: one arm per command, each
+    /// a few lines. Related groups already live in `execute_settings`,
+    /// `execute_reshape` and `execute_outside`; splitting the rest further
+    /// would scatter the mapping rather than clarify it.
+    #[allow(clippy::too_many_lines)]
     async fn execute_now(&mut self, cmd: Command) -> Result<String, ExecuteError> {
         match cmd {
             Command::SplitWindow {
@@ -1310,20 +1336,56 @@ impl App {
                 self.workspaces[workspace].name = Some(name);
                 self.dirty = true;
             }
-            Command::KillPane { target } => {
+            Command::KillPane {
+                target,
+                all_but_target,
+            } => {
                 let (workspace, pane) = self.resolve_pane(&target)?;
                 self.switch_workspace(workspace).await?;
-                self.close_pane(pane).await?;
+                if all_but_target {
+                    // Close everything else, leaving the target alone.
+                    for other in self.current().leaf_panes() {
+                        if other != pane {
+                            self.close_pane(other).await?;
+                        }
+                    }
+                } else {
+                    self.close_pane(pane).await?;
+                }
+            }
+            // Moving panes between windows and running shell commands are
+            // their own concerns; they live together rather than swelling this
+            // match further.
+            outside @ (Command::BreakPane { .. }
+            | Command::JoinPane { .. }
+            | Command::RunShell { .. }
+            | Command::IfShell { .. }) => return self.execute_outside(outside).await,
+            Command::WaitFor { .. } => {
+                // Handled before dispatch: waiting parks the caller's reply
+                // channel rather than answering, which `execute_now` cannot do.
+                return Err(Rejected::new(
+                    "`wait-for` needs a caller to answer; run it through `wv exec`".to_owned(),
+                )
+                .into());
             }
             Command::DetachClient => self.detach(),
             Command::KillSession { target } => {
                 self.check_session(&target)?;
                 self.exit = ExitState::Quit;
             }
-            Command::DisplayMessage { message, target } => {
+            Command::DisplayMessage {
+                message,
+                target,
+                print,
+            } => {
                 let (workspace, pane) = self.resolve_pane(&target)?;
                 let vars = self.pane_variables(workspace, pane).await;
-                return Ok(expand_format(&message, &vars)?);
+                let text = expand_format(&message, &vars)?;
+                if print {
+                    return Ok(text);
+                }
+                // Without `-p` the message belongs on screen, not in the reply.
+                self.show_message(text);
             }
             Command::CapturePane { target, start, end } => {
                 let (_, pane) = self.resolve_pane(&target)?;
@@ -1523,6 +1585,25 @@ impl App {
                 }
             }
             SessionEvent::Request { command, reply } => {
+                // `wait-for` is the one command that does not answer straight
+                // away: waiting parks the reply channel until someone signals.
+                if let Command::WaitFor { channel, action } = &command {
+                    match action {
+                        WaitAction::Wait => {
+                            self.wait_channels
+                                .entry(channel.clone())
+                                .or_default()
+                                .push(reply);
+                            return Ok(());
+                        }
+                        WaitAction::Signal => {
+                            self.signal_wait_channel(channel);
+                            let _ = reply.send(CommandResult::empty());
+                            return Ok(());
+                        }
+                    }
+                }
+
                 let result = self.execute_request(command).await?;
                 // A dropped receiver means the caller hung up mid-command. The
                 // command still ran; there is simply nobody left to tell.
@@ -1670,6 +1751,60 @@ impl App {
         Ok(String::new())
     }
 
+    /// Commands that move panes between windows, or reach outside the session
+    /// to the shell.
+    async fn execute_outside(&mut self, cmd: Command) -> Result<String, ExecuteError> {
+        match cmd {
+            Command::BreakPane {
+                source,
+                target,
+                name,
+                detached,
+            } => {
+                let (workspace, pane) = self.resolve_pane(&source)?;
+                self.break_pane(workspace, pane, &target, name, detached)
+                    .await?;
+            }
+            Command::JoinPane {
+                source,
+                target,
+                split,
+                detached,
+            } => {
+                let (source_window, pane) = self.resolve_pane(&source)?;
+                let (target_window, onto) = self.resolve_pane(&target)?;
+                self.join_pane(source_window, pane, target_window, onto, split, detached)
+                    .await?;
+            }
+            Command::RunShell {
+                command,
+                background,
+            } => return self.run_shell(&command, background).await,
+            Command::IfShell {
+                condition,
+                then_command,
+                else_command,
+                background,
+            } => {
+                let succeeded = self.shell_status(&condition, background).await?;
+                let branch = if succeeded {
+                    Some(then_command)
+                } else {
+                    else_command
+                };
+                if let Some(branch) = branch {
+                    let command = Command::parse(&branch).map_err(|error| {
+                        Rejected::new(format!("`if-shell` branch does not parse: {error}"))
+                    })?;
+                    return Box::pin(self.execute_now(command)).await;
+                }
+            }
+            other => unreachable!("execute_outside got {other:?}"),
+        }
+
+        Ok(String::new())
+    }
+
     /// Commands that rearrange a window without adding or removing panes.
     async fn execute_reshape(&mut self, cmd: Command) -> Result<(), ExecuteError> {
         match cmd {
@@ -1762,6 +1897,227 @@ impl App {
             _ => {}
         }
         self.dirty = true;
+    }
+
+    /// Move a pane into a window of its own.
+    async fn break_pane(
+        &mut self,
+        workspace: usize,
+        pane: PaneId,
+        target: &Target,
+        name: Option<String>,
+        detached: bool,
+    ) -> Result<(), ExecuteError> {
+        if self.workspaces[workspace].leaf_panes().len() < 2 {
+            return Err(Rejected::new(
+                "that pane is the only one in its window; there is nothing to break out"
+                    .to_owned(),
+            )
+            .into());
+        }
+
+        let destination = if target.window.is_some() {
+            let requested = self.resolve_window(target)?;
+            if !self.workspaces[requested].is_empty() {
+                return Err(Rejected::new(format!(
+                    "window {} already exists",
+                    requested + 1
+                ))
+                .into());
+            }
+            requested
+        } else {
+            self.first_free_window().ok_or_else(|| {
+                Rejected::new(format!("all {WORKSPACE_COUNT} windows are in use"))
+            })?
+        };
+
+        self.detach_pane_from_window(workspace, pane);
+        let rect = self.root_rect();
+        let window = &mut self.workspaces[destination];
+        window.name = name;
+        window.root = Some(Node::Leaf {
+            pane,
+            rect_current: FRect::from(rect),
+            rect_target: rect,
+        });
+        window.set_focus(Some(pane));
+
+        if detached {
+            self.fit_pane_to_window(pane, rect).await?;
+            self.recompute_layout();
+        } else {
+            self.switch_workspace(destination).await?;
+        }
+        self.dirty = true;
+
+        Ok(())
+    }
+
+    /// Move a pane out of its window and split it into another.
+    async fn join_pane(
+        &mut self,
+        source_window: usize,
+        pane: PaneId,
+        target_window: usize,
+        onto: PaneId,
+        split: Split,
+        detached: bool,
+    ) -> Result<(), ExecuteError> {
+        if pane == onto {
+            return Err(Rejected::new("cannot join a pane to itself".to_owned()).into());
+        }
+        if self.workspaces[source_window].leaf_panes().len() < 2 && source_window == target_window
+        {
+            return Err(
+                Rejected::new("that pane is already the whole window".to_owned()).into(),
+            );
+        }
+
+        self.detach_pane_from_window(source_window, pane);
+        self.switch_workspace(target_window).await?;
+
+        // Split the destination and put the moved pane in the new half rather
+        // than spawning a fresh one.
+        let Some(old_parent_rect) = self.leaf_rect_target(onto) else {
+            return Err(Rejected::new("the destination pane has no layout".to_owned()).into());
+        };
+        if let Some(root) = self.current_mut().root.as_mut() {
+            root.split_focused(onto, split, pane);
+        }
+        if !detached {
+            self.current_mut().set_focus(Some(pane));
+        }
+        self.recompute_layout();
+        self.start_open_tweens(onto, pane, split, old_parent_rect);
+        self.dirty = true;
+
+        Ok(())
+    }
+
+    /// Take a pane out of a window's tree without killing it.
+    ///
+    /// The pane keeps running and keeps its `%N`; only its place in the layout
+    /// goes away, which is what makes break and join moves rather than
+    /// kill-and-respawn.
+    fn detach_pane_from_window(&mut self, workspace: usize, pane: PaneId) {
+        let window = &mut self.workspaces[workspace];
+        let emptied = window
+            .root
+            .as_mut()
+            .is_some_and(|root| !root.close(pane) || root.leaves().is_empty());
+        if emptied {
+            window.root = None;
+        }
+        window.closing.remove(&pane);
+        if window.focused == Some(pane) {
+            let next = window.root.as_ref().and_then(first_leaf_pane);
+            window.focused = next;
+        }
+        if window.last_focused == Some(pane) {
+            window.last_focused = None;
+        }
+        if window.zoomed == Some(pane) {
+            window.zoomed = None;
+        }
+
+        if workspace == self.current_workspace {
+            self.recompute_layout();
+        }
+    }
+
+    /// Run a shell command outside any pane, returning its output.
+    async fn run_shell(
+        &mut self,
+        command: &str,
+        background: bool,
+    ) -> Result<String, ExecuteError> {
+        let mut child = tokio::process::Command::new(shell_program());
+        child.arg("-c").arg(command);
+
+        if background {
+            // Detached: the caller gets an immediate reply and the command
+            // outlives it. This is what makes `wait-for` useful.
+            child
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            child
+                .spawn()
+                .map_err(|error| Rejected::new(format!("failed to run `{command}`: {error}")))?;
+            return Ok(String::new());
+        }
+
+        let output = child
+            .output()
+            .await
+            .map_err(|error| Rejected::new(format!("failed to run `{command}`: {error}")))?;
+
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        if !output.status.success() {
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            return Err(Rejected::new(text.trim_end().to_owned()).into());
+        }
+
+        Ok(text.trim_end().to_owned())
+    }
+
+    /// Whether a shell command succeeded, for `if-shell`.
+    async fn shell_status(
+        &mut self,
+        command: &str,
+        background: bool,
+    ) -> Result<bool, ExecuteError> {
+        if background {
+            // tmux's `-b` makes the *test* asynchronous; weave runs it inline
+            // and only skips waiting on the branch, which is the part that
+            // could block the render tick.
+            tracing::debug!("if-shell -b runs its condition inline");
+        }
+
+        let status = tokio::process::Command::new(shell_program())
+            .arg("-c")
+            .arg(command)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map_err(|error| Rejected::new(format!("failed to run `{command}`: {error}")))?;
+
+        Ok(status.success())
+    }
+
+    /// Release everyone waiting on a channel.
+    fn signal_wait_channel(&mut self, channel: &str) {
+        let waiters = self.wait_channels.remove(channel).unwrap_or_default();
+        let count = waiters.len();
+        for waiter in waiters {
+            let _ = waiter.send(CommandResult::empty());
+        }
+        tracing::debug!("signalled `{channel}`, releasing {count} waiter(s)");
+    }
+
+    /// Put a message on the status line for a while.
+    fn show_message(&mut self, text: String) {
+        tracing::info!("message: {text}");
+        self.message = Some(StatusMessage {
+            text,
+            shown_for: Duration::ZERO,
+        });
+        self.dirty = true;
+    }
+
+    /// Age out a status message once it has had its time.
+    fn advance_message(&mut self, dt: Duration) {
+        let Some(message) = self.message.as_mut() else {
+            return;
+        };
+        message.shown_for += dt;
+        if message.shown_for >= MESSAGE_DURATION {
+            self.message = None;
+            self.dirty = true;
+        }
     }
 
     /// Read a pane's visible screen.
@@ -2509,6 +2865,7 @@ impl App {
 
     async fn tick(&mut self, dt: Duration) -> anyhow::Result<()> {
         self.last_tick_dt = dt;
+        self.advance_message(dt);
         self.advance_animations(dt).await?;
 
         // While detached there is nobody to render for: keep pane state and
@@ -2534,9 +2891,14 @@ impl App {
         );
         if self.status_bar {
             let indicators = self.workspace_indicators();
+            // A message takes over the mode label, which is where tmux puts it.
+            let mode_label = self
+                .message
+                .as_ref()
+                .map_or("NORMAL", |message| message.text.as_str());
             chrome::draw_status_bar(
                 &mut self.back,
-                "NORMAL",
+                mode_label,
                 &indicators,
                 chrono::Local::now(),
                 self.theme,
@@ -2734,6 +3096,28 @@ impl App {
         self.backend.resize(pane, cols, rows).await
     }
 
+    /// Resize a pane to fit a window it was just placed in.
+    ///
+    /// Goes through `HostResize` for the same reason switching windows does:
+    /// this is a deliberate placement, not a mid-animation resize. The pane may
+    /// still carry a tween from the layout it just left, so that tween is
+    /// dropped first — it is animating towards a rectangle that no longer
+    /// means anything.
+    async fn fit_pane_to_window(&mut self, pane: PaneId, rect: Rect) -> anyhow::Result<()> {
+        self.timeline.clear_pane_tweens(pane);
+
+        let previous = self.resize_mode;
+        self.resize_mode = ResizeMode::HostResize;
+        let resized = self.resize_pane(pane, rect.w, rect.h).await;
+        self.resize_mode = previous;
+
+        if let Some(pane) = self.pane_mut(pane) {
+            pane.resize(rect.w, rect.h);
+        }
+
+        resized
+    }
+
     fn is_safe_to_resize(&self, pane: PaneId) -> bool {
         self.resize_mode == ResizeMode::HostResize || !self.timeline.has_leaf_rect_tween(pane)
     }
@@ -2791,6 +3175,8 @@ impl App {
             timeline: Timeline::new(),
             keymap: Keymap::default(),
             options: Options::default(),
+            message: None,
+            wait_channels: HashMap::new(),
             key_table: ROOT_TABLE.to_owned(),
             theme: test_theme(),
             status_bar: true,
@@ -3051,7 +3437,8 @@ mod tests {
 
     use super::{
         frame_interval, validate_session_name, App, Args, AttachArgs, ExecArgs, ExitState,
-        LaunchArgs, CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION, OPEN_NEW_PANE_DURATION,
+        LaunchArgs, CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION, MESSAGE_DURATION,
+        OPEN_NEW_PANE_DURATION,
     };
     use crate::anim::tween::Easing;
     use crate::backend::{PaneBackend, PaneCommand, PaneId};
@@ -3937,6 +4324,151 @@ mod tests {
         assert!(!result.is_ok());
     }
 
+    #[tokio::test]
+    async fn break_pane_moves_a_pane_into_its_own_window() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+
+        app.execute(command("break-pane -s %2 -n solo"))
+            .await
+            .expect("break succeeds");
+
+        // The pane moved rather than being replaced: same id, same process.
+        assert!(handle.killed().is_empty(), "break must not kill the pane");
+        assert_eq!(app.current_workspace, 1);
+        assert_eq!(app.window_name(1), "solo");
+        assert_eq!(app.current().leaf_panes(), vec![PaneId(2)]);
+        assert_eq!(app.workspaces[0].leaf_panes(), vec![PaneId(1)]);
+        assert_eq!(app.pane_number(PaneId(2)), Some(2), "%2 still means %2");
+    }
+
+    #[tokio::test]
+    async fn breaking_the_only_pane_is_refused() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+
+        let result = app
+            .execute_request(command("break-pane"))
+            .await
+            .expect("the request completes");
+
+        assert!(!result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn join_pane_moves_a_pane_between_windows() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("new-window -d")).await.expect("window");
+
+        // %2 lives in window 2; bring it back into window 1 beside %1.
+        app.execute(command("join-pane -s %2 -t %1 -h"))
+            .await
+            .expect("join succeeds");
+
+        assert!(handle.killed().is_empty(), "join must not kill the pane");
+        assert_eq!(app.current_workspace, 0);
+        assert_eq!(app.current().leaf_panes(), vec![PaneId(1), PaneId(2)]);
+        assert!(app.workspaces[1].is_empty(), "the source window emptied");
+    }
+
+    #[tokio::test]
+    async fn kill_pane_a_leaves_only_the_target() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+        app.execute(command("split-window -v")).await.expect("split");
+
+        app.execute(command("kill-pane -a -t %1"))
+            .await
+            .expect("kill succeeds");
+
+        // The others are closing; %1 is not.
+        assert!(!app.current().closing.contains(&PaneId(1)));
+        assert!(app.current().closing.contains(&PaneId(2)));
+        assert!(app.current().closing.contains(&PaneId(3)));
+    }
+
+    #[tokio::test]
+    async fn run_shell_returns_command_output() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        // Quoting is the caller's job: the shell command is one argument.
+        let result = app
+            .execute_request(Command::RunShell {
+                command: "echo hi".to_owned(),
+                background: false,
+            })
+            .await
+            .expect("the request completes");
+        match result {
+            CommandResult::Ok { output } => assert_eq!(output, "hi"),
+            other @ CommandResult::Error { .. } => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failing_run_shell_is_an_error_result() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        let result = app
+            .execute_request(Command::RunShell {
+                command: "exit 3".to_owned(),
+                background: false,
+            })
+            .await
+            .expect("the request completes");
+
+        assert!(!result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn if_shell_picks_a_branch_by_exit_status() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(Command::IfShell {
+            condition: "true".to_owned(),
+            then_command: vec!["split-window".to_owned(), "-h".to_owned()],
+            else_command: None,
+            background: false,
+        })
+        .await
+        .expect("if-shell succeeds");
+        assert_eq!(app.current().leaf_panes().len(), 2, "the then branch ran");
+
+        app.execute(Command::IfShell {
+            condition: "false".to_owned(),
+            then_command: vec!["split-window".to_owned(), "-h".to_owned()],
+            else_command: None,
+            background: false,
+        })
+        .await
+        .expect("if-shell succeeds");
+        assert_eq!(app.current().leaf_panes().len(), 2, "no branch ran");
+    }
+
+    #[tokio::test]
+    async fn display_message_without_p_goes_to_the_status_line() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        let output = app.request_output("display-message hello").await;
+
+        assert_eq!(output, "", "it shows rather than returns");
+        assert_eq!(
+            app.message.as_ref().map(|message| message.text.as_str()),
+            Some("hello")
+        );
+
+        // And it ages out.
+        app.advance_message(MESSAGE_DURATION);
+        assert!(app.message.is_none());
+    }
+
     /// A waiting caller gets the command's output, not just "it ran".
     #[tokio::test]
     async fn a_request_returns_command_output() {
@@ -4601,11 +5133,11 @@ mod tests {
     /// tmux script learns what is missing rather than that something failed.
     #[test]
     fn exec_reports_unsupported_flags_with_their_plan() {
-        let error = LaunchArgs::parse(["exec", "resize-pane", "-M"])
-            .expect_err("mouse resizing is not implemented yet")
+        let error = LaunchArgs::parse(["exec", "new-window", "-S"])
+            .expect_err("not implemented yet")
             .to_string();
 
-        assert!(error.contains("PR 11"), "{error}");
+        assert!(error.contains("PR 9"), "{error}");
     }
 
     #[test]

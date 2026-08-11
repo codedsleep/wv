@@ -261,6 +261,9 @@ const ONE_SHOT_REQUEST_ID: u64 = 0;
 /// A command runs on the session's event loop between frames, so a healthy
 /// session replies in microseconds. This bound exists so a wedged session
 /// fails a script instead of hanging it.
+///
+/// `wait-for` is exempt: waiting for a signal is the whole point of it, and
+/// there is no sensible upper bound on how long that takes.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Run one command against a running session and return what it produced.
@@ -268,6 +271,15 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 /// This is the whole of `wv exec`'s transport: connect, handshake, request,
 /// reply, close.
 pub async fn request(path: &Path, command: Command) -> anyhow::Result<CommandResult> {
+    // Blocking until something signals is what `wait-for` is for, so it must
+    // not be cut off by the reply timeout.
+    let waits_indefinitely = matches!(
+        command,
+        Command::WaitFor {
+            action: crate::command::WaitAction::Wait,
+            ..
+        }
+    );
     let mut stream = UnixStream::connect(path)
         .await
         .with_context(|| format!("failed to connect to session socket {}", path.display()))?;
@@ -281,15 +293,21 @@ pub async fn request(path: &Path, command: Command) -> anyhow::Result<CommandRes
     )
     .await?;
 
-    let frame = timeout(REPLY_TIMEOUT, read_frame::<_, ServerToClient>(&mut stream))
-        .await
-        .with_context(|| {
-            format!(
-                "the session did not answer within {} seconds",
-                REPLY_TIMEOUT.as_secs()
-            )
-        })?
-        .context("failed to read the session server's reply")?;
+    let frame = if waits_indefinitely {
+        read_frame::<_, ServerToClient>(&mut stream)
+            .await
+            .context("failed to read the session server's reply")?
+    } else {
+        timeout(REPLY_TIMEOUT, read_frame::<_, ServerToClient>(&mut stream))
+            .await
+            .with_context(|| {
+                format!(
+                    "the session did not answer within {} seconds",
+                    REPLY_TIMEOUT.as_secs()
+                )
+            })?
+            .context("failed to read the session server's reply")?
+    };
 
     match frame {
         Some(ServerToClient::Reply { id, result }) => {

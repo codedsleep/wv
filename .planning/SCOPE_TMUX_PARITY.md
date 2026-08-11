@@ -216,20 +216,34 @@ make those references lie.
 
 **What stays missing without it:** `copy-mode`, `paste-buffer` and the buffer
 commands, search, `capture-pane -S/-E` beyond the visible screen, and
-wheel-scroll in PR 11's mouse support. `history-limit` is accepted as an
+and wheel-scroll, had mouse support been in scope. `history-limit` is accepted as an
 option in PR 7 but does nothing.
 
 If it comes back, it wants its own scope document.
 
-# PR 9 — Shell glue and hooks
+# PR 9 — Shell glue and pane movement — **SHIPPED (trimmed)**
 
-- `run-shell [-b]`, `if-shell`, `pipe-pane`.
-- `set-hook` / `show-hooks` for the common hook set
-  (`after-split-window`, `pane-died`, `client-attached`, `session-created`).
-- `command-prompt`, `confirm-before`, `display-panes`.
-- Command sequences and aliases (`;` separation, `\;` escaping) in `exec`.
+**Shipped:** `break-pane` and `join-pane` (deferred here from PR 5),
+`kill-pane -a`, `display-message` without `-p` on a status-line message area,
+`run-shell [-b]`, `if-shell [-b]`, and `wait-for [-S]` (deferred here from
+PR 2).
 
----
+`wait-for` needed the one thing PR 2 could not do: a request that does not
+reply. A waiting caller's reply channel is parked in `App::wait_channels` until
+someone signals it, and `wv exec` exempts that one command from its ten-second
+reply timeout.
+
+**Trimmed out, and now marked won't-do rather than planned:**
+
+- `set-hook`/`show-hooks`. Hooks want an event vocabulary and a re-entrancy
+  story — a `pane-died` hook that kills a pane — that is its own design.
+- `pipe-pane`. Streaming a pane's PTY output to a process duplicates what
+  `capture-pane` already gives a polling script.
+- `set-environment`, `bind-key -N` descriptions, `list-* -f` filters,
+  `capture-pane -e/-J`, `send-keys -H`.
+
+None of these blocked anything: the scripting and config story is complete
+without them.
 
 # PR 10 — Multi-client attach (decision 2)
 
@@ -239,14 +253,14 @@ If it comes back, it wants its own scope document.
 
 ---
 
-# PR 11 — Mouse
+# PR 11 — Mouse — **DROPPED**
 
-- SGR mouse reporting in the client, forwarded through the protocol.
-- `mouse` option: click-to-focus, drag borders to resize (feeding PR 5's tweens),
-  status-bar clicks. Wheel-scroll needs scrollback, which is out of scope, so
-  the wheel is forwarded to the pane as an escape sequence instead.
+Removed on 2026-08-11: not needed. weave is keyboard-driven, and the parts of
+mouse support that would matter most — wheel-scroll — need the scrollback that
+went with PR 8, so what is left is click-to-focus and drag-to-resize.
 
----
+`resize-pane -M` and the `mouse` option stay accepted-but-inert, with the
+option registry saying why.
 
 ## Ordering summary
 
@@ -255,9 +269,9 @@ PR 1 (command model) ──┬── PR 2 (req/resp) ──┬── PR 3 (spawn
                        │                     └── PR 6 (list/capture/formats) ← harness works
                        ├── PR 4 (windows)  ────── PR 5 (sizing/zoom)
                        └── PR 7 (prefix/bind/options)  [needs 1; wants 6 for formats]
-                                   PR 9 (hooks), PR 10 (multi-client), PR 11 (mouse)
+                                   PR 9 (shell glue), PR 10 (multi-client)
                                    — independent of each other
-                                   PR 8 (copy-mode) — dropped, see above
+                                   PR 8 (copy-mode), PR 11 (mouse) — dropped
 ```
 
 ## Cross-cutting requirements for every PR

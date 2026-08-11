@@ -294,6 +294,7 @@ fn split(split: Split) -> Command {
 fn kill_pane() -> Command {
     Command::KillPane {
         target: Target::current(),
+        all_but_target: false,
     }
 }
 
