@@ -59,8 +59,22 @@ pub async fn create_bare(args: &Args) -> anyhow::Result<String> {
 }
 
 /// Attach to an existing session by name, or to the most recent one.
-pub async fn attach(session_name: Option<&str>) -> anyhow::Result<()> {
+///
+/// With `detach_others`, everyone already watching is detached first — tmux's
+/// `attach -d`, for when you want the session to yourself.
+pub async fn attach(session_name: Option<&str>, detach_others: bool) -> anyhow::Result<()> {
     let session = paths::resolve_session(session_name)?;
+
+    if detach_others {
+        let _ = server::request(
+            &session.path,
+            Command::DetachClient {
+                target: None,
+                all: false,
+            },
+        )
+        .await?;
+    }
 
     attach_to(&session.name, &session.path).await
 }

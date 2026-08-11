@@ -139,7 +139,7 @@ impl Keymap {
         self.set_binding(alt_char('k'), focus(Direction::Up));
         self.set_binding(alt_char('l'), focus(Direction::Right));
         self.set_binding(alt_char('q'), kill_pane());
-        self.set_binding(alt_char('d'), Command::DetachClient);
+        self.set_binding(alt_char('d'), Command::DetachClient { target: None, all: false });
         self.set_binding(alt_char('v'), split(Split::Vertical));
         // Some terminals fold Shift into the uppercase char and drop the SHIFT
         // modifier; kitty-style protocols keep it. Register both so Alt+Shift+Q
@@ -188,7 +188,7 @@ impl Keymap {
                 target: Target::current(),
             },
         );
-        bind('d', Command::DetachClient);
+        bind('d', Command::DetachClient { target: None, all: false });
         bind(
             'z',
             Command::ResizePane {

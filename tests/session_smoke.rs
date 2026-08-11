@@ -1,5 +1,5 @@
 //! End-to-end coverage for the native session layer: attach, input, detach,
-//! reattach, takeover, quit.
+//! reattach, a second client joining, quit.
 //!
 //! The whole flow runs in one test because it drives a single session through
 //! its lifecycle, and because the socket directory is selected by an
@@ -14,15 +14,14 @@ use tokio::time::timeout;
 use weave::app::{App, Args};
 use weave::command::Command;
 use weave::session::protocol::{
-    read_frame, write_frame, write_hello, ClientToServer, CommandResult, ExitReason,
-    ServerToClient,
+    read_frame, write_frame, write_hello, ClientToServer, CommandResult, ServerToClient,
 };
 use weave::session::server::SessionServer;
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test]
-async fn session_survives_detach_and_serves_one_client_at_a_time() -> anyhow::Result<()> {
+async fn session_survives_detach_and_serves_several_clients() -> anyhow::Result<()> {
     let runtime_dir = test_runtime_dir();
     std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
     // `cat` echoes through the PTY without a prompt, which keeps assertions
@@ -133,17 +132,14 @@ async fn session_survives_detach_and_serves_one_client_at_a_time() -> anyhow::Re
         )
     );
 
-    // A second client evicts the first.
-    let mut taking_over = attach(&socket, 100, 30).await?;
-    assert_eq!(
-        expect_message(&mut client).await?,
-        ServerToClient::Exit(ExitReason::TakenOver),
-        "the previous client should be told why it was dropped"
-    );
-    next_frame(&mut taking_over).await?;
+    // A second client joins rather than evicting the first: both are served,
+    // and the session shrinks to the smaller of the two terminals.
+    let mut second = attach(&socket, 60, 20).await?;
+    next_frame(&mut second).await?;
+    next_frame(&mut client).await?;
 
-    // Quit tears the session down.
-    write_frame(&mut taking_over, &ClientToServer::Quit).await?;
+    // Quit tears the session down for everyone.
+    write_frame(&mut second, &ClientToServer::Quit).await?;
     timeout(STEP_TIMEOUT, session)
         .await
         .context("session shuts down after quit")???;

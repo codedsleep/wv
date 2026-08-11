@@ -261,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
         }
         weave::app::LaunchArgs::Attach(args) => {
             install_panic_hook();
-            weave::session::launch::attach(args.session_name.as_deref()).await
+            weave::session::launch::attach(args.session_name.as_deref(), args.detach_others).await
         }
     }
 }

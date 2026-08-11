@@ -245,13 +245,29 @@ reply timeout.
 None of these blocked anything: the scripting and config story is complete
 without them.
 
-# PR 10 — Multi-client attach (decision 2)
+# PR 10 — Multi-client attach — **SHIPPED**
 
-- N clients per session, per-client terminal size with smallest-wins clamping.
-- `switch-client`, `attach-session -d`, `detach-client -t`, `refresh-client`.
-- Removes the `TakenOver` eviction path.
+Attaching no longer evicts. `App` holds a `Vec<AttachedClient>`, each with its
+own `front` surface and `DiffRenderer`, because a frame is a delta against what
+*that* terminal has already seen. The composed frame is shared; the deltas
+cannot be. The single-client path could swap front and back buffers; with
+several, the price of correct per-client deltas is a copy each.
 
----
+The session renders at the smallest attached terminal, renegotiated whenever a
+client joins or leaves.
+
+**Shipped:** N clients, smallest-wins sizing, `detach-client [-t] [-a]`,
+`refresh-client`, `wv attach -d`. `ExitReason::TakenOver` is no longer sent;
+the variant stays so a client can still explain an older server's message.
+
+**Won't do:** `switch-client` (a weave server hosts exactly one session, so
+there is nowhere to switch to).
+
+**Known gap:** client ids are connection ids, handed out in arrival order, and
+`wv exec` connections consume them too — so they are not predictable from a
+script, and there is no `list-clients` to discover them. The no-target form,
+which detaches everyone, is the reliable one. A `list-clients` with a stable
+per-client name would fix this and is the obvious follow-up.
 
 # PR 11 — Mouse — **DROPPED**
 

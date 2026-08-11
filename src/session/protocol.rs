@@ -104,6 +104,10 @@ pub enum ExitReason {
     /// The session shut down at the user's request.
     Quit,
     /// Another client attached and took over this session.
+    ///
+    /// weave no longer evicts — several clients share a session — so nothing
+    /// sends this. It stays so a client can still explain the message if an
+    /// older server sends it.
     TakenOver,
     /// The server is going away (signal, or its last pane exited).
     ServerShutdown,

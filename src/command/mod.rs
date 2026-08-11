@@ -137,14 +137,21 @@ pub enum Command {
     },
     /// Block until a channel is signalled, or signal one.
     WaitFor { channel: String, action: WaitAction },
+    /// Redraw every attached client from scratch.
+    RefreshClient,
     /// Close a pane, or every pane except it.
     KillPane {
         target: Target,
         /// `-a`: kill every *other* pane in the window instead.
         all_but_target: bool,
     },
-    /// Leave the session running and disconnect the client.
-    DetachClient,
+    /// Leave the session running and disconnect one or more clients.
+    DetachClient {
+        /// Which client, by id. `None` means every one.
+        target: Option<String>,
+        /// `-a`: detach every client *except* the target.
+        all: bool,
+    },
     /// Shut the session down, killing every pane.
     KillSession { target: Target },
     /// Type keys into a pane, as if the user had pressed them.
@@ -339,6 +346,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "run-shell",
     "if-shell",
     "wait-for",
+    "refresh-client",
 ];
 
 /// The pre-target weave names, still accepted.
@@ -428,10 +436,18 @@ impl Command {
                 })
             }
 
-            "detach-client" | "detach" => {
+            "detach-client" | "detach" => parse_detach_client(name, rest),
+
+            "refresh-client" | "refresh" => {
                 reject_extra_args(name, rest)?;
-                Ok(Self::DetachClient)
+                Ok(Self::RefreshClient)
             }
+
+            "switch-client" | "switchc" => Err(unsupported(
+                name,
+                "switch-client",
+                "not planned: a weave server hosts exactly one session, so there is nothing to switch to",
+            )),
 
             "kill-session" | "quit" => Ok(Self::KillSession {
                 target: parse_target_only(name, rest, TargetKind::Session)?,
@@ -1733,12 +1749,38 @@ fn parse_target_only(
     Ok(target)
 }
 
+fn parse_detach_client(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut target = None;
+    let mut all = false;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-t" => target = Some(next_value(name, &mut args, "-t")?),
+            "-a" => all = true,
+            "-s" => return Err(unsupported(name, arg, "not planned: one session per server")),
+            "-P" | "-E" => return Err(unsupported(name, arg, "not planned: client process control")),
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                return Err(CommandError::UnexpectedArgument {
+                    command: name.to_owned(),
+                    argument: other.to_owned(),
+                });
+            }
+        }
+    }
+
+    Ok(Command::DetachClient { target, all })
+}
+
 fn reject_extra_args(name: &str, args: &[String]) -> Result<(), CommandError> {
     match args.first() {
         None => Ok(()),
-        Some(arg) if arg == "-a" || arg == "-P" || arg == "-t" => {
-            Err(unsupported(name, arg, "PR 10: multi-client attach"))
-        }
         Some(arg) if arg.starts_with('-') => Err(CommandError::UnknownFlag {
             command: name.to_owned(),
             flag: arg.clone(),
@@ -1975,7 +2017,13 @@ mod tests {
                 all_but_target: false,
             }
         );
-        assert_eq!(parse("detach"), Command::DetachClient);
+        assert_eq!(
+            parse("detach"),
+            Command::DetachClient {
+                target: None,
+                all: false,
+            }
+        );
         assert_eq!(
             parse("quit"),
             Command::KillSession {
@@ -2288,6 +2336,28 @@ mod tests {
 
     /// `-` is the minus key, not a flag — `bind - split-window -v` is a line
     /// real tmux configs contain.
+    #[test]
+    fn detach_client_targets_one_client_or_all_but_one() {
+        assert_eq!(
+            parse("detach-client -t 3"),
+            Command::DetachClient {
+                target: Some("3".to_owned()),
+                all: false,
+            }
+        );
+        let Command::DetachClient { all, .. } = parse("detach-client -a -t 3") else {
+            panic!("expected a detach");
+        };
+        assert!(all);
+    }
+
+    /// One weave server hosts one session, so there is nowhere to switch to.
+    #[test]
+    fn switch_client_is_not_planned() {
+        let error = Command::parse_str("switch-client -t other").expect_err("no other session");
+        assert!(error.to_string().contains("not planned"), "{error}");
+    }
+
     #[test]
     fn a_lone_dash_is_a_value_not_a_flag() {
         assert_eq!(

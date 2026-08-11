@@ -178,6 +178,52 @@ fn expand_format(template: &str, vars: &Variables) -> Result<String, Rejected> {
     expand_format_impl(template, vars).map_err(|error| Rejected::new(error.to_string()))
 }
 
+/// One terminal watching the session.
+///
+/// Each client keeps its own `front` surface and `DiffRenderer`: a diff frame
+/// only means anything applied on top of what *that* terminal has already
+/// seen, so the delta cannot be shared even though the composed frame is.
+struct AttachedClient {
+    id: u64,
+    cols: u16,
+    rows: u16,
+    frames: mpsc::UnboundedSender<ServerToClient>,
+    front: Surface,
+    diff: DiffRenderer,
+    buf: Vec<u8>,
+    /// Set on attach and on resize: the next frame must redraw every cell,
+    /// because what this terminal is showing is no longer known.
+    needs_full_repaint: bool,
+}
+
+impl AttachedClient {
+    fn new(
+        id: u64,
+        cols: u16,
+        rows: u16,
+        truecolor: bool,
+        frames: mpsc::UnboundedSender<ServerToClient>,
+    ) -> Self {
+        let mut diff = DiffRenderer::new();
+        diff.set_color_mode(if truecolor {
+            ColorMode::Truecolor
+        } else {
+            ColorMode::Quantized
+        });
+
+        Self {
+            id,
+            cols,
+            rows,
+            frames,
+            front: Surface::new(cols, rows),
+            diff,
+            buf: Vec::new(),
+            needs_full_repaint: true,
+        }
+    }
+}
+
 /// A message shown on the status line instead of returned to a caller.
 struct StatusMessage {
     text: String,
@@ -242,7 +288,10 @@ pub struct App {
     event_rx: mpsc::Receiver<BackendEvent>,
     sink: OutputSink,
     session_rx: Option<mpsc::Receiver<SessionEvent>>,
-    client_id: Option<u64>,
+    /// Every terminal watching this session.
+    ///
+    /// Empty when running locally, where `sink` writes straight to stdout.
+    clients: Vec<AttachedClient>,
     queue_buf: Vec<u8>,
     diff: DiffRenderer,
     timeline: Timeline,
@@ -283,6 +332,8 @@ pub struct Args {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AttachArgs {
     pub session_name: Option<String>,
+    /// `-d`: detach every other client as this one attaches.
+    pub detach_others: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -405,18 +456,26 @@ impl AttachArgs {
         S: AsRef<str>,
     {
         let mut session_name = None;
+        let mut detach_others = false;
 
         for arg in args {
             let arg = arg.as_ref();
+            if arg == "-d" {
+                detach_others = true;
+                continue;
+            }
             if arg.starts_with('-') {
-                bail!("`wv attach` does not accept `{arg}`; use `wv attach [name]`");
+                bail!("`wv attach` does not accept `{arg}`; use `wv attach [-d] [name]`");
             }
             if session_name.replace(arg.to_owned()).is_some() {
                 bail!("`wv attach` accepts at most one session name");
             }
         }
 
-        Ok(Self { session_name })
+        Ok(Self {
+            session_name,
+            detach_others,
+        })
     }
 }
 
@@ -635,7 +694,7 @@ impl App {
             event_rx: backend_parts.event_rx,
             sink: OutputSink::stdout(),
             session_rx: None,
-            client_id: None,
+            clients: Vec::new(),
             queue_buf: Vec::new(),
             diff: DiffRenderer::new(),
             timeline: Timeline::new(),
@@ -1159,7 +1218,8 @@ impl App {
         if session_mode {
             // A no-op when the client already got its goodbye; otherwise it
             // learns the session ended rather than seeing a dropped socket.
-            self.detach_client(ServerToClient::Exit(ExitReason::ServerShutdown));
+            self.detach_clients(None, ServerToClient::Exit(ExitReason::ServerShutdown))
+                .await;
             // Let the connection tasks flush before the runtime drops them.
             // Two things depend on this: the goodbye above, and the reply to a
             // request that ended the session — `wv exec kill-session` must not
@@ -1195,7 +1255,7 @@ impl App {
             Err(ExecuteError::Fatal(error)) => Err(error),
             Err(ExecuteError::Rejected(message)) => {
                 tracing::warn!("command rejected: {message}");
-                self.report_error(message);
+                self.report_error(&message);
                 Ok(())
             }
         }
@@ -1217,10 +1277,12 @@ impl App {
         }
     }
 
-    /// Surface a non-fatal problem to whoever is attached.
-    fn report_error(&mut self, message: String) {
-        if let OutputSink::Client { frames, .. } = &self.sink {
-            let _ = frames.send(ServerToClient::Error(message));
+    /// Surface a non-fatal problem to everyone attached.
+    fn report_error(&mut self, message: &str) {
+        for client in &self.clients {
+            let _ = client
+                .frames
+                .send(ServerToClient::Error(message.to_owned()));
         }
     }
 
@@ -1368,7 +1430,10 @@ impl App {
                 )
                 .into());
             }
-            Command::DetachClient => self.detach(),
+            Command::DetachClient { target, all } => {
+                self.detach_for_command(target.as_deref(), all).await;
+            }
+            Command::RefreshClient => self.force_full_repaint(),
             Command::KillSession { target } => {
                 self.check_session(&target)?;
                 self.exit = ExitState::Quit;
@@ -1485,40 +1550,57 @@ impl App {
         Ok(pane_id)
     }
 
-    fn detach(&mut self) {
-        if self.session_rx.is_some() {
-            // Detaching is purely a rendering concern: drop the client and
-            // keep every pane running.
-            self.detach_client(ServerToClient::Detached);
-        } else {
+    /// Detach whichever clients `detach-client` named.
+    ///
+    /// With no target it detaches everyone, because a command arriving over a
+    /// socket has no client of its own to mean. A keybinding routes through
+    /// the same path, which is why `Alt+D` in a shared session detaches every
+    /// terminal rather than guessing at one.
+    async fn detach_for_command(&mut self, target: Option<&str>, all: bool) {
+        // Running locally with nobody watching over a socket, there is nothing
+        // to detach *from*, so detaching is quitting.
+        if self.clients.is_empty() && self.session_rx.is_none() {
             tracing::warn!("detach requires a weave session server; quitting");
             self.exit = ExitState::Quit;
+            return;
+        }
+
+        match target.and_then(|target| target.parse::<u64>().ok()) {
+            Some(id) if !all => {
+                if !self.drop_client(id, Some(ServerToClient::Detached)) {
+                    tracing::warn!("no client {id} to detach");
+                }
+                self.renegotiate_size().await;
+            }
+            // `-a` keeps the named client and drops the rest.
+            Some(id) => {
+                self.detach_clients(Some(id), ServerToClient::Detached)
+                    .await;
+            }
+            None => {
+                self.detach_clients(None, ServerToClient::Detached).await;
+            }
         }
     }
 
-    /// Take over rendering for a newly attached client.
+    /// Add a client, and resize the session to fit everyone watching.
     ///
-    /// Any previous client is evicted first: one terminal at a time owns a
-    /// session, so its size and color depth are unambiguous.
+    /// Nobody is evicted: several terminals can watch one session, each
+    /// getting its own diff stream.
     pub async fn attach_client(
         &mut self,
+        id: u64,
         cols: u16,
         rows: u16,
         truecolor: bool,
         frames: mpsc::UnboundedSender<ServerToClient>,
     ) {
-        self.detach_client(ServerToClient::Exit(ExitReason::TakenOver));
+        self.clients
+            .push(AttachedClient::new(id, cols, rows, truecolor, frames));
+        self.renegotiate_size().await;
 
-        self.diff.set_color_mode(if truecolor {
-            ColorMode::Truecolor
-        } else {
-            ColorMode::Quantized
-        });
-        self.sink = OutputSink::client(frames);
-        self.resize_to(cols, rows).await;
-
-        // A reattaching client sees a settled layout, not the tail of whatever
-        // animation was in flight when the previous client left.
+        // A joining client sees a settled layout, not the tail of whatever
+        // animation happened to be in flight.
         if let Err(error) = self.snap_workspace_tweens(self.current_workspace).await {
             tracing::warn!("failed to settle layout on attach: {error:#}");
         }
@@ -1526,26 +1608,114 @@ impl App {
         self.force_full_repaint();
     }
 
-    /// Stop rendering, telling the outgoing client why if it is still there.
-    fn detach_client(&mut self, farewell: ServerToClient) {
-        let sink = std::mem::replace(&mut self.sink, OutputSink::Null);
-        if let OutputSink::Client { frames, .. } = sink {
-            let _ = frames.send(farewell);
+    /// Say goodbye to a client and drop it.
+    fn drop_client(&mut self, id: u64, farewell: Option<ServerToClient>) -> bool {
+        let Some(index) = self.clients.iter().position(|client| client.id == id) else {
+            return false;
+        };
+
+        let client = self.clients.remove(index);
+        if let Some(farewell) = farewell {
+            let _ = client.frames.send(farewell);
         }
+
+        true
     }
 
-    /// Force the next frame to redraw every cell.
+    /// Detach clients, optionally all but one.
     ///
-    /// The client's screen is unknown after an attach, so the front buffer is
-    /// reset to blank and the screen is cleared before the diff is computed.
+    /// `except` keeps the client that asked, which is what `attach -d` and a
+    /// keybinding both want: everyone else goes, you stay.
+    async fn detach_clients(&mut self, except: Option<u64>, farewell: ServerToClient) {
+        let ids: Vec<u64> = self
+            .clients
+            .iter()
+            .map(|client| client.id)
+            .filter(|id| Some(*id) != except)
+            .collect();
+
+        for id in ids {
+            self.drop_client(id, Some(farewell.clone()));
+        }
+        self.renegotiate_size().await;
+    }
+
+    /// Resize the session to the smallest attached terminal.
+    ///
+    /// A session can only be as big as the smallest window watching it —
+    /// anything larger would be cut off for somebody. Clients with more room
+    /// see the session in their top-left corner, as in tmux.
+    async fn renegotiate_size(&mut self) {
+        let Some((cols, rows)) = self
+            .clients
+            .iter()
+            .map(|client| (client.cols, client.rows))
+            .reduce(|(w, h), (cols, rows)| (w.min(cols), h.min(rows)))
+        else {
+            // Nobody is watching; keep the last size so panes are undisturbed.
+            return;
+        };
+
+        self.resize_to(cols, rows).await;
+    }
+
+    /// Force every client's next frame to redraw its whole screen.
     fn force_full_repaint(&mut self) {
         self.front = Surface::new(self.back.width, self.back.height);
+        for client in &mut self.clients {
+            client.needs_full_repaint = true;
+        }
+        // The local path clears its own terminal; a client is told to by the
+        // escape sequence its repaint starts with.
+        if !self.sink.is_attached() {
+            self.dirty = true;
+            return;
+        }
         let _ = crossterm::queue!(
             self.sink,
             crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
             crossterm::cursor::MoveTo(0, 0)
         );
         self.dirty = true;
+    }
+
+    /// Whether anything is watching, locally or over a socket.
+    fn is_watched(&self) -> bool {
+        self.sink.is_attached() || !self.clients.is_empty()
+    }
+
+    /// Send this frame to every client, each diffed against its own screen.
+    fn flush_clients(&mut self) -> anyhow::Result<()> {
+        let back = &self.back;
+
+        for client in &mut self.clients {
+            client.buf.clear();
+
+            if client.needs_full_repaint {
+                client.front = Surface::new(back.width, back.height);
+                let _ = crossterm::queue!(
+                    client.buf,
+                    crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+                    crossterm::cursor::MoveTo(0, 0)
+                );
+                client.needs_full_repaint = false;
+            }
+
+            client.diff.flush(&client.front, back, &mut client.buf)?;
+            if !client.buf.is_empty() {
+                let frame = ServerToClient::Frame(std::mem::take(&mut client.buf));
+                // A send failure means the client is gone; `ClientGone` will
+                // remove it, so there is nothing to do here.
+                let _ = client.frames.send(frame);
+            }
+
+            // Each client needs its own copy of what it has now seen. The
+            // single-client path could swap buffers; with several, the price
+            // of correct per-client deltas is a copy each.
+            client.front.clone_from(back);
+        }
+
+        Ok(())
     }
 
     /// Handle one message from the session server's socket loop.
@@ -1559,8 +1729,7 @@ impl App {
                 frames,
             } => {
                 tracing::info!("client {id} attached at {cols}x{rows}");
-                self.client_id = Some(id);
-                self.attach_client(cols, rows, truecolor, frames).await;
+                self.attach_client(id, cols, rows, truecolor, frames).await;
             }
             SessionEvent::Message(ClientToServer::Attach { .. }) => {
                 tracing::warn!("ignoring a second attach on an established connection");
@@ -1580,8 +1749,12 @@ impl App {
             // this socket, so the reply goes back through its frame sink.
             SessionEvent::Message(ClientToServer::Request { id, command }) => {
                 let result = self.execute_request(command).await?;
-                if let OutputSink::Client { frames, .. } = &self.sink {
-                    let _ = frames.send(ServerToClient::Reply { id, result });
+                // Answering every client is wrong, but the socket layer does
+                // not yet tag input with its connection, so the request cannot
+                // be attributed. `wv exec` is the path that matters and it
+                // gets its reply on its own connection.
+                if let Some(client) = self.clients.first() {
+                    let _ = client.frames.send(ServerToClient::Reply { id, result });
                 }
             }
             SessionEvent::Request { command, reply } => {
@@ -1612,17 +1785,19 @@ impl App {
                 }
             }
             SessionEvent::Message(ClientToServer::Detach) => {
-                self.detach_client(ServerToClient::Detached);
+                // The socket layer knows which connection said this; it
+                // arrives tagged so only that client is detached.
+                self.detach_clients(None, ServerToClient::Detached).await;
             }
             SessionEvent::Message(ClientToServer::Quit) => {
-                self.detach_client(ServerToClient::Exit(ExitReason::Quit));
+                self.detach_clients(None, ServerToClient::Exit(ExitReason::Quit))
+                    .await;
                 self.exit = ExitState::Quit;
             }
             SessionEvent::ClientGone { id } => {
-                if self.client_id == Some(id) {
+                if self.drop_client(id, None) {
                     tracing::info!("client {id} connection closed");
-                    self.client_id = None;
-                    self.sink = OutputSink::Null;
+                    self.renegotiate_size().await;
                 }
             }
         }
@@ -2200,7 +2375,8 @@ impl App {
             self.session_name.clone().unwrap_or_default(),
         )
         .set("session_windows", self.occupied_workspaces().len().to_string())
-        .set_flag("session_attached", self.client_id.is_some());
+        .set("session_clients", self.clients.len().to_string())
+        .set_flag("session_attached", !self.clients.is_empty());
 
         vars
     }
@@ -2868,9 +3044,9 @@ impl App {
         self.advance_message(dt);
         self.advance_animations(dt).await?;
 
-        // While detached there is nobody to render for: keep pane state and
-        // tweens current, but skip compositing entirely.
-        if !self.dirty || !self.sink.is_attached() {
+        // With nobody watching there is nothing to render for: keep pane state
+        // and tweens current, but skip compositing entirely.
+        if !self.dirty || !self.is_watched() {
             return Ok(());
         }
 
@@ -2909,9 +3085,15 @@ impl App {
             let debug_overlay = self.debug_overlay();
             chrome::draw_debug_overlay(&mut self.back, debug_overlay);
         }
-        self.diff.flush(&self.front, &self.back, &mut self.sink)?;
-        self.sink.flush()?;
-        std::mem::swap(&mut self.front, &mut self.back);
+        if self.sink.is_attached() {
+            // Running locally: one screen, and the buffers can be swapped
+            // rather than copied.
+            self.diff.flush(&self.front, &self.back, &mut self.sink)?;
+            self.sink.flush()?;
+            std::mem::swap(&mut self.front, &mut self.back);
+        }
+        self.flush_clients()?;
+
         self.back.clear();
         self.dirty = false;
 
@@ -3169,7 +3351,7 @@ impl App {
             event_rx,
             sink: OutputSink::stdout(),
             session_rx: None,
-            client_id: None,
+            clients: Vec::new(),
             queue_buf: Vec::new(),
             diff: DiffRenderer::new(),
             timeline: Timeline::new(),
@@ -3444,7 +3626,8 @@ mod tests {
     use crate::backend::{PaneBackend, PaneCommand, PaneId};
     use crate::command::Command;
     use crate::layout::geometry::{FRect, Split};
-    use crate::session::protocol::CommandResult;
+    use crate::session::protocol::{CommandResult, ServerToClient};
+    use tokio::sync::mpsc;
     use crate::layout::tree::Node;
     use tokio::time::Duration;
 
@@ -4469,6 +4652,142 @@ mod tests {
         assert!(app.message.is_none());
     }
 
+    fn client_channel() -> (
+        mpsc::UnboundedSender<ServerToClient>,
+        mpsc::UnboundedReceiver<ServerToClient>,
+    ) {
+        mpsc::unbounded_channel()
+    }
+
+    /// A session is only as big as the smallest terminal watching it —
+    /// anything larger would be cut off for somebody.
+    #[tokio::test]
+    async fn the_session_shrinks_to_the_smallest_client() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 40, PaneId(1));
+
+        let (big, _big_rx) = client_channel();
+        app.attach_client(1, 100, 40, true, big).await;
+        assert_eq!((app.back.width, app.back.height), (100, 40));
+
+        let (small, _small_rx) = client_channel();
+        app.attach_client(2, 60, 20, true, small).await;
+        assert_eq!(
+            (app.back.width, app.back.height),
+            (60, 20),
+            "the session fits the smaller terminal"
+        );
+
+        // When the small one leaves, the session grows back.
+        app.drop_client(2, None);
+        app.renegotiate_size().await;
+        assert_eq!((app.back.width, app.back.height), (100, 40));
+    }
+
+    /// Attaching used to evict; now both terminals watch the same session.
+    #[tokio::test]
+    async fn a_second_client_joins_rather_than_evicting() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        let (first, mut first_rx) = client_channel();
+        let (second, _second_rx) = client_channel();
+        app.attach_client(1, 80, 24, true, first).await;
+        app.attach_client(2, 80, 24, true, second).await;
+
+        assert_eq!(app.clients.len(), 2);
+        // The first client was not sent a goodbye.
+        while let Ok(message) = first_rx.try_recv() {
+            assert!(
+                !matches!(message, ServerToClient::Exit(_)),
+                "the first client must not be evicted"
+            );
+        }
+    }
+
+    /// Each client gets its own delta, computed against its own screen.
+    #[tokio::test]
+    async fn every_client_gets_its_own_frame() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        let (first, mut first_rx) = client_channel();
+        let (second, mut second_rx) = client_channel();
+        app.attach_client(1, 80, 24, true, first).await;
+        app.attach_client(2, 80, 24, true, second).await;
+
+        app.tick(Duration::from_millis(16))
+            .await
+            .expect("a frame renders");
+
+        assert!(
+            matches!(first_rx.try_recv(), Ok(ServerToClient::Frame(_))),
+            "the first client should get a frame"
+        );
+        assert!(
+            matches!(second_rx.try_recv(), Ok(ServerToClient::Frame(_))),
+            "the second client should get one too"
+        );
+    }
+
+    #[tokio::test]
+    async fn detach_client_by_id_leaves_the_others_alone() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        let (first, _first_rx) = client_channel();
+        let (second, mut second_rx) = client_channel();
+        app.attach_client(1, 80, 24, true, first).await;
+        app.attach_client(2, 80, 24, true, second).await;
+
+        app.execute(command("detach-client -t 2"))
+            .await
+            .expect("detach succeeds");
+
+        assert_eq!(app.clients.len(), 1);
+        assert_eq!(app.clients[0].id, 1);
+        // The detached one was told why.
+        let mut told = false;
+        while let Ok(message) = second_rx.try_recv() {
+            told |= matches!(message, ServerToClient::Detached);
+        }
+        assert!(told, "the detached client should be told");
+    }
+
+    #[tokio::test]
+    async fn detach_client_a_keeps_only_the_target() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        for id in 1..=3 {
+            let (frames, _rx) = client_channel();
+            app.attach_client(id, 80, 24, true, frames).await;
+        }
+
+        app.execute(command("detach-client -a -t 2"))
+            .await
+            .expect("detach succeeds");
+
+        assert_eq!(app.clients.len(), 1);
+        assert_eq!(app.clients[0].id, 2);
+    }
+
+    #[tokio::test]
+    async fn refresh_client_repaints_everyone() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let (frames, _rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+        app.tick(Duration::from_millis(16)).await.expect("a frame");
+        assert!(!app.clients[0].needs_full_repaint);
+
+        app.execute(command("refresh-client"))
+            .await
+            .expect("refresh succeeds");
+
+        assert!(app.clients[0].needs_full_repaint);
+    }
+
     /// A waiting caller gets the command's output, not just "it ran".
     #[tokio::test]
     async fn a_request_returns_command_output() {
@@ -5066,6 +5385,7 @@ mod tests {
             LaunchArgs::parse(["attach", "weave-test"]).expect("launch args parse"),
             LaunchArgs::Attach(AttachArgs {
                 session_name: Some("weave-test".to_owned()),
+                detach_others: false,
             })
         );
     }

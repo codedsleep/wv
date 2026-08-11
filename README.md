@@ -152,7 +152,7 @@ wv (client)                          wv --server --session NAME (daemon)
 wv                     # start a session (auto-named weave-<uid>) and attach
 wv --session main      # start or attach to a session by name
 wv --bare              # create a session without attaching; prints its name
-wv attach [name]       # reattach; with no name, the most recent session
+wv attach [-d] [name]  # reattach; -d detaches everyone else first
 wv ls                  # list live sessions
 wv has-session [name]  # exit 0 if it is live, 1 if not
 wv kill-server         # end every session
@@ -160,7 +160,9 @@ wv kill-server         # end every session
 
 `Alt+D` detaches: the server keeps running with every pane alive, and the client restores your terminal and prints `[detached from NAME]`. `Alt+Shift+Q` quits, which shuts the session down and kills its panes.
 
-Sockets live in `$XDG_RUNTIME_DIR/weave/<name>.sock` (falling back to a private directory under `/tmp`). A socket whose server has gone away is unlinked automatically, so a name is never stuck. One client renders a session at a time: attaching from a second terminal takes over and the first client is told why it was dropped.
+Sockets live in `$XDG_RUNTIME_DIR/weave/<name>.sock` (falling back to a private directory under `/tmp`). A socket whose server has gone away is unlinked automatically, so a name is never stuck.
+
+Several terminals can watch one session at once, each with its own diff stream. The session renders at the size of the smallest attached terminal; larger ones see it in their top-left corner. `wv attach -d` joins and detaches everyone else.
 
 The server ignores `SIGINT` and `SIGHUP`, so neither `Ctrl-C` nor closing the terminal can take a session down; `SIGTERM` shuts it down cleanly.
 

@@ -68,7 +68,9 @@ means the current one.
 | `move-window`, `swap-window`, renumbering | — | no | Windows are fixed slots |
 | `kill-pane -t` | `close` | yes | |
 | `kill-pane -a` | — | yes | |
-| `detach-client` | `detach` | yes | `-t`/`-a` need multi-client (PR 10) |
+| `detach-client [-t id] [-a]` | `detach` | yes | No target detaches everyone |
+| `refresh-client` | — | yes | Forces a full repaint |
+| `switch-client` | — | no | A weave server hosts one session, so there is nowhere to switch |
 | `kill-session` | `quit` | yes | |
 | `resize-pane -L/-R/-U/-D [n]` | — | yes | Moves a border; which side the pane is on decides if it grows |
 | `resize-pane -x/-y` | — | yes | |
@@ -110,7 +112,9 @@ means the current one.
 | `set-hook`, `show-hooks` | — | no | Deferred out of PR 9 — see the plan |
 | `pipe-pane` | — | no | Deferred out of PR 9 — use `capture-pane` |
 | `set-environment` | — | no | Deferred out of PR 9 |
-| `switch-client`, `attach -d`, multiple clients per session | — | PR 10 | One client at a time today |
+| `attach-session -d` | `wv attach -d [name]` | yes | Detaches everyone else first |
+| Multiple clients per session | — | yes | Smallest terminal wins |
+| `list-clients` | — | no | See the note below |
 | Mouse support | — | no | Dropped: weave is keyboard-driven, and wheel-scroll would need scrollback |
 | Control mode (`-CC`), TPM/plugins, tmux wire compatibility | — | no | Explicit non-goals |
 
@@ -201,6 +205,33 @@ a silently empty field is worse than a failed command.
 `pane_current_command` reports the **pane's own process**, not the foreground
 job inside it. A pane whose shell is running vim reports the shell; a pane
 spawned as `split-window npm run dev` reports `npm`.
+
+## Several terminals, one session
+
+Attaching no longer evicts. Any number of terminals can watch a session, each
+getting its own diff stream — a frame is a delta against what *that* terminal
+has already seen, so the deltas cannot be shared even though the composed
+frame is.
+
+The session renders at the size of the **smallest** attached terminal, because
+anything larger would be cut off for somebody. Terminals with more room see
+the session in their top-left corner, as in tmux. Detaching the smallest client
+grows the session back for everyone still watching.
+
+- `wv attach [name]` joins.
+- `wv attach -d [name]` joins and detaches everyone else.
+- `wv exec detach-client` detaches everyone; `-t <id>` detaches one, `-a -t <id>`
+  detaches all but one.
+
+**Client ids are connection ids**, handed out in the order connections arrive —
+and `wv exec` connections consume them too, so they are not predictable from a
+script. There is no `list-clients` to discover them. In practice use the
+no-target form, which detaches everyone.
+
+Because a command arriving over a socket has no client of its own to mean, a
+`detach-client` with no target detaches every terminal. That includes the
+`Alt+D` keybinding: in a shared session it detaches everyone rather than
+guessing which terminal pressed it.
 
 ## Moving panes between windows
 
