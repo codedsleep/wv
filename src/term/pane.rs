@@ -164,6 +164,28 @@ mod tests {
     use crate::backend::PaneId;
     use crate::term::surface::Surface;
 
+    /// btop positions with HVP and never with CUP. Losing those moves makes it
+    /// paint its whole interface from wherever the cursor sat, so the boxes
+    /// pile up on one another and wrap.
+    #[test]
+    fn hvp_positions_the_cursor_the_same_as_cup() {
+        let mut hvp = Pane::new(PaneId(1), 12, 4);
+        let mut cup = Pane::new(PaneId(2), 12, 4);
+
+        hvp.process(b"\x1b[3;5fX");
+        cup.process(b"\x1b[3;5HX");
+
+        assert_eq!(hvp.screen().cursor_position(), (2, 5));
+        assert_eq!(
+            hvp.screen().cell(2, 4).expect("cell exists").contents(),
+            "X"
+        );
+        assert_eq!(
+            hvp.screen().contents_formatted(),
+            cup.screen().contents_formatted()
+        );
+    }
+
     #[test]
     fn cells_into_maps_text_and_ansi_red() {
         let mut pane = Pane::new(PaneId(1), 80, 24);
