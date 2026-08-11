@@ -244,6 +244,74 @@ mod tests {
         );
     }
 
+    /// Three panes — a horizontal split with the top half split again — must
+    /// render as one connected frame with T-junctions, not as three boxes
+    /// overdrawing each other's edges.
+    #[test]
+    fn a_three_pane_layout_draws_proper_junctions() {
+        use crate::layout::geometry::Rect;
+
+        let root_rect = Rect {
+            x: 0,
+            y: 0,
+            w: 40,
+            h: 16,
+        };
+        let mut root = Node::Leaf {
+            pane: PaneId(1),
+            rect_current: FRect::from(root_rect),
+            rect_target: root_rect,
+        };
+        root.split_focused(PaneId(1), Split::Horizontal, PaneId(2));
+        root.split_focused(PaneId(1), Split::Vertical, PaneId(3));
+        root.compute_layout(root_rect);
+        snap(&mut root);
+
+        let mut surface = Surface::new(40, 16);
+        compose(
+            Some(&root),
+            &[
+                Pane::new(PaneId(1), 40, 16),
+                Pane::new(PaneId(2), 40, 16),
+                Pane::new(PaneId(3), 40, 16),
+            ],
+            Some(PaneId(1)),
+            TEST_THEME,
+            &Timeline::new(),
+            &mut surface,
+            ComposeOptions {
+                pane_titles: false,
+                zoomed: None,
+            },
+        );
+
+        let row = |y: u16| -> String {
+            (0..40)
+                .map(|x| surface.get(x, y).expect("cell").ch)
+                .collect()
+        };
+
+        // Outer corners stay corners; the vertical divider meets the top edge
+        // as a T, and the horizontal divider crosses it as an upward T.
+        assert_eq!(row(0), "┌──────────────────┬───────────────────┐");
+        assert_eq!(row(7), "├──────────────────┴───────────────────┤");
+        assert_eq!(row(15), "└──────────────────────────────────────┘");
+    }
+
+    fn snap(node: &mut Node) {
+        match node {
+            Node::Leaf {
+                rect_current,
+                rect_target,
+                ..
+            } => *rect_current = FRect::from(*rect_target),
+            Node::Internal { a, b, .. } => {
+                snap(a);
+                snap(b);
+            }
+        }
+    }
+
     #[test]
     fn compose_blits_two_leaf_horizontal_split() {
         let mut surface = Surface::new(80, 24);
