@@ -14,7 +14,7 @@ An animated tiling terminal multiplexer in Rust.
 
 - **Smooth animated layout.** Every topology change is interpolated frame-by-frame with sub-cell precision. PTYs are resized only at tween completion, so children never see per-frame `SIGWINCH` storms.
 - **Detach and reattach.** A session server owns the PTYs, the terminal state and the layout; the client owns only your terminal. Close the terminal and the session keeps running.
-- **BSP splits.** Recursive horizontal/vertical splits with geometric focus navigation (`h/j/k/l`). Adjacent panes share one border line rather than drawing two, so a split costs a single row or column.
+- **BSP splits.** Recursive horizontal/vertical splits with geometric focus navigation (`h/j/k/l`).
 - **Configurable themes.** Hex color overrides for borders, status bar, and accent; ships with `nord` and `tokyonight` presets (default `nord`).
 - **Window names from pane titles.** OSC 0/2 sequences (`printf '\e]2;hello\a'`) name the window they are in, so the status bar reads `1:vim`. Per-pane title labels are off by default — a caption over every pane is noise when the pane's contents already say what it is — but `pane_titles = true` brings them back.
 - **Truecolor with graceful degradation.** Detects `COLORTERM=truecolor`; otherwise quantizes RGB to the xterm-256 cube.

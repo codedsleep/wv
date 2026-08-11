@@ -5781,10 +5781,8 @@ mod tests {
 
         let resized = handle.resized();
         assert_eq!(resized.len(), 2);
-        // The second pane is a column wider than an even half: it starts on
-        // the divider it shares with the first, rather than after it.
         assert!(resized.contains(&(PaneId(1), 40, 23)));
-        assert!(resized.contains(&(PaneId(2), 41, 23)));
+        assert!(resized.contains(&(PaneId(2), 40, 23)));
         match app.workspaces[app.current_workspace]
             .root
             .as_ref()
