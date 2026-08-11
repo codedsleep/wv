@@ -435,7 +435,10 @@ impl ThemePreset {
                 accent: rgb(0x88, 0xc0, 0xd0),
                 agent_working: rgb(0xa3, 0xbe, 0x8c),
                 agent_waiting: rgb(0xeb, 0xcb, 0x8b),
-                agent_idle: rgb(0x4c, 0x56, 0x6a),
+                // Nord's comment grey, not nord3: an idle agent should be
+                // quiet, and nord3 against the nord1 bar is past quiet and
+                // into unreadable.
+                agent_idle: rgb(0x61, 0x6e, 0x88),
             },
             Self::TokyoNight => ThemeConfig {
                 border_focused: rgb(0x7d, 0xcf, 0xff),

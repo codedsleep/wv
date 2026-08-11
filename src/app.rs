@@ -2608,8 +2608,12 @@ impl App {
         let destination = crate::session::paths::socket_path(name)
             .map_err(|error| Rejected::new(error.to_string()))?;
         if crate::session::paths::is_socket_live(&destination) {
+            // Usually one you detached from and forgot: a weave server outlives
+            // its client on purpose, so the name is still taken by something
+            // you cannot see. Say where to look, or this reads as the rename
+            // failing at random.
             return Err(Rejected::new(format!(
-                "a weave session named `{name}` is already running"
+                "a weave session named `{name}` is already running; `wv ls` lists it"
             ))
             .into());
         }
