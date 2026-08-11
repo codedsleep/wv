@@ -1059,10 +1059,16 @@ impl App {
         changed
     }
 
-    /// Every agent running in this session, in window then layout order.
+    /// Every agent running in this session, grouped by kind.
     ///
     /// The whole session rather than the current window: knowing an agent in
     /// window 3 has stopped is the point, and you cannot see window 3.
+    ///
+    /// Kinds are ordered as `agent-commands` names them and numbered from one
+    /// within each kind, so two claudes read as `1:claude 2:claude` and sit
+    /// together. The order is fixed rather than discovery-based so the bar's
+    /// layout holds still as agents start and stop, leaving colour as the only
+    /// thing that moves.
     fn agent_indicators(&self) -> Vec<chrome::AgentIndicator> {
         if !self.options.flag("agent-status") {
             return Vec::new();
@@ -1081,28 +1087,43 @@ impl App {
         let window = self.agent_activity_window();
         let now = std::time::Instant::now();
 
-        let mut indicators = Vec::new();
-        for (index, workspace) in self.workspaces.iter().enumerate() {
+        let mut found = Vec::new();
+        for workspace in &self.workspaces {
             for pane in workspace.leaf_panes() {
                 let Some(command) = self.agents.foreground(pane) else {
                     continue;
                 };
-                if !agent::is_agent(command, &names) {
+                let Some(rank) = agent::agent_rank(command, &names) else {
                     continue;
-                }
+                };
 
-                let asking = self
-                    .pane(pane)
-                    .is_some_and(|pane| agent::looks_like_a_question(&pane.capture_lines(), &patterns));
-                indicators.push(chrome::AgentIndicator {
-                    window: u8::try_from(index + 1).unwrap_or(u8::MAX),
-                    name: command.to_owned(),
-                    state: self.agents.state(pane, now, window, asking),
+                let asking = self.pane(pane).is_some_and(|pane| {
+                    agent::looks_like_a_question(&pane.capture_lines(), &patterns)
                 });
+                found.push((rank, self.agents.state(pane, now, window, asking)));
             }
         }
 
-        indicators
+        // Stable, so panes of one kind keep the order they were found in.
+        found.sort_by_key(|(rank, _)| *rank);
+
+        let mut seen = 0_u8;
+        let mut previous = None;
+        found
+            .into_iter()
+            .map(|(rank, state)| {
+                if previous != Some(rank) {
+                    previous = Some(rank);
+                    seen = 0;
+                }
+                seen = seen.saturating_add(1);
+                chrome::AgentIndicator {
+                    index: seen,
+                    name: names[rank].clone(),
+                    state,
+                }
+            })
+            .collect()
     }
 
     fn workspace_indicators(&self) -> Vec<chrome::WorkspaceIndicator> {
@@ -4519,9 +4540,17 @@ mod tests {
         );
     }
 
+    fn labels(app: &App) -> Vec<String> {
+        app.agent_indicators()
+            .iter()
+            .map(|agent| format!("{}:{}", agent.index, agent.name))
+            .collect()
+    }
+
     /// The bar carries the whole session, not just the window you are looking
     /// at: an agent that has stopped in window 2 is exactly the one you cannot
-    /// see.
+    /// see. The name shown is the configured one, so an agent started by
+    /// absolute path still reads as `opencode`.
     #[tokio::test]
     async fn agent_indicators_cover_every_window_and_ignore_plain_shells() {
         let (backend, _handle) = mock_backend(PaneId(2));
@@ -4536,13 +4565,47 @@ mod tests {
         app.agents
             .set_foreground(panes[2], Some("/usr/bin/opencode".to_owned()));
 
-        let indicators = app.agent_indicators();
+        assert_eq!(labels(&app), vec!["1:claude", "1:opencode"]);
+    }
 
-        let seen: Vec<(u8, &str)> = indicators
-            .iter()
-            .map(|agent| (agent.window, agent.name.as_str()))
-            .collect();
-        assert_eq!(seen, vec![(1, "claude"), (2, "/usr/bin/opencode")]);
+    /// Agents of one kind sit together and count up within that kind, so two
+    /// claudes read `1:claude 2:claude` rather than repeating one label.
+    #[tokio::test]
+    async fn agents_are_grouped_by_kind_and_numbered_within_it() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        for _ in 0..3 {
+            app.execute(command("split-window -h")).await.expect("split");
+        }
+
+        // Interleaved on screen: claude, codex, claude, opencode.
+        let panes = app.pane_ids();
+        for (pane, command) in panes.iter().zip(["claude", "codex", "claude", "opencode"]) {
+            app.agents.set_foreground(*pane, Some(command.to_owned()));
+        }
+
+        assert_eq!(
+            labels(&app),
+            vec!["1:claude", "2:claude", "1:codex", "1:opencode"]
+        );
+    }
+
+    /// Kind order follows `agent-commands`, not the order panes were made, so
+    /// the bar's layout holds still as agents come and go.
+    #[tokio::test]
+    async fn kind_order_follows_the_configured_list() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+        app.execute(command("set-option agent-commands opencode,claude"))
+            .await
+            .expect("option set");
+
+        let panes = app.pane_ids();
+        app.agents.set_foreground(panes[0], Some("claude".to_owned()));
+        app.agents.set_foreground(panes[1], Some("opencode".to_owned()));
+
+        assert_eq!(labels(&app), vec!["1:opencode", "1:claude"]);
     }
 
     #[tokio::test]

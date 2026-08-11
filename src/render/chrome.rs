@@ -34,8 +34,8 @@ pub struct DebugOverlay {
 /// One agent in the status bar.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentIndicator {
-    /// The window it is running in, so the bar says where to go.
-    pub window: u8,
+    /// Which one of its kind this is, counting from one.
+    pub index: u8,
     pub name: String,
     pub state: AgentState,
 }
@@ -180,7 +180,7 @@ fn draw_agents(
 
     let labels: Vec<String> = agents
         .iter()
-        .map(|agent| format!("{AGENT_MARK} {}:{} ", agent.window, agent.name))
+        .map(|agent| format!("{AGENT_MARK} {}:{} ", agent.index, agent.name))
         .collect();
     let width = labels
         .iter()
@@ -449,9 +449,9 @@ mod tests {
         assert_eq!(unfocused_corner.fg, Color::DarkGrey);
     }
 
-    fn agent(window: u8, name: &str, state: AgentState) -> super::AgentIndicator {
+    fn agent(index: u8, name: &str, state: AgentState) -> super::AgentIndicator {
         super::AgentIndicator {
-            window,
+            index,
             name: name.to_owned(),
             state,
         }
@@ -475,16 +475,17 @@ mod tests {
         let mut surface = Surface::new(60, 4);
         let agents = [
             agent(1, "claude", AgentState::Working),
-            agent(2, "codex", AgentState::Waiting),
-            agent(3, "opencode", AgentState::Idle),
+            agent(2, "claude", AgentState::Waiting),
+            agent(1, "codex", AgentState::Idle),
         ];
 
         draw_status_bar(&mut surface, "s", &[], &agents, test_time(), TEST_THEME);
 
         let bottom = bottom_row(&surface);
+        // Two claudes side by side, each numbered within its own kind.
         assert!(bottom.contains("1:claude"), "{bottom}");
-        assert!(bottom.contains("2:codex"), "{bottom}");
-        assert!(bottom.contains("3:opencode"), "{bottom}");
+        assert!(bottom.contains("2:claude"), "{bottom}");
+        assert!(bottom.contains("1:codex"), "{bottom}");
         // Right up against the clock, which keeps the far right.
         assert!(bottom.ends_with("14:23:11"), "{bottom}");
 
@@ -503,8 +504,8 @@ mod tests {
         };
         assert_eq!(colour_of("1:claude").ch, AGENT_MARK);
         assert_eq!(colour_of("1:claude").fg, TEST_THEME.agent_working);
-        assert_eq!(colour_of("2:codex").fg, TEST_THEME.agent_waiting);
-        assert_eq!(colour_of("3:opencode").fg, TEST_THEME.agent_idle);
+        assert_eq!(colour_of("2:claude").fg, TEST_THEME.agent_waiting);
+        assert_eq!(colour_of("1:codex").fg, TEST_THEME.agent_idle);
     }
 
     /// Half a list is worse than none: a dot with no name beside it says an

@@ -17,7 +17,7 @@ An animated tiling terminal multiplexer in Rust.
 - **BSP splits.** Recursive horizontal/vertical splits with geometric focus navigation (`h/j/k/l`).
 - **Configurable themes.** Hex color overrides for borders, status bar, and accent; ships with `nord` and `tokyonight` presets (default `nord`).
 - **Window names from pane titles.** OSC 0/2 sequences (`printf '\e]2;hello\a'`) name the window they are in, so the status bar reads `1:vim`. Per-pane title labels are off by default — a caption over every pane is noise when the pane's contents already say what it is — but `pane_titles = true` brings them back.
-- **Agent status in the bar.** Panes running a coding agent (`claude`, `codex`, `opencode`) are listed on the right of the status bar, coloured green while the agent is producing output, amber when it has stopped at a question, and grey when it is done. The whole session is covered, not just the window on screen, so an agent that has finished in window 3 is visible from window 1. See [Agent status](#agent-status).
+- **Agent status in the bar.** Panes running a coding agent (`claude`, `codex`, `opencode`) are listed on the right of the status bar, grouped by kind and coloured green while the agent is producing output, amber when it has stopped at a question, and grey when it is done. The whole session is covered, not just the window on screen, so an agent that has finished in another window is still visible. See [Agent status](#agent-status).
 - **Truecolor with graceful degradation.** Detects `COLORTERM=truecolor`; otherwise quantizes RGB to the xterm-256 cube.
 - **Panic-safe.** Terminal state is always restored on crash; panic info goes to the log file.
 - **`#![forbid(unsafe_code)]`** at the crate root.
@@ -125,8 +125,16 @@ The TOML parser accepts a single modifier (`Ctrl+` or `Alt+`). Multi-modifier ch
 
 Each pane's foreground job is read from `/proc`, so a shell sitting at a prompt
 reports `fish` and one running an agent reports the agent. Agent panes are then
-listed on the right of the status bar as `● 1:claude`, where the number is the
-window to switch to.
+listed on the right of the status bar, grouped so agents of one kind sit
+together and numbered within that kind:
+
+```
+[weave-2e5478c7] 1:main 2:api     ● 1:claude  ● 2:claude  ● 1:codex  02:34:44
+```
+
+Kinds appear in the order `agent-commands` names them rather than the order the
+panes were made, so the bar's layout holds still as agents start and stop and
+colour is the only thing that moves.
 
 The colour is the state, and the state comes from the pane's own output — the
 agent is not asked and needs no setup:
