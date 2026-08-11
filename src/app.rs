@@ -352,6 +352,15 @@ pub struct App {
     /// pane is cheap but not free, and a job changes far more slowly than a
     /// frame is drawn.
     agents_polled: std::time::Instant,
+    /// Which panes looked like they were asking a question as of the last poll.
+    ///
+    /// Deciding this means reading a pane's whole screen back as text, which is
+    /// far too expensive to redo on every frame. A prompt appears at the speed
+    /// a person reads, so the poll interval is resolution enough.
+    agents_asking: HashMap<PaneId, bool>,
+    /// The indicators the status bar was last drawn with, so a frame is only
+    /// forced when one of them actually changes.
+    agent_indicators: Vec<chrome::AgentIndicator>,
     backend: BoxedBackend,
     output_rx: mpsc::Receiver<(PaneId, Bytes)>,
     event_rx: mpsc::Receiver<BackendEvent>,
@@ -763,6 +772,8 @@ impl App {
             resize_mode: ResizeMode::Normal,
             agents: AgentTracker::default(),
             agents_polled: std::time::Instant::now(),
+            agents_asking: HashMap::new(),
+            agent_indicators: Vec::new(),
             backend: backend_parts.backend,
             output_rx: backend_parts.output_rx,
             event_rx: backend_parts.event_rx,
@@ -1002,29 +1013,65 @@ impl App {
     /// Keep the agent indicators current.
     ///
     /// Two things move them: a pane's foreground job changing, which is polled,
-    /// and an agent going quiet, which no event announces — so while any agent
-    /// is inside its activity window the bar is kept redrawing, or the moment
-    /// it turns grey would wait for unrelated output.
+    /// and an agent going quiet, which no event announces. The second is why
+    /// the indicators are recomputed every tick — but only a change to what
+    /// they say costs a frame. Redrawing on the mere fact that an agent is
+    /// inside its activity window pins the whole render loop at the target
+    /// frame rate for as long as anything in any pane is printing.
     async fn tick_agents(&mut self) {
-        if !self.options.flag("agent-status") || !self.is_watched() {
+        if !self.options.flag("agent-status") {
+            // Turning the option off has to take the indicators off the bar
+            // with it, so the last drawn set cannot be left standing.
+            if !self.agent_indicators.is_empty() {
+                self.agent_indicators.clear();
+                self.dirty = true;
+            }
+            return;
+        }
+        if !self.is_watched() {
             return;
         }
 
         let now = std::time::Instant::now();
         if now.duration_since(self.agents_polled) >= AGENT_POLL_INTERVAL {
             self.agents_polled = now;
-            if self.poll_agent_commands().await {
-                self.dirty = true;
-            }
+            self.refresh_agents_asking();
+            self.poll_agent_commands().await;
         }
 
-        let window = self.agent_activity_window();
-        if self
-            .pane_ids()
-            .iter()
-            .any(|pane| self.agents.is_active(*pane, now, window))
-        {
+        let indicators = self.agent_indicators();
+        if indicators != self.agent_indicators {
+            self.agent_indicators = indicators;
             self.dirty = true;
+        }
+    }
+
+    /// Re-read which panes are sitting at a question.
+    ///
+    /// Answering that means reading a pane's entire screen back as text and
+    /// scanning it, so it happens at the poll interval rather than per frame.
+    fn refresh_agents_asking(&mut self) {
+        let patterns = agent::parse_list(
+            self.options
+                .get("agent-waiting-patterns")
+                .unwrap_or_default(),
+        );
+
+        self.agents_asking.clear();
+        if patterns.is_empty() {
+            return;
+        }
+
+        for pane in self.pane_ids() {
+            // Only panes running an agent are ever asked about, so scanning
+            // the rest would be work nothing reads.
+            if self.agents.foreground(pane).is_none() {
+                continue;
+            }
+            let asking = self.pane(pane).is_some_and(|pane| {
+                agent::looks_like_a_question(&pane.capture_lines(), &patterns)
+            });
+            self.agents_asking.insert(pane, asking);
         }
     }
 
@@ -1079,11 +1126,6 @@ impl App {
                 .get("agent-commands")
                 .unwrap_or_default(),
         );
-        let patterns = agent::parse_list(
-            self.options
-                .get("agent-waiting-patterns")
-                .unwrap_or_default(),
-        );
         let window = self.agent_activity_window();
         let now = std::time::Instant::now();
 
@@ -1097,9 +1139,7 @@ impl App {
                     continue;
                 };
 
-                let asking = self.pane(pane).is_some_and(|pane| {
-                    agent::looks_like_a_question(&pane.capture_lines(), &patterns)
-                });
+                let asking = self.agents_asking.get(&pane).copied().unwrap_or(false);
                 found.push((rank, self.agents.state(pane, now, window, asking)));
             }
         }
@@ -1376,6 +1416,11 @@ impl App {
         // would send it must not take the session down with the client.
         let session_mode = self.session_rx.is_some();
         let mut ticks = time::interval(self.tick_interval);
+        // A pane flooding output can hold the loop past a tick or two. The
+        // default behaviour then fires the missed ticks back to back, so a
+        // burst of output buys a burst of full redraws nobody can see; skipping
+        // them keeps the frame rate a ceiling rather than a quota.
+        ticks.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         let mut last_tick = time::Instant::now();
         // Constructing an `EventStream` requires a terminal on stdin, which a
         // session server does not have.
@@ -3538,7 +3583,7 @@ impl App {
         );
         if self.status_bar {
             let indicators = self.workspace_indicators();
-            let agents = self.agent_indicators();
+            let agents = self.agent_indicators.clone();
             let status_left = self.status_left();
             chrome::draw_status_bar(
                 &mut self.back,
@@ -3826,6 +3871,8 @@ impl App {
             resize_mode: ResizeMode::Normal,
             agents: AgentTracker::default(),
             agents_polled: std::time::Instant::now(),
+            agents_asking: HashMap::new(),
+            agent_indicators: Vec::new(),
             backend,
             output_rx,
             event_rx,
@@ -4651,10 +4698,35 @@ mod tests {
         if let Some(p) = app.pane_mut(pane) {
             p.process(b"Do you want to proceed?\r\n  1. Yes\r\n");
         }
+        // Reading the screen for a question is poll-rate work, not per-frame
+        // work, so the indicators only learn about it at the next poll.
+        app.refresh_agents_asking();
 
         assert_eq!(
             app.agent_indicators().first().map(|a| a.state),
             Some(crate::agent::AgentState::Waiting)
+        );
+    }
+
+    /// A working agent used to mark the frame dirty on every single tick, so
+    /// anything printing anywhere held the render loop at the full target
+    /// frame rate for as long as it kept printing.
+    #[tokio::test]
+    async fn a_steady_working_agent_does_not_force_a_frame_every_tick() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_output(pane, std::time::Instant::now());
+
+        app.tick_agents().await;
+        assert!(app.dirty, "the working indicator has to reach the bar once");
+
+        app.dirty = false;
+        app.tick_agents().await;
+        assert!(
+            !app.dirty,
+            "the indicator did not change, so no frame is owed"
         );
     }
 
