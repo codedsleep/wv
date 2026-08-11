@@ -952,6 +952,17 @@ impl App {
                 extreme_pane(self.workspaces[workspace].root.as_ref(), *extreme)
                     .unwrap_or(panes[0])
             }
+            // Geometric neighbour of the focused pane, the same one directional
+            // focus would move to. With nothing in that direction there is no
+            // pane to name, so the command fails rather than picking one.
+            Some(PaneRef::DirectionOf(direction)) => {
+                let from = focused.unwrap_or(panes[0]);
+                self.workspaces[workspace]
+                    .root
+                    .as_ref()
+                    .and_then(|root| root.focus_neighbor(from, *direction))
+                    .ok_or_else(|| Rejected::new("no pane in that direction".to_owned()))?
+            }
             // Handled above, before the window is resolved.
             Some(PaneRef::Id(_)) => unreachable!("pane ids are resolved before the window is"),
         };
@@ -4464,6 +4475,44 @@ mod tests {
             .expect("swap succeeds");
 
         assert_eq!(app.current().leaf_panes(), vec![right, left]);
+    }
+
+    #[tokio::test]
+    async fn swap_pane_direction_of_moves_the_focused_pane_and_its_focus() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+
+        let left = app.current().leaf_panes()[0];
+        let right = app.current().leaf_panes()[1];
+        assert_eq!(app.current().focused, Some(right));
+
+        app.execute(command("swap-pane -t {left-of}"))
+            .await
+            .expect("swap succeeds");
+
+        assert_eq!(app.current().leaf_panes(), vec![right, left]);
+        assert_eq!(
+            app.current().focused,
+            Some(right),
+            "focus travels with the pane that moved"
+        );
+    }
+
+    #[tokio::test]
+    async fn swap_pane_direction_of_rejects_an_empty_direction() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+
+        let before = app.current().leaf_panes();
+        let result = app
+            .execute_request(command("swap-pane -t {right-of}"))
+            .await
+            .expect("the request completes");
+
+        assert!(!result.is_ok());
+        assert_eq!(app.current().leaf_panes(), before);
     }
 
     #[tokio::test]

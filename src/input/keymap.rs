@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::command::target::{PaneRef, WindowRef};
-use crate::command::{Command, PaneSelector, ResizeChange, Target};
+use crate::command::{swap_toward, Command, PaneSelector, ResizeChange, Target};
 use crate::layout::geometry::{Direction, Split};
 
 /// The table consulted when no prefix has been pressed.
@@ -138,6 +138,27 @@ impl Keymap {
         self.set_binding(alt_char('j'), focus(Direction::Down));
         self.set_binding(alt_char('k'), focus(Direction::Up));
         self.set_binding(alt_char('l'), focus(Direction::Right));
+        // Alt+Shift+hjkl moves the focused pane itself, Hyprland-style: it
+        // trades places with the neighbour in that direction and focus travels
+        // with it. Terminals differ on whether Shift survives as a modifier —
+        // some fold it into the uppercase char — so register both spellings.
+        for (lower, upper, direction) in [
+            ('h', 'H', Direction::Left),
+            ('j', 'J', Direction::Down),
+            ('k', 'K', Direction::Up),
+            ('l', 'L', Direction::Right),
+        ] {
+            self.set_binding(alt_char(upper), swap_toward(direction));
+            self.set_binding(
+                KeyEvent::new(KeyCode::Char(upper), KeyModifiers::ALT | KeyModifiers::SHIFT),
+                swap_toward(direction),
+            );
+            // Some terminals report Alt+Shift+h as lowercase plus SHIFT.
+            self.set_binding(
+                KeyEvent::new(KeyCode::Char(lower), KeyModifiers::ALT | KeyModifiers::SHIFT),
+                swap_toward(direction),
+            );
+        }
         self.set_binding(alt_char('q'), kill_pane());
         self.set_binding(alt_char('d'), Command::DetachClient { target: None, all: false });
         self.set_binding(alt_char('v'), split(Split::Vertical));
@@ -417,8 +438,9 @@ pub fn format_key(key: &KeyEvent) -> String {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{format_key, Binding, Keymap, PREFIX_TABLE, ROOT_TABLE};
+    use super::{focus, format_key, swap_toward, Binding, Keymap, PREFIX_TABLE, ROOT_TABLE};
     use crate::command::Command;
+    use crate::layout::geometry::Direction;
 
     fn alt(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::ALT)
@@ -466,6 +488,39 @@ mod tests {
         assert_eq!(
             keymap.command_for(&alt(KeyCode::Char('h'))),
             Some(command("focus-left"))
+        );
+    }
+
+    #[test]
+    fn default_alt_shift_hjkl_swaps_the_focused_pane_with_its_neighbour() {
+        let keymap = Keymap::default();
+
+        for (upper, lower, direction) in [
+            ('H', 'h', Direction::Left),
+            ('J', 'j', Direction::Down),
+            ('K', 'k', Direction::Up),
+            ('L', 'l', Direction::Right),
+        ] {
+            let expected = Some(swap_toward(direction));
+            assert_eq!(keymap.command_for(&alt(KeyCode::Char(upper))), expected);
+            assert_eq!(
+                keymap.command_for(&alt_shift(KeyCode::Char(upper))),
+                expected
+            );
+            assert_eq!(
+                keymap.command_for(&alt_shift(KeyCode::Char(lower))),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn default_alt_shift_l_does_not_shadow_alt_l_focus() {
+        let keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.command_for(&alt(KeyCode::Char('l'))),
+            Some(focus(Direction::Right))
         );
     }
 
