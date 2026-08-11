@@ -5,14 +5,67 @@ use crossterm::style::Color as TermColor;
 use crate::backend::PaneId;
 use crate::layout::geometry::Rect;
 use crate::term::cell::{Cell, CellAttrs};
-use crate::term::query::{self, QueryScanner, Segment};
+use crate::term::query::{self, KeyboardRequest, QueryScanner, Segment};
 use crate::term::surface::Surface;
 
 pub struct Pane {
     id: PaneId,
     parser: vt100::Parser,
     scanner: QueryScanner,
+    keyboard: KeyboardStack,
     dirty: bool,
+}
+
+/// How deep the kitty keyboard flag stack goes before the oldest entry is
+/// dropped. The protocol leaves the limit to the terminal; this is kitty's.
+const KEYBOARD_STACK_LIMIT: usize = 16;
+
+/// A pane's kitty keyboard flag stack.
+///
+/// Empty means no enhancements, which is the legacy encoding every program
+/// understands. Programs push what they want and pop it on the way out.
+#[derive(Debug, Default)]
+struct KeyboardStack {
+    entries: Vec<u8>,
+}
+
+impl KeyboardStack {
+    /// The flags in effect, which is the top of the stack or nothing.
+    fn flags(&self) -> u8 {
+        self.entries.last().copied().unwrap_or(0)
+    }
+
+    fn apply(&mut self, request: KeyboardRequest) {
+        match request {
+            // Handled by the caller, which owns the PTY to answer down.
+            KeyboardRequest::Report => {}
+            KeyboardRequest::Push(flags) => {
+                if self.entries.len() >= KEYBOARD_STACK_LIMIT {
+                    self.entries.remove(0);
+                }
+                self.entries.push(flags);
+            }
+            KeyboardRequest::Pop(count) => {
+                let count = usize::from(count).min(self.entries.len());
+                self.entries.truncate(self.entries.len() - count);
+            }
+            // A set with nothing pushed still has to land somewhere, so it
+            // starts the stack rather than being dropped.
+            KeyboardRequest::Set { flags, mode } => {
+                let current = self.flags();
+                let next = match mode {
+                    // 1: replace, 2: set the named bits, 3: clear them.
+                    2 => current | flags,
+                    3 => current & !flags,
+                    _ => flags,
+                };
+                match self.entries.last_mut() {
+                    Some(top) => *top = next,
+                    None => self.entries.push(next),
+                }
+            }
+        }
+    }
 }
 
 /// The smallest grid vt100 survives, in either direction.
@@ -45,8 +98,16 @@ impl Pane {
             id,
             parser: vt100::Parser::new(drawable(rows), drawable(cols), 0),
             scanner: QueryScanner::default(),
+            keyboard: KeyboardStack::default(),
             dirty: true,
         }
+    }
+
+    /// The kitty keyboard flags this pane's program asked for.
+    ///
+    /// Zero means it asked for nothing, and its keys get the legacy encoding.
+    pub fn keyboard_flags(&self) -> u8 {
+        self.keyboard.flags()
     }
 
     /// Feed pane output to the emulator, returning any bytes owed back to it.
@@ -65,6 +126,12 @@ impl Pane {
                     // stream, which is what the program asked about.
                     let (row, col) = self.parser.screen().cursor_position();
                     replies.extend_from_slice(&query::reply(kind, row, col));
+                }
+                Segment::Keyboard(request) => {
+                    self.keyboard.apply(request);
+                    if matches!(request, KeyboardRequest::Report) {
+                        replies.extend_from_slice(&query::keyboard_reply(self.keyboard.flags()));
+                    }
                 }
             }
         }
@@ -329,5 +396,91 @@ mod tests {
         pane.process(b"\x1b]2;hello\x07");
 
         assert_eq!(pane.title(), Some("hello"));
+    }
+
+    #[test]
+    fn a_pane_starts_with_no_keyboard_enhancements() {
+        let pane = Pane::new(PaneId(1), 80, 24);
+
+        assert_eq!(pane.keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn keyboard_flags_follow_the_programs_pushes_and_pops() {
+        let mut pane = Pane::new(PaneId(1), 80, 24);
+
+        pane.process(b"\x1b[>1u");
+        assert_eq!(pane.keyboard_flags(), 1);
+
+        // A nested program pushing its own does not disturb the outer set.
+        pane.process(b"\x1b[>15u");
+        assert_eq!(pane.keyboard_flags(), 15);
+
+        pane.process(b"\x1b[<1u");
+        assert_eq!(pane.keyboard_flags(), 1);
+
+        pane.process(b"\x1b[<1u");
+        assert_eq!(pane.keyboard_flags(), 0);
+    }
+
+    /// Popping more than was pushed is what a program does when it loses track,
+    /// and it must not take the stack negative or panic.
+    #[test]
+    fn popping_past_the_bottom_of_the_stack_is_harmless() {
+        let mut pane = Pane::new(PaneId(1), 80, 24);
+
+        pane.process(b"\x1b[>1u\x1b[<99u");
+
+        assert_eq!(pane.keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn a_set_request_honours_its_mode() {
+        let mut pane = Pane::new(PaneId(1), 80, 24);
+
+        pane.process(b"\x1b[>1u");
+        // Mode 2 adds bits to what is already there.
+        pane.process(b"\x1b[=4;2u");
+        assert_eq!(pane.keyboard_flags(), 5);
+
+        // Mode 3 clears them.
+        pane.process(b"\x1b[=1;3u");
+        assert_eq!(pane.keyboard_flags(), 4);
+
+        // Mode 1 replaces outright.
+        pane.process(b"\x1b[=2;1u");
+        assert_eq!(pane.keyboard_flags(), 2);
+    }
+
+    /// A program asks what it is getting before deciding what to ask for, and
+    /// blocks on the answer the way it blocks on DA1.
+    #[test]
+    fn process_reports_the_flags_currently_in_effect() {
+        let mut pane = Pane::new(PaneId(1), 80, 24);
+
+        assert_eq!(pane.process(b"\x1b[?u"), b"\x1b[?0u".to_vec());
+
+        pane.process(b"\x1b[>5u");
+
+        assert_eq!(pane.process(b"\x1b[?u"), b"\x1b[?5u".to_vec());
+    }
+
+    /// The stack is bounded, and overflowing it drops the oldest entry rather
+    /// than growing without limit on a program that never pops.
+    #[test]
+    fn an_overflowing_keyboard_stack_drops_its_oldest_entry() {
+        let mut pane = Pane::new(PaneId(1), 80, 24);
+
+        for _ in 0..super::KEYBOARD_STACK_LIMIT + 4 {
+            pane.process(b"\x1b[>1u");
+        }
+        assert_eq!(pane.keyboard_flags(), 1);
+
+        // Exactly the limit is left, so that many pops empties it.
+        for _ in 0..super::KEYBOARD_STACK_LIMIT {
+            pane.process(b"\x1b[<1u");
+        }
+
+        assert_eq!(pane.keyboard_flags(), 0);
     }
 }

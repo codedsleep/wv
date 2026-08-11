@@ -53,6 +53,62 @@ pub fn compose(
     );
 }
 
+/// Where the real terminal cursor belongs this frame, in screen cells.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CursorPlacement {
+    pub x: u16,
+    pub y: u16,
+}
+
+/// The focused pane's cursor, mapped from its grid into screen coordinates.
+///
+/// The surface carries no cursor of its own — it is a grid of cells, and the
+/// diff renderer leaves the physical cursor wherever the last run of text
+/// ended. Something has to say where it really goes, and this is it.
+///
+/// `None` means no cursor should be shown at all: nothing is focused, the
+/// pane's program hid it, the focused pane is behind a zoomed one, or its
+/// cursor sits outside the rectangle the pane is currently drawn in.
+pub fn focused_cursor(
+    root: Option<&Node>,
+    panes: &[Pane],
+    focused: Option<PaneId>,
+    options: ComposeOptions,
+) -> Option<CursorPlacement> {
+    let focused = focused?;
+
+    // Compose draws the zoomed leaf alone, so a focused pane that is not the
+    // zoomed one is not on screen to put a cursor in.
+    if options.zoomed.is_some_and(|zoomed| zoomed != focused) {
+        return None;
+    }
+
+    let Some(Node::Leaf { rect_current, .. }) = root?.find_leaf(focused) else {
+        return None;
+    };
+    let pane = panes.iter().find(|candidate| candidate.id() == focused)?;
+    if pane.screen().hide_cursor() {
+        return None;
+    }
+
+    // The same rectangle `compose_node` blits the pane into, so the cursor
+    // tracks the pane through a resize tween instead of jumping at the end.
+    let content = frect_to_covering_rect(*rect_current).content();
+    let (row, col) = pane.screen().cursor_position();
+
+    // A pane whose emulator grid is still the old size can have its cursor
+    // outside the rect it is drawn in; the blit clips those cells away, and
+    // the cursor has to be clipped with them.
+    if col >= content.w || row >= content.h {
+        return None;
+    }
+
+    Some(CursorPlacement {
+        x: content.x.saturating_add(col),
+        y: content.y.saturating_add(row),
+    })
+}
+
 fn compose_node(node: &Node, panes: &[Pane], back: &mut Surface) {
     match node {
         Node::Leaf {
@@ -115,7 +171,7 @@ fn ceil_to_u16(value: f32) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose, ComposeOptions};
+    use super::{compose, focused_cursor, ComposeOptions, CursorPlacement};
     use crate::anim::timeline::Timeline;
     use crate::backend::PaneId;
     use crate::config::ThemeConfig;
@@ -137,6 +193,76 @@ mod tests {
         agent_waiting: crossterm::style::Color::Yellow,
         agent_idle: crossterm::style::Color::DarkGrey,
     };
+
+    /// A leaf filling the whole terminal, for the cursor tests.
+    fn fullscreen_leaf(pane: PaneId, w: u16, h: u16) -> Node {
+        let rect = Rect { x: 0, y: 0, w, h };
+        Node::Leaf {
+            pane,
+            rect_current: FRect::from(rect),
+            rect_target: rect,
+        }
+    }
+
+    /// The pane's cursor is in its own grid; the terminal's is on the screen.
+    /// The border between them is the whole of the offset.
+    #[test]
+    fn focused_cursor_maps_the_pane_grid_onto_the_screen() {
+        let mut pane = Pane::new(PaneId(1), 80, 24);
+        let root = fullscreen_leaf(PaneId(1), 80, 24);
+
+        pane.process(b"hi");
+
+        assert_eq!(
+            focused_cursor(Some(&root), &[pane], Some(PaneId(1)), ComposeOptions::default()),
+            Some(CursorPlacement { x: 3, y: 1 })
+        );
+    }
+
+    #[test]
+    fn focused_cursor_is_none_when_the_program_hid_it() {
+        let mut pane = Pane::new(PaneId(1), 80, 24);
+        let root = fullscreen_leaf(PaneId(1), 80, 24);
+
+        pane.process(b"\x1b[?25l");
+
+        assert_eq!(
+            focused_cursor(Some(&root), &[pane], Some(PaneId(1)), ComposeOptions::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn focused_cursor_is_none_with_nothing_focused() {
+        let pane = Pane::new(PaneId(1), 80, 24);
+        let root = fullscreen_leaf(PaneId(1), 80, 24);
+
+        assert_eq!(
+            focused_cursor(Some(&root), &[pane], None, ComposeOptions::default()),
+            None
+        );
+    }
+
+    /// Compose draws the zoomed leaf alone, so a focused pane hidden behind it
+    /// must not leave a cursor floating over somebody else's cells.
+    #[test]
+    fn focused_cursor_is_none_for_a_pane_behind_a_zoomed_one() {
+        let pane = Pane::new(PaneId(1), 80, 24);
+        let root = fullscreen_leaf(PaneId(1), 80, 24);
+
+        assert_eq!(
+            focused_cursor(
+                Some(&root),
+                &[pane],
+                Some(PaneId(1)),
+                ComposeOptions {
+                    pane_titles: true,
+                    zoomed: Some(PaneId(2)),
+                },
+            ),
+            None
+        );
+    }
 
     #[test]
     fn compose_blits_first_pane_fullscreen() {
