@@ -15,11 +15,35 @@ pub struct Pane {
     dirty: bool,
 }
 
+/// The smallest grid vt100 survives, in either direction.
+///
+/// Below this it panics rather than clips, and it takes the whole session with
+/// it: a one-row grid underflows when text wraps, because it subtracts the
+/// scrolled rows from a cursor that has nowhere to scroll to, and a one-column
+/// grid underflows on the width of a wide character. Neither is reachable by
+/// asking politely — 0.15.2 has no fallible resize.
+pub const MIN_GRID: u16 = 2;
+
+/// Hold a pane's emulator to a size vt100 can represent.
+///
+/// A pane squeezed down to its own border has no content area left, and
+/// `Rect::content` saturates that to zero — so this is reached by nothing more
+/// exotic than `split-window -l 10%` in a short window. The extra rows the
+/// emulator keeps are clipped when the pane is drawn, which is already what
+/// happens to a pane too small to show its contents.
+const fn drawable(extent: u16) -> u16 {
+    if extent < MIN_GRID {
+        MIN_GRID
+    } else {
+        extent
+    }
+}
+
 impl Pane {
     pub fn new(id: PaneId, cols: u16, rows: u16) -> Self {
         Self {
             id,
-            parser: vt100::Parser::new(rows, cols, 0),
+            parser: vt100::Parser::new(drawable(rows), drawable(cols), 0),
             scanner: QueryScanner::default(),
             dirty: true,
         }
@@ -139,7 +163,7 @@ impl Pane {
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        self.parser.set_size(rows, cols);
+        self.parser.set_size(drawable(rows), drawable(cols));
         self.dirty = true;
     }
 
@@ -200,6 +224,38 @@ mod tests {
     use super::Pane;
     use crate::backend::PaneId;
     use crate::term::surface::Surface;
+
+    /// `split-window -l 10%` on a short window leaves the new pane smaller than
+    /// its own border, and `Rect::content` saturates that to nothing. vt100
+    /// assumes the cursor sits on a real row and `unwrap`s to get there, so a
+    /// zero-row pane took the whole session down on the shell's first byte.
+    #[test]
+    fn a_pane_with_no_room_left_still_takes_output() {
+        let mut collapsed = Pane::new(PaneId(1), 0, 0);
+        collapsed.process(b"hello\r\n");
+
+        let mut squeezed = Pane::new(PaneId(2), 40, 10);
+        squeezed.resize(0, 0);
+        squeezed.process(b"hello\r\n");
+
+        // And it comes back when there is room again, rather than staying stuck
+        // at the one cell it was held to.
+        squeezed.resize(40, 10);
+        squeezed.process(b"world\r\n");
+        assert_eq!(squeezed.size(), (40, 10));
+    }
+
+    /// Not just the first byte: wrapping and scrolling are what actually
+    /// underflow, so the collapsed pane has to survive real output.
+    #[test]
+    fn a_collapsed_pane_survives_wrapping_and_scrolling() {
+        let mut pane = Pane::new(PaneId(1), 1, 1);
+
+        pane.process(b"a line long enough to wrap several times\r\n");
+        pane.process("wide \u{754c}\u{754c}\u{754c}\r\n".as_bytes());
+        pane.process(b"\x1b[2J\x1b[H\x1b[5;10Hplaced\r\n");
+        pane.process(b"\x1b[?1049htab\there\r\n\x1b[?1049l");
+    }
 
     /// btop positions with HVP and never with CUP. Losing those moves makes it
     /// paint its whole interface from wherever the cursor sat, so the boxes
