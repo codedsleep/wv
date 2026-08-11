@@ -8,7 +8,7 @@ An animated tiling terminal multiplexer in Rust.
 >
 > Until then, run `wv --debug` and split / close panes — the top-right HUD shows fps, frame time, in-flight tweens, and dirty-cell count per frame.
 
-**Status:** v0.1.0 — Phase 5 polish (themes, OSC 0/2 pane titles, truecolor + 256-color fallback, rotating log file), plus tmux parity for scripting and configuration.
+**Status:** v0.1.0 — Phase 5 polish (themes, truecolor + 256-color fallback, rotating log file), plus tmux parity for scripting and configuration.
 
 ## Features
 
@@ -16,7 +16,7 @@ An animated tiling terminal multiplexer in Rust.
 - **Detach and reattach.** A session server owns the PTYs, the terminal state and the layout; the client owns only your terminal. Close the terminal and the session keeps running.
 - **BSP splits.** Recursive horizontal/vertical splits with geometric focus navigation (`h/j/k/l`).
 - **Configurable themes.** Hex color overrides for borders, status bar, and accent; ships with `nord` and `tokyonight` presets (default `tokyonight`).
-- **Pane titles.** OSC 0/2 sequences (`printf '\e]2;hello\a'`) surface as centered top-border labels.
+- **Window names from pane titles.** OSC 0/2 sequences (`printf '\e]2;hello\a'`) name the window they are in, so the status bar reads `1:vim`. Per-pane title labels are off by default — a caption over every pane is noise when the pane's contents already say what it is — but `pane_titles = true` brings them back.
 - **Truecolor with graceful degradation.** Detects `COLORTERM=truecolor`; otherwise quantizes RGB to the xterm-256 cube.
 - **Panic-safe.** Terminal state is always restored on crash; panic info goes to the log file.
 - **`#![forbid(unsafe_code)]`** at the crate root.
@@ -97,7 +97,7 @@ Bezier curves were tuned against [Hyprland's](https://wiki.hyprland.org/Configur
 [ui]
 border_color = "cyan"   # legacy override; takes a back seat to [theme]
 status_bar   = true
-pane_titles  = true
+pane_titles  = false  # a title label on every pane's top border
 target_fps   = 160
 
 [theme]

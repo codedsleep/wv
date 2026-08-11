@@ -63,7 +63,7 @@ pub const OPTIONS: &[OptionSpec] = &[
         name: "pane-border-status",
         kind: OptionKind::Flag,
         status: OptionStatus::Live,
-        default: "on",
+        default: "off",
     },
     OptionSpec {
         name: "repeat-time",
