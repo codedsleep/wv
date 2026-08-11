@@ -5,6 +5,7 @@
 //! loop and rendered frames back out.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -68,7 +69,9 @@ impl SessionServer {
     /// server never leaves a name claimed.
     pub fn start(self) -> (mpsc::Receiver<SessionEvent>, SocketGuard) {
         let (app_tx, app_rx) = mpsc::channel(APP_EVENT_CAPACITY);
-        let guard = SocketGuard { path: self.path };
+        let guard = SocketGuard {
+            path: SocketPath::new(self.path),
+        };
         let listener = self.listener;
 
         tokio::spawn(async move {
@@ -98,14 +101,46 @@ impl SessionServer {
     }
 }
 
+/// The socket a session is currently listening on.
+///
+/// Shared, because `rename-session` moves the file: the guard has to unlink
+/// whatever the socket is called *now*, not what it was called at startup.
+#[derive(Clone)]
+pub struct SocketPath(Arc<Mutex<PathBuf>>);
+
+impl SocketPath {
+    fn new(path: PathBuf) -> Self {
+        Self(Arc::new(Mutex::new(path)))
+    }
+
+    pub fn get(&self) -> PathBuf {
+        self.lock().clone()
+    }
+
+    pub fn set(&self, path: PathBuf) {
+        *self.lock() = path;
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PathBuf> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// Removes the socket file when the server goes away.
 pub struct SocketGuard {
-    path: PathBuf,
+    path: SocketPath,
+}
+
+impl SocketGuard {
+    /// A handle to the live socket path, so a rename can move it.
+    pub fn path(&self) -> SocketPath {
+        self.path.clone()
+    }
 }
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(self.path.get());
     }
 }
 

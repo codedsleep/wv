@@ -94,7 +94,7 @@ means the current one.
 | `capture-pane -b/-a` | — | no | Buffers went with copy mode |
 | `has-session [-t]` | `wv has-session [name]` | yes | Exit status is the answer, as in tmux |
 | `kill-server` | `wv kill-server` | yes | |
-| `rename-session` | — | no | The socket is named after the session; renaming would break every attached client |
+| `rename-session [-t] <name>` | — | yes | Moves the socket; attached clients keep rendering through it |
 | `bind-key [-n] [-r] [-T]` | — | yes | |
 | `unbind-key [-n] [-T] [-a]` | — | yes | |
 | `list-keys [-T]` | — | yes | |
@@ -205,6 +205,17 @@ a silently empty field is worse than a failed command.
 `pane_current_command` reports the **pane's own process**, not the foreground
 job inside it. A pane whose shell is running vim reports the shell; a pane
 spawned as `split-window npm run dev` reports `npm`.
+
+## Renaming a session
+
+`wv exec rename-session dev` renames a live session. It moves the listening
+socket to match, which established connections do not care about — a Unix
+socket connection survives its path changing, so every attached client keeps
+rendering through the rename. Only new connections use the new name.
+
+It refuses a name another live session already holds, and renaming to the name
+it already has is a no-op rather than an error, so a script can set a name
+unconditionally.
 
 ## Several terminals, one session
 

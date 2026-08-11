@@ -178,6 +178,7 @@ Commands use tmux's names and flags, including `-t session:window.pane` targets:
 - `select-window [-t target] [-n|-p|-l]`, `next-window`, `previous-window`, `last-window`
 - `new-window [-d] [-n name] [-c dir] [-t target] [command...]`
 - `kill-window [-t target]`, `rename-window [-t target] <name>`
+- `rename-session [-t target] <name>`
 - `kill-pane [-t target]`, `detach-client`, `kill-session`
 - `display-message -p [-t target] [text]`
 - `send-keys [-l] [-t target] <keys...>`
