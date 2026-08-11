@@ -153,7 +153,15 @@ set -g agent-status on
 set -g agent-commands 'claude,codex,opencode'
 set -g agent-activity-time 2000
 set -g agent-waiting-patterns 'do you want,(y/n),proceed?,continue?'
+set -g agent-bell on
 ```
+
+When an agent leaves the working state — finished, or stopped at a question —
+weave rings the terminal bell once, so a run that ends in a window you aren't
+looking at still reaches you. Your terminal decides what a bell is: a sound, a
+flash, a desktop notification. Turn it off with `set -g agent-bell off`. Agents
+finishing together ring once, and nothing rings for agents that were already
+stopped when weave started watching.
 
 `agent-commands` is matched against the file name, so an agent started by
 absolute path still counts. `agent-waiting-patterns` is matched
