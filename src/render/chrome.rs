@@ -154,7 +154,7 @@ pub fn draw_status_bar(surface: &mut Surface, bar: &StatusBar<'_>, theme: ThemeC
 /// The session segment and the window segments, drawn from the left edge.
 fn left_run(bar: &StatusBar<'_>, theme: ThemeConfig) -> Run {
     let mut run = Run::default();
-    run.push_str(
+    run.push_str_bold(
         &format!(" {} ", bar.left),
         theme.status_bg,
         theme.status_session,
@@ -174,6 +174,7 @@ fn left_run(bar: &StatusBar<'_>, theme: ThemeConfig) -> Run {
         };
         // The number stays because `Alt+1` and `-t :1` still address it; the
         // name is what makes a window recognisable.
+        run.open_segment(bar, bg, theme);
         run.push_str(&format!(" {} {thin} {} {} ", ws.number, ws.name, ws.flags), fg, bg);
         run.close_segment(bar, bg, theme);
     }
@@ -217,7 +218,7 @@ fn right_run(bar: &StatusBar<'_>, theme: ThemeConfig, full: bool) -> Run {
         if bar.powerline {
             run.push(SEP_LEFT, theme.accent, theme.status_segment);
         }
-        run.push_str(&format!(" {} ", bar.host), theme.status_bg, theme.accent);
+        run.push_str_bold(&format!(" {} ", bar.host), theme.status_bg, theme.accent);
     }
     run
 }
@@ -229,14 +230,18 @@ fn right_run(bar: &StatusBar<'_>, theme: ThemeConfig, full: bool) -> Run {
 /// middle have to know where that block starts.
 #[derive(Default)]
 struct Run {
-    cells: Vec<(char, Color, Color)>,
+    cells: Vec<Cell>,
     width: u16,
 }
 
 impl Run {
     fn push(&mut self, ch: char, fg: Color, bg: Color) {
-        self.cells.push((ch, fg, bg));
-        self.width = self.width.saturating_add(char_step(ch));
+        self.push_cell(Cell::new(ch, fg, bg, CellAttrs::empty()));
+    }
+
+    fn push_cell(&mut self, cell: Cell) {
+        self.width = self.width.saturating_add(char_step(cell.ch));
+        self.cells.push(cell);
     }
 
     fn push_str(&mut self, text: &str, fg: Color, bg: Color) {
@@ -245,11 +250,30 @@ impl Run {
         }
     }
 
-    /// End a left-aligned segment coloured `bg`.
+    /// The two blocks tmux sets `bold` on: the session and the host.
     ///
-    /// The wedge is drawn over the bar's own background, not the next
-    /// segment's, which is what leaves the thin dark notch between two
-    /// segments of the same colour.
+    /// They are the ones that answer "where am I", and the weight is what
+    /// makes them read as headings rather than as more of the same row.
+    fn push_str_bold(&mut self, text: &str, fg: Color, bg: Color) {
+        for ch in text.chars() {
+            self.push_cell(Cell::new(ch, fg, bg, CellAttrs::BOLD));
+        }
+    }
+
+    /// Open a left-aligned segment coloured `bg`.
+    ///
+    /// A wedge in the bar's own colour, cut into the segment rather than laid
+    /// over the bar. Paired with the closing one it puts two arrows at every
+    /// boundary — which is what keeps two segments of the same colour apart,
+    /// and what the powerline look actually is.
+    fn open_segment(&mut self, bar: &StatusBar<'_>, bg: Color, theme: ThemeConfig) {
+        if bar.powerline {
+            self.push(SEP_RIGHT, theme.status_bg, bg);
+        }
+    }
+
+    /// End a left-aligned segment coloured `bg`: the same wedge the other way
+    /// round, the segment's colour laid over the bar.
     fn close_segment(&mut self, bar: &StatusBar<'_>, bg: Color, theme: ThemeConfig) {
         if bar.powerline {
             self.push(SEP_RIGHT, bg, theme.status_bg);
@@ -261,12 +285,12 @@ impl Run {
     /// Returns where the run ended, clipped at `max_x`.
     fn draw(&self, surface: &mut Surface, start_x: u16, y: u16, max_x: u16) -> u16 {
         let mut x = start_x;
-        for &(ch, fg, bg) in &self.cells {
+        for &cell in &self.cells {
             if x >= max_x {
                 break;
             }
-            surface.set(x, y, Cell::new(ch, fg, bg, CellAttrs::empty()));
-            x = x.saturating_add(char_step(ch));
+            surface.set(x, y, cell);
+            x = x.saturating_add(char_step(cell.ch));
         }
         x
     }
@@ -479,7 +503,7 @@ mod tests {
         draw_borders, draw_debug_overlay, draw_status_bar, truncate_title, DebugOverlay,
         AGENT_MARK, PLAIN_THIN_LEFT, SEP_LEFT, SEP_LEFT_THIN, SEP_RIGHT, SEP_RIGHT_THIN,
     };
-    use crate::term::cell::Cell;
+    use crate::term::cell::{Cell, CellAttrs};
     use crate::agent::AgentState;
     use crate::anim::timeline::Timeline;
     use crate::backend::PaneId;
@@ -722,6 +746,21 @@ mod tests {
         assert_eq!(wedge.fg, TEST_THEME.status_session);
         assert_eq!(wedge.bg, TEST_THEME.status_bg);
 
+        // The two blocks that answer "where am I" are the two tmux sets bold.
+        assert!(session.attrs.contains(CellAttrs::BOLD), "{bottom}");
+        assert!(
+            cell_at(&surface, char_index(&bottom, "testhost"))
+                .attrs
+                .contains(CellAttrs::BOLD),
+            "{bottom}"
+        );
+        assert!(
+            !cell_at(&surface, char_index(&bottom, "edit"))
+                .attrs
+                .contains(CellAttrs::BOLD),
+            "a window name is not a heading: {bottom}"
+        );
+
         // The current window takes the accent; the others stay quiet.
         assert_eq!(
             cell_at(&surface, char_index(&bottom, "edit")).bg,
@@ -735,6 +774,37 @@ mod tests {
             cell_at(&surface, char_index(&bottom, "testhost")).bg,
             TEST_THEME.accent
         );
+    }
+
+    /// Every window boundary carries two wedges, not one: the segment's colour
+    /// laid over the bar, then the bar's colour cut into the next segment.
+    /// With one wedge, two adjacent windows of the same colour run together.
+    #[test]
+    fn each_window_segment_is_wedged_at_both_ends() {
+        let mut surface = Surface::new(120, 4);
+        let workspaces = [workspace(1, "edit", false), workspace(2, "build", false)];
+
+        draw_status_bar(
+            &mut surface,
+            &status_bar("dev", &workspaces, &[]),
+            TEST_THEME,
+        );
+
+        let bottom = bottom_row(&surface);
+        // The exact run tmux's `window-status-format` expands to.
+        assert!(
+            bottom.contains(&format!(
+                "{SEP_RIGHT}{SEP_RIGHT} 1 {SEP_RIGHT_THIN} edit  {SEP_RIGHT}"
+            )),
+            "{bottom}"
+        );
+
+        let closing = char_index(&bottom, &format!("{SEP_RIGHT}{SEP_RIGHT} 1"));
+        assert_eq!(cell_at(&surface, closing).fg, TEST_THEME.status_session);
+        assert_eq!(cell_at(&surface, closing).bg, TEST_THEME.status_bg);
+        // The second points the other way round: bar over segment.
+        assert_eq!(cell_at(&surface, closing + 1).fg, TEST_THEME.status_bg);
+        assert_eq!(cell_at(&surface, closing + 1).bg, TEST_THEME.status_segment);
     }
 
     /// The wedges are private-use codepoints, so a terminal without a patched
