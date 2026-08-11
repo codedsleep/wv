@@ -71,6 +71,8 @@ pub const WORKSPACE_COUNT: usize = 9;
 
 /// What a window is called before anything names it.
 const DEFAULT_WINDOW_NAME: &str = "shell";
+/// Shown in place of a session name when weave is not running as a session.
+const UNNAMED_SESSION: &str = "weave";
 
 #[derive(Default)]
 struct Workspace {
@@ -1354,6 +1356,29 @@ impl App {
 
     pub fn current_layout_root(&self) -> Option<&Node> {
         self.current().root.as_ref()
+    }
+
+    /// What sits at the far left of the status bar.
+    ///
+    /// A prompt outranks a message, which outranks the session name — all
+    /// three share the slot, which is where tmux puts them. The name is what
+    /// is there the rest of the time, so a renamed session shows its new name
+    /// on the next frame.
+    ///
+    /// Returns an owned string: the caller needs it alive while it holds a
+    /// mutable borrow of the back surface, and one short allocation per frame
+    /// is nothing beside the per-pane surfaces the compositor already builds.
+    fn status_left(&self) -> String {
+        if let Some(prompt) = self.prompt.as_ref() {
+            return prompt.render();
+        }
+        if let Some(message) = self.message.as_ref() {
+            return message.text.clone();
+        }
+
+        self.session_name
+            .clone()
+            .unwrap_or_else(|| UNNAMED_SESSION.to_owned())
     }
 
     #[doc(hidden)]
@@ -3335,17 +3360,10 @@ impl App {
         );
         if self.status_bar {
             let indicators = self.workspace_indicators();
-            // A prompt outranks a message, which outranks the mode label —
-            // all three share the same slot, which is where tmux puts them.
-            let prompt_line = self.prompt.as_ref().map(Prompt::render);
-            let mode_label = prompt_line.as_deref().unwrap_or_else(|| {
-                self.message
-                    .as_ref()
-                    .map_or("NORMAL", |message| message.text.as_str())
-            });
+            let status_left = self.status_left();
             chrome::draw_status_bar(
                 &mut self.back,
-                mode_label,
+                &status_left,
                 &indicators,
                 chrono::Local::now(),
                 self.theme,
@@ -5315,6 +5333,82 @@ mod tests {
             .await
             .expect("input handled");
         assert_eq!(app.prompt.as_ref().expect("open").text(), "Xb");
+    }
+
+    /// The rendered bottom row, as text.
+    fn status_row(app: &App) -> String {
+        let surface = app.compose_current_surface();
+        let mut back = surface.clone();
+        let indicators = app.workspace_indicators();
+        crate::render::chrome::draw_status_bar(
+            &mut back,
+            &app.status_left(),
+            &indicators,
+            chrono::Local::now(),
+            app.theme,
+        );
+        (0..back.width)
+            .map(|x| back.get(x, back.height - 1).expect("cell exists").ch)
+            .collect()
+    }
+
+    /// The session name has to be *visible*, not just stored — renaming a
+    /// session you cannot see the name of is not much use.
+    #[tokio::test]
+    async fn the_status_bar_shows_the_session_name() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.session_name = Some("dev".to_owned());
+
+        assert!(status_row(&app).starts_with("[dev] "), "{}", status_row(&app));
+    }
+
+    #[tokio::test]
+    async fn renaming_a_session_updates_the_status_bar() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.session_name = Some("before".to_owned());
+        assert!(status_row(&app).starts_with("[before] "));
+
+        // Rename through the same path a command takes.
+        app.session_name = Some("after".to_owned());
+
+        assert!(status_row(&app).starts_with("[after] "), "{}", status_row(&app));
+    }
+
+    #[tokio::test]
+    async fn a_prompt_and_a_message_take_over_the_name_slot() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.session_name = Some("dev".to_owned());
+
+        app.show_message("saved".to_owned());
+        assert!(status_row(&app).starts_with("[saved] "), "{}", status_row(&app));
+
+        app.message = None;
+        app.prompt = Some(Prompt {
+            label: "rename-window:".to_owned(),
+            input: "api".chars().collect(),
+            cursor: 3,
+            template: "rename-window %%".to_owned(),
+        });
+        assert!(
+            status_row(&app).starts_with("[rename-window: api"),
+            "{}",
+            status_row(&app)
+        );
+
+        // And the name comes back when both are gone.
+        app.prompt = None;
+        assert!(status_row(&app).starts_with("[dev] "));
+    }
+
+    #[tokio::test]
+    async fn a_local_weave_shows_a_placeholder_rather_than_nothing() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        assert!(status_row(&app).starts_with("[weave] "), "{}", status_row(&app));
     }
 
     /// A waiting caller gets the command's output, not just "it ran".

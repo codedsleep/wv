@@ -153,6 +153,9 @@ wv has-session [name]  # exit 0 if it is live, 1 if not
 wv kill-server         # end every session
 ```
 
+The status bar shows the session name on the left, then the windows as
+`index:name`, then a clock: `[dev] 1:editor  2:build      14:23:11`.
+
 `Alt+D` detaches: the server keeps running with every pane alive, and the client restores your terminal and prints `[detached from NAME]`. `Alt+Shift+Q` quits, which shuts the session down and kills its panes.
 
 Sockets live in `$XDG_RUNTIME_DIR/weave/<name>.sock` (falling back to a private directory under `/tmp`). A socket whose server has gone away is unlinked automatically, so a name is never stuck.

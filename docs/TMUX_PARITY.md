@@ -232,6 +232,21 @@ a silently empty field is worse than a failed command.
 job inside it. A pane whose shell is running vim reports the shell; a pane
 spawned as `split-window npm run dev` reports `npm`.
 
+## The status bar
+
+```
+[dev] 1:editor  2:build      14:23:11
+```
+
+The far left is the **session name**, so a renamed session shows its new name
+on the next frame. A `display-message` without `-p`, and an open
+`command-prompt`, take that slot over while they are up — which is where tmux
+puts them too. Running outside a session it reads `[weave]`.
+
+Then the windows as `index:name`, the current one highlighted in the accent
+colour, and a clock on the right. `status-left`, `status-right` and
+`status-style` are accepted as options but inert: the bar is not format-driven.
+
 ## Renaming a session
 
 `wv exec rename-session dev` renames a live session. It moves the listening
