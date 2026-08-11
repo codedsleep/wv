@@ -26,9 +26,60 @@ const LENGTH_PREFIX_BYTES: usize = 4;
 /// Bincode encodes enum variants positionally, so a client built against a
 /// different `Command` shape would not fail to decode — it would decode into
 /// the wrong thing. The handshake turns that silent corruption into a clear
-/// error. Bump this whenever `ClientToServer`, `ServerToClient`, or anything
-/// they carry changes shape.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// error.
+///
+/// **Bump this whenever `ClientToServer`, `ServerToClient`, or anything they
+/// carry changes shape — and `Command` counts.** That is the part that got
+/// missed: `Command` lives in another file, gained a dozen variants across
+/// several changes, and none of them touched this number, so two builds with
+/// incompatible command encodings both claimed to speak v2. See
+/// [`command_shape_tripwire`] below, which makes the omission a compile error.
+pub const PROTOCOL_VERSION: u32 = 3;
+
+/// Fails to compile when [`Command`] changes shape, as a reminder to bump
+/// [`PROTOCOL_VERSION`].
+///
+/// This match is deliberately exhaustive and deliberately lives *here* rather
+/// than beside the enum: adding a command means editing this file, which puts
+/// the version constant on screen at the moment it needs changing.
+///
+/// If you are reading this because the compiler sent you: add your variant
+/// below, then bump `PROTOCOL_VERSION`.
+#[allow(dead_code)]
+fn command_shape_tripwire(command: &Command) {
+    match command {
+        Command::SplitWindow { .. }
+        | Command::SelectPane { .. }
+        | Command::SelectWindow { .. }
+        | Command::KillPane { .. }
+        | Command::DetachClient { .. }
+        | Command::KillSession { .. }
+        | Command::DisplayMessage { .. }
+        | Command::SendKeys { .. }
+        | Command::RespawnPane { .. }
+        | Command::NewWindow { .. }
+        | Command::KillWindow { .. }
+        | Command::RenameWindow { .. }
+        | Command::RenameSession { .. }
+        | Command::ResizePane { .. }
+        | Command::SwapPane { .. }
+        | Command::RotateWindow { .. }
+        | Command::SelectLayout { .. }
+        | Command::CapturePane { .. }
+        | Command::List { .. }
+        | Command::BindKey { .. }
+        | Command::UnbindKey { .. }
+        | Command::ListKeys { .. }
+        | Command::SetOption { .. }
+        | Command::ShowOptions { .. }
+        | Command::BreakPane { .. }
+        | Command::JoinPane { .. }
+        | Command::RunShell { .. }
+        | Command::IfShell { .. }
+        | Command::WaitFor { .. }
+        | Command::RefreshClient => {}
+    }
+}
 
 /// Message sent from an attached client to the session server.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
