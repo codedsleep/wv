@@ -104,6 +104,8 @@ means the current one.
 | `source-file` | — | yes | Relative to the file that names it; `~` expands |
 | `set-environment` | — | PR 9 | |
 | `bind-key -N`, `list-keys -N` | — | no | Binding descriptions |
+| `command-prompt [-p] [-I]` | — | yes | One line of text, `%%` in the template |
+| `command-prompt -1/-N/-i/-k/-W/-T/-F` | — | no | The prompt reads one line of text |
 | `copy-mode`, buffers, scrollback, search | — | no | Dropped: a phase of its own, not a PR |
 | `run-shell [-b]` | — | yes | Returns stdout; a non-zero exit is an error result |
 | `if-shell [-b]` | — | yes | The condition runs inline; `-b` only skips waiting on the branch |
@@ -179,8 +181,32 @@ costs you that line and nothing else.
 
 `C-b` is the prefix, with tmux's defaults behind it: `c` new-window, `%` and
 `"` split, `x` kill-pane, `z` zoom, `&` kill-window, `d` detach, `n`/`p`/`l`
-window movement, `o` next pane, `{`/`}` swap, digits select windows, arrows
-move focus and `C-`arrows resize (repeating, via `-r`).
+window movement, `o` next pane, `{`/`}` swap, `,` rename window, `$` rename
+session, digits select windows, arrows move focus and `C-`arrows resize
+(repeating, via `-r`).
+
+`Alt+R` renames the current window and `Alt+Shift+R` the session, without a
+prefix.
+
+### Prompts
+
+A rename needs a name, and a keybinding cannot supply one, so both rename keys
+open a `command-prompt`: a one-line editor on the status bar, prefilled with
+the current name so you edit rather than retype.
+
+```
+bind-key -T root M-r  command-prompt -p "rename-window:" -I "#W" "rename-window %%"
+```
+
+`%%` is where the typed text goes. Standing alone it becomes exactly one
+argument however many spaces are typed into it, so a two-word name stays one
+name.
+
+While a prompt is open it is **modal** — every key goes to it, so nothing you
+type can leak into the pane behind it. `Enter` runs it, `Escape`, `C-c` and
+`C-g` cancel, `C-u` clears, and `Left`/`Right`/`Home`/`End`/`Backspace`/`Delete`
+edit. Submitting an empty line cancels rather than running the command with an
+empty argument.
 
 weave's own `Alt` chords keep working with no prefix, in the `root` table —
 which is also where `bind -n` binds. A key in no table reaches the pane. A key

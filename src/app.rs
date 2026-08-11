@@ -224,6 +224,57 @@ impl AttachedClient {
     }
 }
 
+/// An open `command-prompt`: a line being typed on the status bar.
+///
+/// While one is open it takes every key before the pane sees it, which is what
+/// makes typing a window name possible at all — otherwise the letters would go
+/// straight to the shell.
+struct Prompt {
+    /// What is shown before the input, e.g. `rename-window:`.
+    label: String,
+    /// The text so far, held as chars so the cursor can index it without
+    /// worrying about UTF-8 boundaries.
+    input: Vec<char>,
+    cursor: usize,
+    /// The command to run, with `%%` standing in for the input.
+    template: String,
+}
+
+impl Prompt {
+    fn text(&self) -> String {
+        self.input.iter().collect()
+    }
+
+    /// The status-bar line, with a block where the cursor is.
+    fn render(&self) -> String {
+        let mut shown = self.input.clone();
+        // A block *at* the cursor rather than after it, so it sits over the
+        // character it would replace — and at the end there is nothing to sit
+        // over, hence the trailing space.
+        shown.insert(self.cursor.min(shown.len()), '\u{2588}');
+
+        format!("{} {}", self.label, shown.iter().collect::<String>())
+    }
+
+    fn insert(&mut self, ch: char) {
+        self.input.insert(self.cursor.min(self.input.len()), ch);
+        self.cursor += 1;
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            self.input.remove(self.cursor);
+        }
+    }
+
+    fn delete(&mut self) {
+        if self.cursor < self.input.len() {
+            self.input.remove(self.cursor);
+        }
+    }
+}
+
 /// A message shown on the status line instead of returned to a caller.
 struct StatusMessage {
     text: String,
@@ -301,6 +352,8 @@ pub struct App {
     options: Options,
     /// A message to show on the status line, and how long it has been up.
     message: Option<StatusMessage>,
+    /// An open `command-prompt`, if one is taking input.
+    prompt: Option<Prompt>,
     /// Callers parked on a `wait-for` channel, by channel name.
     ///
     /// A waiting request does not reply until someone signals it, so the reply
@@ -704,6 +757,7 @@ impl App {
             keymap: config.keymap,
             options: config.options,
             message: None,
+            prompt: None,
             wait_channels: HashMap::new(),
             key_table: ROOT_TABLE.to_owned(),
             theme: config.theme,
@@ -1446,6 +1500,13 @@ impl App {
                 self.detach_for_command(target.as_deref(), all).await;
             }
             Command::RefreshClient => self.force_full_repaint(),
+            Command::CommandPrompt {
+                prompt,
+                initial,
+                template,
+            } => {
+                self.open_prompt(prompt, initial.as_deref(), template).await?;
+            }
             Command::RenameSession { target, name } => {
                 self.check_session(&target)?;
                 self.rename_session(&name)?;
@@ -2343,6 +2404,137 @@ impl App {
         Ok(())
     }
 
+    /// Open a prompt, prefilled with `initial` expanded as a format string.
+    async fn open_prompt(
+        &mut self,
+        label: Option<String>,
+        initial: Option<&str>,
+        template: String,
+    ) -> Result<(), ExecuteError> {
+        let input: Vec<char> = match initial {
+            Some(initial) => {
+                let (workspace, pane) = self.resolve_pane(&Target::current())?;
+                let vars = self.pane_variables(workspace, pane).await;
+                expand_format(initial, &vars)?.chars().collect()
+            }
+            None => Vec::new(),
+        };
+
+        self.prompt = Some(Prompt {
+            label: label.unwrap_or_else(|| ":".to_owned()),
+            cursor: input.len(),
+            input,
+            template,
+        });
+        self.dirty = true;
+
+        Ok(())
+    }
+
+    /// Feed a key to the open prompt.
+    ///
+    /// Returns whether the key was consumed — everything is, while a prompt is
+    /// open, so a stray keystroke cannot reach the pane behind it.
+    async fn handle_prompt_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+    ) -> anyhow::Result<bool> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let Some(prompt) = self.prompt.as_mut() else {
+            return Ok(false);
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        match key.code {
+            KeyCode::Enter => {
+                let prompt = self.prompt.take().expect("checked above");
+                self.dirty = true;
+                self.run_prompt_template(&prompt).await?;
+            }
+            // Escape, C-c and C-g all cancel, which are the three things
+            // people reach for.
+            KeyCode::Esc => {
+                self.prompt = None;
+                self.dirty = true;
+            }
+            KeyCode::Char('c' | 'g') if ctrl => {
+                self.prompt = None;
+                self.dirty = true;
+            }
+            KeyCode::Char('u') if ctrl => {
+                prompt.input.clear();
+                prompt.cursor = 0;
+                self.dirty = true;
+            }
+            KeyCode::Backspace => {
+                prompt.backspace();
+                self.dirty = true;
+            }
+            KeyCode::Delete => {
+                prompt.delete();
+                self.dirty = true;
+            }
+            KeyCode::Left => {
+                prompt.cursor = prompt.cursor.saturating_sub(1);
+                self.dirty = true;
+            }
+            KeyCode::Right => {
+                prompt.cursor = (prompt.cursor + 1).min(prompt.input.len());
+                self.dirty = true;
+            }
+            KeyCode::Home => {
+                prompt.cursor = 0;
+                self.dirty = true;
+            }
+            KeyCode::End => {
+                prompt.cursor = prompt.input.len();
+                self.dirty = true;
+            }
+            KeyCode::Char(ch) if !ctrl => {
+                prompt.insert(ch);
+                self.dirty = true;
+            }
+            // Anything else is swallowed rather than passed through: a prompt
+            // is modal.
+            _ => {}
+        }
+
+        Ok(true)
+    }
+
+    /// Substitute the typed text into the template and run it.
+    async fn run_prompt_template(&mut self, prompt: &Prompt) -> anyhow::Result<()> {
+        let typed = prompt.text();
+        if typed.is_empty() {
+            // Submitting nothing cancels, rather than running a command with
+            // an empty argument.
+            return Ok(());
+        }
+
+        // Substitute per word, so a `%%` standing alone becomes exactly one
+        // argument however many spaces were typed into it.
+        let argv: Vec<String> = prompt
+            .template
+            .split_whitespace()
+            .map(|word| {
+                if word == "%%" {
+                    typed.clone()
+                } else {
+                    word.replace("%%", &typed)
+                }
+            })
+            .collect();
+
+        match Command::parse(&argv) {
+            Ok(command) => self.execute(command).await,
+            Err(error) => {
+                self.show_message(format!("{error}"));
+                Ok(())
+            }
+        }
+    }
+
     /// Put a message on the status line for a while.
     fn show_message(&mut self, text: String) {
         tracing::info!("message: {text}");
@@ -3013,6 +3205,12 @@ impl App {
             return Ok(());
         }
 
+        // A prompt is modal: while one is open it takes every key, so typing a
+        // window name cannot leak into the shell behind it.
+        if self.handle_prompt_key(key).await? {
+            return Ok(());
+        }
+
         if self.handle_key_binding(key).await? {
             return Ok(());
         }
@@ -3137,11 +3335,14 @@ impl App {
         );
         if self.status_bar {
             let indicators = self.workspace_indicators();
-            // A message takes over the mode label, which is where tmux puts it.
-            let mode_label = self
-                .message
-                .as_ref()
-                .map_or("NORMAL", |message| message.text.as_str());
+            // A prompt outranks a message, which outranks the mode label —
+            // all three share the same slot, which is where tmux puts them.
+            let prompt_line = self.prompt.as_ref().map(Prompt::render);
+            let mode_label = prompt_line.as_deref().unwrap_or_else(|| {
+                self.message
+                    .as_ref()
+                    .map_or("NORMAL", |message| message.text.as_str())
+            });
             chrome::draw_status_bar(
                 &mut self.back,
                 mode_label,
@@ -3429,6 +3630,7 @@ impl App {
             keymap: Keymap::default(),
             options: Options::default(),
             message: None,
+            prompt: None,
             wait_channels: HashMap::new(),
             key_table: ROOT_TABLE.to_owned(),
             theme: test_theme(),
@@ -3690,7 +3892,7 @@ mod tests {
 
     use super::{
         frame_interval, validate_session_name, App, Args, AttachArgs, ExecArgs, ExitState,
-        LaunchArgs, CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION, MESSAGE_DURATION,
+        LaunchArgs, Prompt, CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION, MESSAGE_DURATION,
         OPEN_NEW_PANE_DURATION,
     };
     use crate::anim::tween::Easing;
@@ -4906,6 +5108,213 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(app.session_name.as_deref(), Some("dev"));
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::Event {
+        crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            code,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    }
+
+    fn alt_key(ch: char) -> crossterm::event::Event {
+        crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(ch),
+            crossterm::event::KeyModifiers::ALT,
+        ))
+    }
+
+    /// The whole point of the prompt: Alt+R, type a name, Enter, renamed.
+    #[tokio::test]
+    async fn alt_r_opens_a_prompt_that_renames_the_window() {
+        use crossterm::event::KeyCode;
+
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.handle_input(Some(Ok(alt_key('r'))))
+            .await
+            .expect("input handled");
+        assert!(app.prompt.is_some(), "Alt+R should open a prompt");
+        // Prefilled with the current name, so it is an edit not a retype.
+        assert_eq!(app.prompt.as_ref().expect("open").text(), "shell");
+
+        // Clear it and type a new name.
+        for code in [
+            KeyCode::Char('u'),
+        ] {
+            app.handle_input(Some(Ok(crossterm::event::Event::Key(
+                crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::CONTROL),
+            ))))
+            .await
+            .expect("input handled");
+        }
+        for ch in "api".chars() {
+            app.handle_input(Some(Ok(key(KeyCode::Char(ch)))))
+                .await
+                .expect("input handled");
+        }
+        app.handle_input(Some(Ok(key(KeyCode::Enter))))
+            .await
+            .expect("input handled");
+
+        assert!(app.prompt.is_none(), "Enter should close the prompt");
+        assert_eq!(app.window_name(0), "api");
+        // And none of the typing reached the pane.
+        assert!(handle.written_to(PaneId(1)).is_empty());
+    }
+
+    /// A prompt is modal — letters must not leak into the shell behind it.
+    #[tokio::test]
+    async fn typing_into_a_prompt_never_reaches_the_pane() {
+        use crossterm::event::KeyCode;
+
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.handle_input(Some(Ok(alt_key('r'))))
+            .await
+            .expect("input handled");
+        for ch in "rm -rf /".chars() {
+            app.handle_input(Some(Ok(key(KeyCode::Char(ch)))))
+                .await
+                .expect("input handled");
+        }
+
+        assert!(
+            handle.written_to(PaneId(1)).is_empty(),
+            "a modal prompt must swallow every key"
+        );
+    }
+
+    #[tokio::test]
+    async fn escape_cancels_a_prompt_without_running_anything() {
+        use crossterm::event::KeyCode;
+
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let before = app.window_name(0);
+
+        app.handle_input(Some(Ok(alt_key('r'))))
+            .await
+            .expect("input handled");
+        for ch in "nope".chars() {
+            app.handle_input(Some(Ok(key(KeyCode::Char(ch)))))
+                .await
+                .expect("input handled");
+        }
+        app.handle_input(Some(Ok(key(KeyCode::Esc))))
+            .await
+            .expect("input handled");
+
+        assert!(app.prompt.is_none());
+        assert_eq!(app.window_name(0), before);
+    }
+
+    #[tokio::test]
+    async fn submitting_an_empty_prompt_does_nothing() {
+        use crossterm::event::KeyCode;
+
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let before = app.window_name(0);
+
+        app.handle_input(Some(Ok(alt_key('r'))))
+            .await
+            .expect("input handled");
+        app.handle_input(Some(Ok(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                KeyCode::Char('u'),
+                crossterm::event::KeyModifiers::CONTROL,
+            ),
+        ))))
+        .await
+        .expect("input handled");
+        app.handle_input(Some(Ok(key(KeyCode::Enter))))
+            .await
+            .expect("input handled");
+
+        assert!(app.prompt.is_none());
+        assert_eq!(app.window_name(0), before, "empty input must not rename");
+    }
+
+    /// `%%` standing alone becomes one argument however many spaces are typed
+    /// into it, so a two-word name does not become two arguments.
+    #[tokio::test]
+    async fn a_typed_name_with_spaces_stays_one_argument() {
+        use crossterm::event::KeyCode;
+
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.handle_input(Some(Ok(alt_key('r'))))
+            .await
+            .expect("input handled");
+        app.handle_input(Some(Ok(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                KeyCode::Char('u'),
+                crossterm::event::KeyModifiers::CONTROL,
+            ),
+        ))))
+        .await
+        .expect("input handled");
+        for ch in "my window".chars() {
+            app.handle_input(Some(Ok(key(KeyCode::Char(ch)))))
+                .await
+                .expect("input handled");
+        }
+        app.handle_input(Some(Ok(key(KeyCode::Enter))))
+            .await
+            .expect("input handled");
+
+        assert_eq!(app.window_name(0), "my window");
+    }
+
+    #[tokio::test]
+    async fn alt_shift_r_prompts_for_a_session_name() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.session_name = Some("dev".to_owned());
+
+        app.handle_input(Some(Ok(alt_key('R'))))
+            .await
+            .expect("input handled");
+
+        let prompt = app.prompt.as_ref().expect("a prompt opened");
+        assert_eq!(prompt.label, "rename-session:");
+        assert_eq!(prompt.text(), "dev", "prefilled with the current name");
+    }
+
+    #[tokio::test]
+    async fn prompt_editing_keys_work() {
+        use crossterm::event::KeyCode;
+
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.prompt = Some(Prompt {
+            label: ":".to_owned(),
+            input: "abc".chars().collect(),
+            cursor: 3,
+            template: "rename-window %%".to_owned(),
+        });
+
+        app.handle_input(Some(Ok(key(KeyCode::Backspace))))
+            .await
+            .expect("input handled");
+        assert_eq!(app.prompt.as_ref().expect("open").text(), "ab");
+
+        app.handle_input(Some(Ok(key(KeyCode::Home))))
+            .await
+            .expect("input handled");
+        app.handle_input(Some(Ok(key(KeyCode::Char('X')))))
+            .await
+            .expect("input handled");
+        assert_eq!(app.prompt.as_ref().expect("open").text(), "Xab");
+
+        app.handle_input(Some(Ok(key(KeyCode::Delete))))
+            .await
+            .expect("input handled");
+        assert_eq!(app.prompt.as_ref().expect("open").text(), "Xb");
     }
 
     /// A waiting caller gets the command's output, not just "it ran".
