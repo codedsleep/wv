@@ -263,7 +263,7 @@ impl Default for Config {
                 pane_titles: false,
                 target_fps: DEFAULT_TARGET_FPS,
             },
-            theme: ThemePreset::TokyoNight.theme(),
+            theme: ThemePreset::Nord.theme(),
         }
     }
 }
@@ -391,11 +391,13 @@ enum ThemePreset {
 impl ThemePreset {
     fn from_name(name: Option<&str>) -> Self {
         match name.map(str::trim) {
-            None | Some("" | "tokyonight") => Self::TokyoNight,
-            Some("nord") => Self::Nord,
+            None | Some("" | "nord") => Self::Nord,
+            Some("tokyonight") => Self::TokyoNight,
+            // Fall back to the default rather than to a fixed preset, so an
+            // unset theme and a misspelt one land in the same place.
             Some(unknown) => {
-                tracing::warn!("unknown theme preset `{unknown}`, falling back to tokyonight");
-                Self::TokyoNight
+                tracing::warn!("unknown theme preset `{unknown}`, falling back to nord");
+                Self::Nord
             }
         }
     }
@@ -643,20 +645,21 @@ mod tests {
         assert!(config.ui.status_bar);
         assert!(!config.ui.pane_titles);
         assert_eq!(config.ui.target_fps, 160);
+        // Nord's frost blue and polar night, the default preset.
         assert_eq!(
             config.theme.border_focused,
             Color::Rgb {
-                r: 0x7d,
-                g: 0xcf,
-                b: 0xff
+                r: 0x88,
+                g: 0xc0,
+                b: 0xd0
             }
         );
         assert_eq!(
             config.theme.border_unfocused,
             Color::Rgb {
-                r: 0x41,
-                g: 0x48,
-                b: 0x68
+                r: 0x3b,
+                g: 0x42,
+                b: 0x52
             }
         );
     }
@@ -708,23 +711,23 @@ mod tests {
     }
 
     #[test]
-    fn theme_defaults_to_tokyonight_preset() {
+    fn theme_defaults_to_nord_preset() {
         let config = Config::from_toml_str("").expect("empty config parses");
 
         assert_eq!(
             config.theme.status_bg,
             Color::Rgb {
-                r: 0x1a,
-                g: 0x1b,
-                b: 0x26
+                r: 0x2e,
+                g: 0x34,
+                b: 0x40
             }
         );
         assert_eq!(
             config.theme.accent,
             Color::Rgb {
-                r: 0xf7,
-                g: 0x76,
-                b: 0x8e
+                r: 0xbf,
+                g: 0x61,
+                b: 0x6a
             }
         );
     }
@@ -822,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_theme_preset_falls_back_to_tokyonight() {
+    fn unknown_theme_preset_falls_back_to_the_default() {
         let config = Config::from_toml_str(
             r#"
             [theme]
@@ -834,17 +837,17 @@ mod tests {
         assert_eq!(
             config.theme.border_focused,
             Color::Rgb {
-                r: 0x7d,
-                g: 0xcf,
-                b: 0xff
+                r: 0x88,
+                g: 0xc0,
+                b: 0xd0
             }
         );
         assert_eq!(
             config.theme.status_bg,
             Color::Rgb {
-                r: 0x1a,
-                g: 0x1b,
-                b: 0x26
+                r: 0x2e,
+                g: 0x34,
+                b: 0x40
             }
         );
     }
