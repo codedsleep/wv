@@ -34,7 +34,7 @@ const LENGTH_PREFIX_BYTES: usize = 4;
 /// several changes, and none of them touched this number, so two builds with
 /// incompatible command encodings both claimed to speak v2. See
 /// [`command_shape_tripwire`] below, which makes the omission a compile error.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Fails to compile when [`Command`] changes shape, as a reminder to bump
 /// [`PROTOCOL_VERSION`].
@@ -77,7 +77,8 @@ fn command_shape_tripwire(command: &Command) {
         | Command::RunShell { .. }
         | Command::IfShell { .. }
         | Command::WaitFor { .. }
-        | Command::RefreshClient => {}
+        | Command::RefreshClient
+        | Command::CommandPrompt { .. } => {}
     }
 }
 

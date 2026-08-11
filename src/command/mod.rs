@@ -141,6 +141,20 @@ pub enum Command {
     RefreshClient,
     /// Give this session a new name.
     RenameSession { target: Target, name: String },
+    /// Ask the user for some text, then run a command with it.
+    ///
+    /// This is how a keybinding drives a command that needs an argument:
+    /// `Alt+R` cannot know what to call a window, so it opens a prompt and
+    /// substitutes what you type into `template` wherever `%%` appears.
+    CommandPrompt {
+        /// What to show before the input. Defaults to `:`.
+        prompt: Option<String>,
+        /// Text to start with, as a format string — `#W` prefills the current
+        /// window's name so you edit rather than retype it.
+        initial: Option<String>,
+        /// The command to run, with `%%` standing in for the typed text.
+        template: String,
+    },
     /// Close a pane, or every pane except it.
     KillPane {
         target: Target,
@@ -350,6 +364,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "wait-for",
     "refresh-client",
     "rename-session",
+    "command-prompt",
 ];
 
 /// The pre-target weave names, still accepted.
@@ -403,6 +418,7 @@ impl Command {
             }),
             "rename-window" | "renamew" => parse_rename_window(name, rest),
             "rename-session" | "rename" => parse_rename_session(name, rest),
+            "command-prompt" => parse_command_prompt(name, rest),
 
             "resize-pane" | "resizep" => parse_resize_pane(name, rest),
             "swap-pane" | "swapp" => parse_swap_pane(name, rest),
@@ -1580,6 +1596,51 @@ fn parse_new_window(name: &str, args: &[String]) -> Result<Command, CommandError
         name: window_name,
         command: (!spawn.is_empty()).then_some(spawn),
         detached,
+    })
+}
+
+fn parse_command_prompt(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut prompt = None;
+    let mut initial = None;
+    let mut template = None;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-p" => prompt = Some(next_value(name, &mut args, "-p")?),
+            "-I" => initial = Some(next_value(name, &mut args, "-I")?),
+            "-1" | "-N" | "-i" | "-k" | "-W" | "-T" | "-F" => {
+                return Err(unsupported(
+                    name,
+                    arg,
+                    "not planned: weave's prompt reads one line of text",
+                ));
+            }
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                if template.replace(other.to_owned()).is_some() {
+                    return Err(CommandError::UnexpectedArgument {
+                        command: name.to_owned(),
+                        argument: other.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    let template = template.ok_or_else(|| CommandError::MissingValue {
+        flag: "a command to run, with `%%` where the typed text goes".to_owned(),
+    })?;
+
+    Ok(Command::CommandPrompt {
+        prompt,
+        initial,
+        template,
     })
 }
 

@@ -278,6 +278,7 @@ fn config_command_name(command: &Command) -> &'static str {
         Command::DetachClient { .. } => "detach-client",
         Command::RefreshClient => "refresh-client",
         Command::RenameSession { .. } => "rename-session",
+        Command::CommandPrompt { .. } => "command-prompt",
         Command::KillSession { .. } => "kill-session",
         Command::DisplayMessage { .. } => "display-message",
         Command::SendKeys { .. } => "send-keys",

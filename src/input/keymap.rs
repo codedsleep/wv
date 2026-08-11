@@ -154,6 +154,18 @@ impl Keymap {
             split(Split::Horizontal),
         );
 
+        // Renaming needs a name typed in, so these open a prompt rather than
+        // running the rename directly. Both are prefilled with the current
+        // name, so you edit rather than retype.
+        self.set_binding(alt_char('r'), rename_window_prompt());
+        // Some terminals fold Shift into the uppercase char and drop the SHIFT
+        // modifier, as with Alt+Shift+Q; register both spellings.
+        self.set_binding(alt_char('R'), rename_session_prompt());
+        self.set_binding(
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+            rename_session_prompt(),
+        );
+
         for number in 1..=9u32 {
             let digit = char::from(b'0' + u8::try_from(number).expect("1..=9 fits a byte"));
             self.set_binding(alt_char(digit), select_window(number, true));
@@ -196,6 +208,9 @@ impl Keymap {
                 change: ResizeChange::ToggleZoom,
             },
         );
+        // tmux's own rename keys, for the same commands.
+        bind(',', rename_window_prompt());
+        bind('$', rename_session_prompt());
         bind('n', relative_window(WindowRef::Next));
         bind('p', relative_window(WindowRef::Previous));
         bind('l', relative_window(WindowRef::Last));
@@ -252,6 +267,24 @@ impl Default for Keymap {
         keymap.install_prefix_defaults();
 
         keymap
+    }
+}
+
+/// `Alt+R` / `C-b ,` — ask for a window name, prefilled with the current one.
+fn rename_window_prompt() -> Command {
+    Command::CommandPrompt {
+        prompt: Some("rename-window:".to_owned()),
+        initial: Some("#W".to_owned()),
+        template: "rename-window %%".to_owned(),
+    }
+}
+
+/// `Alt+Shift+R` / `C-b $` — ask for a session name, prefilled.
+fn rename_session_prompt() -> Command {
+    Command::CommandPrompt {
+        prompt: Some("rename-session:".to_owned()),
+        initial: Some("#S".to_owned()),
+        template: "rename-session %%".to_owned(),
     }
 }
 

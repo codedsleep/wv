@@ -62,6 +62,8 @@ wv --debug
 | `Alt+Enter`               | Split horizontal             |
 | `Alt+V`                   | Split vertical               |
 | `Alt+H` / `J` / `K` / `L` | Focus left / down / up / right |
+| `Alt+R`                   | Rename the current window (prompts) |
+| `Alt+Shift+R`             | Rename the session (prompts) |
 | `Alt+Q`                   | Close focused pane           |
 | `Alt+D`                   | Detach, leaving the session running |
 | `Alt+Shift+Q`             | Quit                         |
@@ -179,6 +181,7 @@ Commands use tmux's names and flags, including `-t session:window.pane` targets:
 - `new-window [-d] [-n name] [-c dir] [-t target] [command...]`
 - `kill-window [-t target]`, `rename-window [-t target] <name>`
 - `rename-session [-t target] <name>`
+- `command-prompt [-p label] [-I initial] "<command> %%"`
 - `kill-pane [-t target]`, `detach-client`, `kill-session`
 - `display-message -p [-t target] [text]`
 - `send-keys [-l] [-t target] <keys...>`
