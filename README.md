@@ -8,7 +8,7 @@ An animated tiling terminal multiplexer in Rust.
 >
 > Until then, run `wv --debug` and split / close panes — the top-right HUD shows fps, frame time, in-flight tweens, and dirty-cell count per frame.
 
-**Status:** v0.1.0 — Phase 5 polish (themes, OSC 0/2 pane titles, truecolor + 256-color fallback, rotating log file, cargo-dist Linux release pipeline).
+**Status:** v0.1.0 — Phase 5 polish (themes, OSC 0/2 pane titles, truecolor + 256-color fallback, rotating log file), plus tmux parity for scripting and configuration.
 
 ## Features
 
@@ -23,21 +23,14 @@ An animated tiling terminal multiplexer in Rust.
 
 ## Install
 
-### Prebuilt binary (recommended)
-
-Pre-built Linux binaries (x86_64 and aarch64, `.tar.xz`) are attached to each GitHub Release once published. After the first tagged release:
-
-```sh
-curl -L https://github.com/<owner>/weave/releases/latest/download/wv-x86_64-unknown-linux-gnu.tar.xz \
-  | tar -xJ
-sudo install -m 755 wv /usr/local/bin/
-```
-
-### cargo install
+### cargo install (recommended)
 
 ```sh
 cargo install --git https://github.com/<owner>/weave --locked
 ```
+
+There are no prebuilt binaries: weave has no release pipeline, so builds are
+from source.
 
 ### Build from source
 
