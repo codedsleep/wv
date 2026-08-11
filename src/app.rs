@@ -391,6 +391,10 @@ pub struct App {
     /// The indicators the status bar was last drawn with, so a frame is only
     /// forced when one of them actually changes.
     agent_indicators: Vec<chrome::AgentIndicator>,
+    /// What each agent pane was doing at the last poll, so the moment one
+    /// stops can be spotted. Only transitions ring the bell; the state itself
+    /// says nothing about when it changed.
+    agent_states: HashMap<PaneId, agent::AgentState>,
     backend: BoxedBackend,
     output_rx: mpsc::Receiver<(PaneId, Bytes)>,
     event_rx: mpsc::Receiver<BackendEvent>,
@@ -805,6 +809,7 @@ impl App {
             agents_polled: std::time::Instant::now(),
             agents_asking: HashMap::new(),
             agent_indicators: Vec::new(),
+            agent_states: HashMap::new(),
             backend: backend_parts.backend,
             output_rx: backend_parts.output_rx,
             event_rx: backend_parts.event_rx,
@@ -1070,10 +1075,73 @@ impl App {
             self.poll_agent_commands().await;
         }
 
+        self.tick_agent_bell();
+
         let indicators = self.agent_indicators();
         if indicators != self.agent_indicators {
             self.agent_indicators = indicators;
             self.dirty = true;
+        }
+    }
+
+    /// Ring once for every batch of agents that just stopped.
+    ///
+    /// The bell is the whole notification: the host terminal turns it into
+    /// whatever it was configured to — a sound, a flash, a notification from
+    /// the desktop — and it reaches you through ssh, which nothing weave could
+    /// play locally would. Two agents finishing in the same poll ring once,
+    /// because two bells a millisecond apart are one sound anyway.
+    fn tick_agent_bell(&mut self) {
+        let states = self.agent_pane_states();
+
+        let finished = self.options.flag("agent-bell")
+            && states.iter().any(|(pane, state)| {
+                agent::just_finished(self.agent_states.get(pane).copied(), *state)
+            });
+
+        // Recorded even with the bell off, so turning it on mid-session does
+        // not ring for everything that stopped while it was off.
+        self.agent_states = states;
+
+        if finished {
+            self.ring_bell();
+        }
+    }
+
+    /// What every pane running an agent is doing right now.
+    fn agent_pane_states(&self) -> HashMap<PaneId, agent::AgentState> {
+        let names = agent::parse_list(self.options.get("agent-commands").unwrap_or_default());
+        let window = self.agent_activity_window();
+        let now = std::time::Instant::now();
+
+        self.pane_ids()
+            .into_iter()
+            .filter(|pane| {
+                self.agents
+                    .foreground(*pane)
+                    .is_some_and(|command| agent::agent_rank(command, &names).is_some())
+            })
+            .map(|pane| {
+                let asking = self.agents_asking.get(&pane).copied().unwrap_or(false);
+                (pane, self.agents.state(pane, now, window, asking))
+            })
+            .collect()
+    }
+
+    /// Send a `BEL` to whoever is watching.
+    ///
+    /// Straight out rather than into the frame: a bell is not part of the
+    /// screen, and a frame is only sent when something was painted.
+    fn ring_bell(&mut self) {
+        const BEL: &[u8] = b"\x07";
+
+        if self.sink.is_attached() {
+            use std::io::Write;
+            let _ = self.sink.write_all(BEL);
+            let _ = self.sink.flush();
+        }
+        for client in &self.clients {
+            let _ = client.frames.send(ServerToClient::Frame(BEL.to_vec()));
         }
     }
 
@@ -3933,6 +4001,7 @@ impl App {
     fn remove_pane(&mut self, id: PaneId) {
         self.panes.retain(|pane| pane.id() != id);
         self.agents.forget(id);
+        self.agent_states.remove(&id);
         // Retire the `%N` with the pane. Numbers are never reused, so a stale
         // `%N` in a script fails loudly instead of hitting somebody else's pane.
         self.pane_numbers.remove(&id);
@@ -4026,6 +4095,7 @@ impl App {
             agents_polled: std::time::Instant::now(),
             agents_asking: HashMap::new(),
             agent_indicators: Vec::new(),
+            agent_states: HashMap::new(),
             backend,
             output_rx,
             event_rx,
@@ -4315,6 +4385,8 @@ mod tests {
     use anyhow::Error;
     use crossterm::style::Color;
     use std::sync::{Arc, Mutex};
+
+    use crate::session::sink::OutputSink;
 
     use super::{
         frame_interval, validate_session_name, App, Args, AttachArgs, ExecArgs, ExitState,
@@ -4849,6 +4921,106 @@ mod tests {
         assert_eq!(
             app.agent_indicators().first().map(|a| a.state),
             Some(crate::agent::AgentState::Idle)
+        );
+    }
+
+    /// Park a pane's last-output stamp far enough back that it counts as
+    /// stopped.
+    fn go_quiet(app: &mut App, pane: PaneId) {
+        app.agents.note_output(
+            pane,
+            std::time::Instant::now()
+                .checked_sub(Duration::from_secs(30))
+                .expect("the clock has been up for 30s"),
+        );
+    }
+
+    /// Whether a client was sent a bell, draining whatever else is queued.
+    fn heard_a_bell(rx: &mut mpsc::UnboundedReceiver<ServerToClient>) -> bool {
+        let mut heard = false;
+        while let Ok(frame) = rx.try_recv() {
+            if frame == ServerToClient::Frame(b"\x07".to_vec()) {
+                heard = true;
+            }
+        }
+        heard
+    }
+
+    /// An agent pane running quiet is a session's one piece of news, and the
+    /// bell is how it travels — including out of a window you cannot see.
+    #[tokio::test]
+    async fn an_agent_going_quiet_rings_the_bell() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_output(pane, std::time::Instant::now());
+
+        app.tick_agent_bell();
+        assert!(!heard_a_bell(&mut rx), "an agent still working is not news");
+
+        go_quiet(&mut app, pane);
+        app.tick_agent_bell();
+        assert!(heard_a_bell(&mut rx), "the agent stopped; say so");
+
+        app.tick_agent_bell();
+        assert!(
+            !heard_a_bell(&mut rx),
+            "it stopped once, so it is worth one bell"
+        );
+    }
+
+    /// Everything is idle when a session starts. Ringing for that would make
+    /// the bell mean "weave is running", which is not news.
+    #[tokio::test]
+    async fn an_agent_first_seen_stopped_does_not_ring() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        go_quiet(&mut app, pane);
+
+        app.tick_agent_bell();
+        assert!(!heard_a_bell(&mut rx));
+    }
+
+    /// Turning the bell on mid-session must not ring for every agent that
+    /// stopped while nobody wanted to hear about it.
+    #[tokio::test]
+    async fn the_bell_can_be_turned_off_and_does_not_catch_up() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+        app.execute(command("set-option agent-bell off"))
+            .await
+            .expect("option set");
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_output(pane, std::time::Instant::now());
+        app.tick_agent_bell();
+
+        go_quiet(&mut app, pane);
+        app.tick_agent_bell();
+        assert!(!heard_a_bell(&mut rx), "the bell is off");
+
+        app.execute(command("set-option agent-bell on"))
+            .await
+            .expect("option set");
+        app.tick_agent_bell();
+        assert!(
+            !heard_a_bell(&mut rx),
+            "it already stopped; turning the bell on is not a new event"
         );
     }
 

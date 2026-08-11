@@ -88,6 +88,16 @@ impl AgentTracker {
     }
 }
 
+/// Whether a state change means an agent just finished a turn.
+///
+/// Finishing is leaving `Working`, whether it stopped at a question or with
+/// nothing to say — both mean the pane is yours again, which is the moment
+/// worth a sound. A pane first seen already stopped has not finished anything;
+/// otherwise every agent idle at startup would ring at once.
+pub fn just_finished(previous: Option<AgentState>, current: AgentState) -> bool {
+    previous == Some(AgentState::Working) && current != AgentState::Working
+}
+
 /// Where `command` sits in the configured agent list, if it is one.
 ///
 /// The position doubles as the kind's sort rank, so the bar groups agents in
@@ -140,7 +150,9 @@ pub fn looks_like_a_question(lines: &[String], patterns: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_rank, looks_like_a_question, parse_list, AgentState, AgentTracker};
+    use super::{
+        agent_rank, just_finished, looks_like_a_question, parse_list, AgentState, AgentTracker,
+    };
     use crate::backend::PaneId;
     use std::time::{Duration, Instant};
 
@@ -283,6 +295,25 @@ mod tests {
         let lines = vec!["Do you want to proceed?".to_owned()];
 
         assert!(!looks_like_a_question(&lines, &[]));
+    }
+
+    /// Both ways of stopping count: the sound says "it is your turn", not
+    /// "it succeeded".
+    #[test]
+    fn leaving_work_behind_is_finishing() {
+        assert!(just_finished(Some(AgentState::Working), AgentState::Idle));
+        assert!(just_finished(Some(AgentState::Working), AgentState::Waiting));
+    }
+
+    /// A pane that was already stopped, or is still going, has not finished
+    /// anything now — including the first time it is ever looked at.
+    #[test]
+    fn staying_put_is_not_finishing() {
+        assert!(!just_finished(Some(AgentState::Working), AgentState::Working));
+        assert!(!just_finished(Some(AgentState::Idle), AgentState::Idle));
+        assert!(!just_finished(Some(AgentState::Idle), AgentState::Waiting));
+        assert!(!just_finished(None, AgentState::Idle));
+        assert!(!just_finished(None, AgentState::Working));
     }
 
     #[test]

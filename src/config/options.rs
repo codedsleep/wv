@@ -218,6 +218,15 @@ pub const OPTIONS: &[OptionSpec] = &[
         status: OptionStatus::Live,
         default: "2000",
     },
+    // Ring the terminal bell when an agent stops. The host terminal decides
+    // what that is — a sound, a flash, a desktop notification — which is the
+    // point: weave does not need an audio device to be heard.
+    OptionSpec {
+        name: "agent-bell",
+        kind: OptionKind::Flag,
+        status: OptionStatus::Live,
+        default: "on",
+    },
     // Text that means an agent has stopped to ask you something. Matched
     // case-insensitively against the bottom of the pane; the defaults cover
     // the prompts Claude Code and Codex stop at.
