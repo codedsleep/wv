@@ -21,10 +21,22 @@ pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 const LENGTH_PREFIX_BYTES: usize = 4;
 
+/// Wire-format version, sent as the first frame of every connection.
+///
+/// Bincode encodes enum variants positionally, so a client built against a
+/// different `Command` shape would not fail to decode — it would decode into
+/// the wrong thing. The handshake turns that silent corruption into a clear
+/// error. Bump this whenever `ClientToServer`, `ServerToClient`, or anything
+/// they carry changes shape.
+pub const PROTOCOL_VERSION: u32 = 2;
+
 /// Message sent from an attached client to the session server.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientToServer {
-    /// First message on a connection: take over rendering at this size.
+    /// Version handshake. Must be the first frame on every connection that
+    /// sends anything at all; a connect-and-close is still a liveness probe.
+    Hello { protocol_version: u32 },
+    /// Take over rendering at this size.
     Attach {
         cols: u16,
         rows: u16,
@@ -34,8 +46,12 @@ pub enum ClientToServer {
     Input(Event),
     /// The client's terminal changed size.
     Resize { cols: u16, rows: u16 },
-    /// Run a command as if it had been typed as a keybinding.
-    Exec(Command),
+    /// Run a command and reply with what it produced.
+    ///
+    /// The id is echoed in the [`ServerToClient::Reply`], so a client with
+    /// several requests in flight can match them up. `wv exec` sends one
+    /// request per connection and uses id 0.
+    Request { id: u64, command: Command },
     /// Leave the session running and disconnect.
     Detach,
     /// Shut the session down, killing every pane.
@@ -53,6 +69,33 @@ pub enum ServerToClient {
     Exit(ExitReason),
     /// A non-fatal server-side error worth surfacing to the user.
     Error(String),
+    /// The outcome of a [`ClientToServer::Request`], tagged with its id.
+    Reply { id: u64, result: CommandResult },
+}
+
+/// What running a command produced.
+///
+/// A command that fails is still a completed request: the session says why and
+/// carries on. Only a broken connection is an error at the transport level.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandResult {
+    /// The command ran. `output` is what it printed, usually empty.
+    Ok { output: String },
+    /// The command was understood but could not be applied.
+    Error { message: String },
+}
+
+impl CommandResult {
+    /// An `Ok` with nothing to print, which is what most commands produce.
+    pub fn empty() -> Self {
+        Self::Ok {
+            output: String::new(),
+        }
+    }
+
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok { .. })
+    }
 }
 
 /// Why the server ended a client connection.
@@ -61,6 +104,10 @@ pub enum ExitReason {
     /// The session shut down at the user's request.
     Quit,
     /// Another client attached and took over this session.
+    ///
+    /// weave no longer evicts — several clients share a session — so nothing
+    /// sends this. It stays so a client can still explain the message if an
+    /// older server sends it.
     TakenOver,
     /// The server is going away (signal, or its last pane exited).
     ServerShutdown,
@@ -121,6 +168,34 @@ where
     Ok(())
 }
 
+/// Send the version handshake that opens every connection.
+pub async fn write_hello<W>(writer: &mut W) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    write_frame(
+        writer,
+        &ClientToServer::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    )
+    .await
+    .context("failed to send the protocol handshake")
+}
+
+/// Check a peer's handshake against ours.
+pub fn check_protocol_version(peer: u32) -> anyhow::Result<()> {
+    if peer == PROTOCOL_VERSION {
+        return Ok(());
+    }
+
+    bail!(
+        "weave protocol mismatch: this session speaks v{PROTOCOL_VERSION} but the client speaks \
+         v{peer}. The session server is running an older or newer `wv` than the one you just \
+         ran — end the session (`wv kill-session`) or reinstall so both sides match."
+    )
+}
+
 /// Read one framed message.
 ///
 /// Returns `Ok(None)` when the peer closed the connection cleanly between
@@ -157,15 +232,18 @@ mod tests {
     use tokio::io::duplex;
 
     use super::{
-        encode, read_frame, write_frame, ClientToServer, ExitReason, ServerToClient,
-        MAX_FRAME_BYTES,
+        check_protocol_version, encode, read_frame, write_frame, write_hello, ClientToServer,
+        ExitReason, ServerToClient, MAX_FRAME_BYTES, PROTOCOL_VERSION,
     };
-    use crate::command::Command;
+    use crate::command::{Command, Target, WindowRef};
 
     #[tokio::test]
     async fn round_trips_client_messages() {
         let (mut client, mut server) = duplex(4096);
         let sent = vec![
+            ClientToServer::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            },
             ClientToServer::Attach {
                 cols: 120,
                 rows: 40,
@@ -176,7 +254,16 @@ mod tests {
                 KeyModifiers::ALT,
             ))),
             ClientToServer::Resize { cols: 80, rows: 24 },
-            ClientToServer::Exec(Command::SwitchWorkspace(3)),
+            ClientToServer::Request {
+                id: 7,
+                command: Command::SelectWindow {
+                    target: Target {
+                        window: Some(WindowRef::Index(3)),
+                        ..Target::default()
+                    },
+                    create: false,
+                },
+            },
             ClientToServer::Detach,
         ];
 
@@ -194,6 +281,26 @@ mod tests {
         }
         let end: Option<ClientToServer> = read_frame(&mut server).await.expect("clean eof");
         assert_eq!(end, None);
+    }
+
+    #[tokio::test]
+    async fn hello_carries_our_version_and_only_ours_is_accepted() {
+        let (mut client, mut server) = duplex(4096);
+        write_hello(&mut client).await.expect("hello written");
+
+        let received: Option<ClientToServer> = read_frame(&mut server).await.expect("hello read");
+        assert_eq!(
+            received,
+            Some(ClientToServer::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            })
+        );
+
+        assert!(check_protocol_version(PROTOCOL_VERSION).is_ok());
+        let error = check_protocol_version(PROTOCOL_VERSION + 1)
+            .expect_err("a mismatched version is fatal")
+            .to_string();
+        assert!(error.contains("protocol mismatch"), "{error}");
     }
 
     #[tokio::test]

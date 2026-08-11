@@ -11,7 +11,7 @@ use anyhow::Context;
 
 use super::client::{self, ClientOutcome};
 use super::paths::{self, SessionEntry};
-use super::protocol::ClientToServer;
+use super::protocol::CommandResult;
 use super::server::{self, SessionServer};
 use crate::app::{App, Args};
 use crate::command::Command;
@@ -59,8 +59,22 @@ pub async fn create_bare(args: &Args) -> anyhow::Result<String> {
 }
 
 /// Attach to an existing session by name, or to the most recent one.
-pub async fn attach(session_name: Option<&str>) -> anyhow::Result<()> {
+///
+/// With `detach_others`, everyone already watching is detached first — tmux's
+/// `attach -d`, for when you want the session to yourself.
+pub async fn attach(session_name: Option<&str>, detach_others: bool) -> anyhow::Result<()> {
     let session = paths::resolve_session(session_name)?;
+
+    if detach_others {
+        let _ = server::request(
+            &session.path,
+            Command::DetachClient {
+                target: None,
+                all: false,
+            },
+        )
+        .await?;
+    }
 
     attach_to(&session.name, &session.path).await
 }
@@ -90,19 +104,64 @@ pub async fn run_server(args: &Args) -> anyhow::Result<()> {
     let (session_rx, _socket_guard) = server.start();
 
     // Size is provisional until a client attaches and reports its terminal.
-    let app = App::new(80, 24, args).into_session(session_rx);
+    // The app is told its own name so a target like `-t other:1` is refused
+    // rather than quietly applied here.
+    let app = App::new(80, 24, args)
+        .with_session_name(name.clone())
+        .into_session(session_rx);
     app.run().await?;
     tracing::info!("session {name} shut down");
 
     Ok(())
 }
 
-/// Send a single command to a running session, as `wv exec split-v` does.
-pub async fn exec(session_name: Option<&str>, command: Command) -> anyhow::Result<()> {
+/// Run a command against a running session, as `wv exec` does.
+///
+/// Returns the command's result rather than printing it, so the CLI decides
+/// how to report it and callers in tests can assert on it.
+pub async fn exec(
+    session_name: Option<&str>,
+    command: Command,
+) -> anyhow::Result<CommandResult> {
     let session = paths::resolve_session(session_name)?;
-    server::send_command(&session.path, &ClientToServer::Exec(command)).await?;
 
-    Ok(())
+    server::request(&session.path, command).await
+}
+
+/// Whether a named session — or any session — is live right now.
+///
+/// Answered from the socket directory rather than by connecting, so asking
+/// about a session that is not there is a plain `false`, not an error.
+pub fn has_session(session_name: Option<&str>) -> anyhow::Result<bool> {
+    let sessions = paths::list_sessions()?;
+
+    Ok(match session_name {
+        Some(name) => sessions.iter().any(|session| session.name == name),
+        None => !sessions.is_empty(),
+    })
+}
+
+/// End every live session.
+pub async fn kill_server() -> anyhow::Result<usize> {
+    let sessions = paths::list_sessions()?;
+    let mut ended = 0;
+
+    for session in &sessions {
+        // One unreachable session must not stop the rest from being killed.
+        match server::request(
+            &session.path,
+            Command::KillSession {
+                target: crate::command::Target::current(),
+            },
+        )
+        .await
+        {
+            Ok(_) => ended += 1,
+            Err(error) => tracing::warn!("could not end session {}: {error:#}", session.name),
+        }
+    }
+
+    Ok(ended)
 }
 
 /// List live sessions, newest first.

@@ -13,6 +13,14 @@ use crate::{
     layout::geometry::{FRect, Rect},
 };
 
+/// How the frame should be presented, as opposed to what is in it.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct ComposeOptions {
+    pub pane_titles: bool,
+    /// The pane filling the window, if one is zoomed.
+    pub zoomed: Option<PaneId>,
+}
+
 pub fn compose(
     root: Option<&Node>,
     panes: &[Pane],
@@ -20,15 +28,29 @@ pub fn compose(
     theme: ThemeConfig,
     timeline: &Timeline,
     back: &mut Surface,
-    pane_titles: bool,
+    options: ComposeOptions,
 ) {
     let Some(root) = root else {
         back.clear();
         return;
     };
 
-    compose_node(root, panes, back);
-    chrome::draw_borders(back, root, panes, focused, theme, timeline, pane_titles);
+    // A zoomed pane covers everything, so drawing the rest would only show
+    // through at the edges mid-tween. Compose the zoomed leaf alone.
+    let zoomed_leaf = options.zoomed.and_then(|pane| root.find_leaf(pane));
+    let visible = zoomed_leaf.unwrap_or(root);
+
+    back.clear();
+    compose_node(visible, panes, back);
+    chrome::draw_borders(
+        back,
+        visible,
+        panes,
+        focused,
+        theme,
+        timeline,
+        options.pane_titles,
+    );
 }
 
 fn compose_node(node: &Node, panes: &[Pane], back: &mut Surface) {
@@ -104,7 +126,7 @@ fn ceil_to_u16(value: f32) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose, inset_rect};
+    use super::{compose, ComposeOptions, inset_rect};
     use crate::anim::timeline::Timeline;
     use crate::backend::PaneId;
     use crate::config::ThemeConfig;
@@ -150,7 +172,7 @@ mod tests {
             TEST_THEME,
             &Timeline::new(),
             &mut surface,
-            true,
+            ComposeOptions { pane_titles: true, zoomed: None },
         );
 
         assert_eq!(surface.get(0, 0).expect("cell exists").ch, '┌');
@@ -214,7 +236,7 @@ mod tests {
             TEST_THEME,
             &Timeline::new(),
             &mut surface,
-            true,
+            ComposeOptions { pane_titles: true, zoomed: None },
         );
 
         assert_eq!(surface.get(0, 0).expect("cell exists").ch, '┌');
@@ -249,7 +271,7 @@ mod tests {
             TEST_THEME,
             &Timeline::new(),
             &mut surface,
-            true,
+            ComposeOptions { pane_titles: true, zoomed: None },
         );
         compose(
             None,
@@ -258,7 +280,7 @@ mod tests {
             TEST_THEME,
             &Timeline::new(),
             &mut surface,
-            true,
+            ComposeOptions { pane_titles: true, zoomed: None },
         );
 
         assert_eq!(surface.get(0, 0).expect("cell exists").ch, ' ');
@@ -323,7 +345,7 @@ mod tests {
             TEST_THEME,
             &Timeline::new(),
             &mut new_surface,
-            true,
+            ComposeOptions { pane_titles: true, zoomed: None },
         );
         compose_legacy_target_rects(&tree, &panes, Some(PaneId(1)), TEST_THEME, &mut old_surface);
 

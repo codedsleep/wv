@@ -3,6 +3,26 @@
 use crate::backend::PaneId;
 use crate::layout::geometry::{Direction, FRect, Rect, Split};
 
+/// Smallest share of a split either side may be squeezed to.
+///
+/// Expressed as a ratio rather than cells so it holds at any terminal size; a
+/// pane squeezed past this has no room left for its borders.
+const MIN_SPLIT_RATIO: f32 = 0.05;
+
+fn clamp_ratio(ratio: f32) -> f32 {
+    ratio.clamp(MIN_SPLIT_RATIO, 1.0 - MIN_SPLIT_RATIO)
+}
+
+/// The split axis a direction moves a boundary along.
+///
+/// Left and right move a vertical divider — the one that splits the width.
+const fn split_for_direction(dir: Direction) -> Split {
+    match dir {
+        Direction::Left | Direction::Right => Split::Vertical,
+        Direction::Up | Direction::Down => Split::Horizontal,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Node {
     Leaf {
@@ -118,6 +138,210 @@ impl Node {
             Self::Internal { a, b, .. } => {
                 a.try_split_focused(focused, split, new_pane)
                     || b.try_split_focused(focused, split, new_pane)
+            }
+        }
+    }
+
+    /// Every leaf's pane id, in layout order.
+    pub fn leaves(&self) -> Vec<PaneId> {
+        let mut out = Vec::new();
+        self.collect_leaves(&mut out);
+        out
+    }
+
+    fn collect_leaves(&self, out: &mut Vec<PaneId>) {
+        match self {
+            Self::Leaf { pane, .. } => out.push(*pane),
+            Self::Internal { a, b, .. } => {
+                a.collect_leaves(out);
+                b.collect_leaves(out);
+            }
+        }
+    }
+
+    /// Set the ratio of the split directly above `pane`.
+    ///
+    /// This is what `split-window -p 30` seeds so the new pane arrives at the
+    /// size that was asked for rather than at half.
+    pub fn set_parent_ratio(&mut self, pane: PaneId, ratio: f32) -> bool {
+        match self {
+            Self::Leaf { .. } => false,
+            Self::Internal {
+                ratio_target, a, b, ..
+            } if a.is_leaf_for(pane) || b.is_leaf_for(pane) => {
+                *ratio_target = clamp_ratio(ratio);
+                true
+            }
+            Self::Internal { a, b, .. } => {
+                a.set_parent_ratio(pane, ratio) || b.set_parent_ratio(pane, ratio)
+            }
+        }
+    }
+
+    /// Move the boundary nearest `pane` along `dir` by `cells`.
+    ///
+    /// Which side of that boundary the pane sits on decides whether it grows
+    /// or shrinks, which is how tmux's `resize-pane -L` behaves: it moves a
+    /// border, it does not always enlarge.
+    ///
+    /// Returns false when there is no split on that axis — a lone pane, or one
+    /// whose only splits run the other way.
+    pub fn resize_leaf(&mut self, pane: PaneId, dir: Direction, cells: u16) -> bool {
+        let axis = split_for_direction(dir);
+        let Some(delta) = self.boundary_delta(pane, axis, dir, cells) else {
+            return false;
+        };
+
+        self.adjust_nearest_split(pane, axis, delta)
+    }
+
+    /// Set the size of `pane` along one axis, for `resize-pane -x`/`-y`.
+    pub fn resize_leaf_to(&mut self, pane: PaneId, axis: Split, cells: u16) -> bool {
+        let Some((extent, pane_is_first)) = self.split_extent_for(pane, axis) else {
+            return false;
+        };
+        if extent == 0 {
+            return false;
+        }
+
+        let wanted = f32::from(cells) / f32::from(extent);
+        let ratio = if pane_is_first { wanted } else { 1.0 - wanted };
+
+        self.adjust_nearest_split_to(pane, axis, clamp_ratio(ratio))
+    }
+
+    /// Exchange the positions of two panes, leaving the shape alone.
+    pub fn swap_leaves(&mut self, first: PaneId, second: PaneId) -> bool {
+        if first == second {
+            return false;
+        }
+        if self.find_leaf(first).is_none() || self.find_leaf(second).is_none() {
+            return false;
+        }
+
+        // One pass, each leaf visited once. Replacing them one at a time
+        // instead would find the leaf just written and swap it straight back.
+        self.walk_leaves_mut(&mut |pane| {
+            if *pane == first {
+                *pane = second;
+            } else if *pane == second {
+                *pane = first;
+            }
+        });
+
+        true
+    }
+
+    /// Overwrite every leaf's pane in layout order, for `rotate-window`.
+    ///
+    /// The shape is untouched; only which pane sits where changes.
+    pub fn set_leaves(&mut self, panes: &mut impl Iterator<Item = PaneId>) {
+        self.walk_leaves_mut(&mut |pane| {
+            if let Some(next) = panes.next() {
+                *pane = next;
+            }
+        });
+    }
+
+    fn walk_leaves_mut(&mut self, visit: &mut impl FnMut(&mut PaneId)) {
+        match self {
+            Self::Leaf { pane, .. } => visit(pane),
+            Self::Internal { a, b, .. } => {
+                a.walk_leaves_mut(visit);
+                b.walk_leaves_mut(visit);
+            }
+        }
+    }
+
+    /// How far a boundary can move, as a ratio delta on the split that owns it.
+    fn boundary_delta(
+        &self,
+        pane: PaneId,
+        axis: Split,
+        dir: Direction,
+        cells: u16,
+    ) -> Option<f32> {
+        let (extent, _) = self.split_extent_for(pane, axis)?;
+        if extent == 0 {
+            return None;
+        }
+
+        let magnitude = f32::from(cells) / f32::from(extent);
+
+        Some(match dir {
+            Direction::Left | Direction::Up => -magnitude,
+            Direction::Right | Direction::Down => magnitude,
+        })
+    }
+
+    /// The extent of the nearest split on `axis` above `pane`, and whether the
+    /// pane sits in its first half.
+    fn split_extent_for(&self, pane: PaneId, axis: Split) -> Option<(u16, bool)> {
+        match self {
+            Self::Leaf { .. } => None,
+            Self::Internal {
+                split, a, b, rect, ..
+            } if *split == axis && (a.find_leaf(pane).is_some() || b.find_leaf(pane).is_some()) => {
+                // Prefer a deeper split on the same axis: the nearest boundary
+                // is the one the user means.
+                let deeper = a
+                    .split_extent_for(pane, axis)
+                    .or_else(|| b.split_extent_for(pane, axis));
+                if let Some(deeper) = deeper {
+                    return Some(deeper);
+                }
+
+                let extent = match axis {
+                    Split::Vertical => rect.w,
+                    Split::Horizontal => rect.h,
+                };
+                Some((extent, a.find_leaf(pane).is_some()))
+            }
+            Self::Internal { a, b, .. } => a
+                .split_extent_for(pane, axis)
+                .or_else(|| b.split_extent_for(pane, axis)),
+        }
+    }
+
+    fn adjust_nearest_split(&mut self, pane: PaneId, axis: Split, delta: f32) -> bool {
+        self.with_nearest_split(pane, axis, &mut |ratio_target| {
+            *ratio_target = clamp_ratio(*ratio_target + delta);
+        })
+    }
+
+    fn adjust_nearest_split_to(&mut self, pane: PaneId, axis: Split, ratio: f32) -> bool {
+        self.with_nearest_split(pane, axis, &mut |ratio_target| *ratio_target = ratio)
+    }
+
+    fn with_nearest_split(
+        &mut self,
+        pane: PaneId,
+        axis: Split,
+        apply: &mut impl FnMut(&mut f32),
+    ) -> bool {
+        match self {
+            Self::Leaf { .. } => false,
+            Self::Internal {
+                split,
+                ratio_target,
+                a,
+                b,
+                ..
+            } => {
+                let holds = a.find_leaf(pane).is_some() || b.find_leaf(pane).is_some();
+                if holds && *split == axis {
+                    // Try deeper first: the nearest boundary wins.
+                    if a.with_nearest_split(pane, axis, apply)
+                        || b.with_nearest_split(pane, axis, apply)
+                    {
+                        return true;
+                    }
+                    apply(ratio_target);
+                    return true;
+                }
+
+                a.with_nearest_split(pane, axis, apply)
+                    || b.with_nearest_split(pane, axis, apply)
             }
         }
     }
@@ -260,6 +484,121 @@ fn ranges_overlap(a_start: u16, a_end: u16, b_start: u16, b_end: u16) -> bool {
 fn range_overlap(a_start: u16, a_end: u16, b_start: u16, b_end: u16) -> u16 {
     a_end.min(b_end).saturating_sub(a_start.max(b_start))
 }
+
+/// Build a tree that divides `rect` evenly between `panes` along one axis.
+///
+/// A left-leaning chain with `1/n` at each step gives every pane the same
+/// size, which is what `select-layout even-horizontal` and friends want.
+pub fn even_chain(panes: &[PaneId], split: Split, rect: Rect) -> Option<Node> {
+    let (&head, tail) = panes.split_first()?;
+
+    if tail.is_empty() {
+        return Some(Node::Leaf {
+            pane: head,
+            rect_current: FRect::from(rect),
+            rect_target: rect,
+        });
+    }
+
+    // This pane takes 1/n, the remainder is divided among the others.
+    let ratio = 1.0 / f32::from(u16::try_from(panes.len()).unwrap_or(u16::MAX));
+    let (a_rect, b_rect) = rect.split(split, ratio);
+
+    Some(Node::Internal {
+        split,
+        ratio,
+        ratio_target: ratio,
+        a: Box::new(Node::Leaf {
+            pane: head,
+            rect_current: FRect::from(a_rect),
+            rect_target: a_rect,
+        }),
+        b: Box::new(even_chain(tail, split, b_rect)?),
+        rect,
+    })
+}
+
+/// Build a roughly square grid, for `select-layout tiled`.
+///
+/// Panes are laid out in rows: the tree splits horizontally into rows, and
+/// each row splits vertically into its panes.
+pub fn tiled(panes: &[PaneId], rect: Rect) -> Option<Node> {
+    if panes.is_empty() {
+        return None;
+    }
+
+    // A roughly square grid: ceil(sqrt(n)) rows.
+    let rows = (1..=panes.len())
+        .find(|rows| rows * rows >= panes.len())
+        .unwrap_or(1);
+    let per_row = panes.len().div_ceil(rows);
+    let chunks: Vec<&[PaneId]> = panes.chunks(per_row).collect();
+
+    build_rows(&chunks, rect)
+}
+
+fn build_rows(rows: &[&[PaneId]], rect: Rect) -> Option<Node> {
+    let (&head, tail) = rows.split_first()?;
+
+    if tail.is_empty() {
+        return even_chain(head, Split::Vertical, rect);
+    }
+
+    let ratio = 1.0 / f32::from(u16::try_from(rows.len()).unwrap_or(u16::MAX));
+    let (a_rect, b_rect) = rect.split(Split::Horizontal, ratio);
+
+    Some(Node::Internal {
+        split: Split::Horizontal,
+        ratio,
+        ratio_target: ratio,
+        a: Box::new(even_chain(head, Split::Vertical, a_rect)?),
+        b: Box::new(build_rows(tail, b_rect)?),
+        rect,
+    })
+}
+
+/// Build a layout with one large pane and the rest stacked beside or below it.
+///
+/// `main_ratio` is the share the first pane keeps, which is how tmux's
+/// `main-vertical` and `main-horizontal` are shaped.
+pub fn main_and_stack(
+    panes: &[PaneId],
+    main_split: Split,
+    main_ratio: f32,
+    rect: Rect,
+) -> Option<Node> {
+    let (&head, tail) = panes.split_first()?;
+
+    if tail.is_empty() {
+        return Some(Node::Leaf {
+            pane: head,
+            rect_current: FRect::from(rect),
+            rect_target: rect,
+        });
+    }
+
+    let ratio = clamp_ratio(main_ratio);
+    let (a_rect, b_rect) = rect.split(main_split, ratio);
+    // The stack runs across the other axis so the panes sit side by side in it.
+    let stack_split = match main_split {
+        Split::Vertical => Split::Horizontal,
+        Split::Horizontal => Split::Vertical,
+    };
+
+    Some(Node::Internal {
+        split: main_split,
+        ratio,
+        ratio_target: ratio,
+        a: Box::new(Node::Leaf {
+            pane: head,
+            rect_current: FRect::from(a_rect),
+            rect_target: a_rect,
+        }),
+        b: Box::new(even_chain(tail, stack_split, b_rect)?),
+        rect,
+    })
+}
+
 
 #[cfg(test)]
 mod tests {

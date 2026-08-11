@@ -1,5 +1,5 @@
 //! End-to-end coverage for the native session layer: attach, input, detach,
-//! reattach, takeover, quit.
+//! reattach, a second client joining, quit.
 //!
 //! The whole flow runs in one test because it drives a single session through
 //! its lifecycle, and because the socket directory is selected by an
@@ -13,13 +13,15 @@ use tokio::net::UnixStream;
 use tokio::time::timeout;
 use weave::app::{App, Args};
 use weave::command::Command;
-use weave::session::protocol::{read_frame, write_frame, ClientToServer, ExitReason, ServerToClient};
+use weave::session::protocol::{
+    read_frame, write_frame, write_hello, ClientToServer, CommandResult, ServerToClient,
+};
 use weave::session::server::SessionServer;
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test]
-async fn session_survives_detach_and_serves_one_client_at_a_time() -> anyhow::Result<()> {
+async fn session_survives_detach_and_serves_several_clients() -> anyhow::Result<()> {
     let runtime_dir = test_runtime_dir();
     std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
     // `cat` echoes through the PTY without a prompt, which keeps assertions
@@ -79,21 +81,65 @@ async fn session_survives_detach_and_serves_one_client_at_a_time() -> anyhow::Re
         "pane contents should survive a detach"
     );
 
-    // A command sent over the socket animates the session like a keybinding.
-    write_frame(&mut client, &ClientToServer::Exec(Command::SplitV)).await?;
+    // A command sent over the socket animates the session like a keybinding,
+    // and comes back with a reply tagged with the id we sent.
+    write_frame(
+        &mut client,
+        &ClientToServer::Request {
+            id: 42,
+            command: Command::parse_str("split-v").expect("command parses"),
+        },
+    )
+    .await?;
+    let reply = expect_reply(&mut client).await?;
+    assert_eq!(reply, (42, CommandResult::empty()));
     next_frame(&mut client).await?;
 
-    // A second client evicts the first.
-    let mut taking_over = attach(&socket, 100, 30).await?;
-    assert_eq!(
-        expect_message(&mut client).await?,
-        ServerToClient::Exit(ExitReason::TakenOver),
-        "the previous client should be told why it was dropped"
-    );
-    next_frame(&mut taking_over).await?;
+    // A command that cannot be applied answers with an error rather than
+    // taking the session down.
+    write_frame(
+        &mut client,
+        &ClientToServer::Request {
+            id: 43,
+            command: Command::parse_str("kill-pane -t %99").expect("command parses"),
+        },
+    )
+    .await?;
+    let (id, result) = expect_reply(&mut client).await?;
+    assert_eq!(id, 43);
+    match result {
+        CommandResult::Error { message } => assert!(message.contains("%99"), "{message}"),
+        other => anyhow::bail!("expected an error result, got {other:?}"),
+    }
+    assert!(!session.is_finished(), "a bad target must not end the session");
 
-    // Quit tears the session down.
-    write_frame(&mut taking_over, &ClientToServer::Quit).await?;
+    // `display-message -p` is how a script reads something back out.
+    write_frame(
+        &mut client,
+        &ClientToServer::Request {
+            id: 44,
+            command: Command::parse_str("display-message -p hello").expect("command parses"),
+        },
+    )
+    .await?;
+    assert_eq!(
+        expect_reply(&mut client).await?,
+        (
+            44,
+            CommandResult::Ok {
+                output: "hello".to_owned()
+            }
+        )
+    );
+
+    // A second client joins rather than evicting the first: both are served,
+    // and the session shrinks to the smaller of the two terminals.
+    let mut second = attach(&socket, 60, 20).await?;
+    next_frame(&mut second).await?;
+    next_frame(&mut client).await?;
+
+    // Quit tears the session down for everyone.
+    write_frame(&mut second, &ClientToServer::Quit).await?;
     timeout(STEP_TIMEOUT, session)
         .await
         .context("session shuts down after quit")???;
@@ -106,6 +152,7 @@ async fn session_survives_detach_and_serves_one_client_at_a_time() -> anyhow::Re
 
 async fn attach(socket: &std::path::Path, cols: u16, rows: u16) -> anyhow::Result<UnixStream> {
     let mut stream = timeout(STEP_TIMEOUT, weave::session::client::connect(socket)).await??;
+    write_hello(&mut stream).await?;
     write_frame(
         &mut stream,
         &ClientToServer::Attach {
@@ -125,6 +172,20 @@ async fn expect_message(stream: &mut UnixStream) -> anyhow::Result<ServerToClien
         .await
         .context("timed out waiting for a server message")??
         .context("server closed the connection unexpectedly")
+}
+
+/// Read messages until a reply arrives, skipping any frames on the way.
+///
+/// A command changes the layout, so the reply and the frames it causes race;
+/// the test cares about the reply.
+async fn expect_reply(stream: &mut UnixStream) -> anyhow::Result<(u64, CommandResult)> {
+    loop {
+        match expect_message(stream).await? {
+            ServerToClient::Reply { id, result } => return Ok((id, result)),
+            ServerToClient::Frame(_) => {}
+            other => anyhow::bail!("expected a reply, got {other:?}"),
+        }
+    }
 }
 
 /// Read until a rendered frame arrives, returning its bytes.

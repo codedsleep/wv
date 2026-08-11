@@ -15,8 +15,10 @@ pub mod server;
 pub mod sink;
 
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
 
-use protocol::{ClientToServer, ServerToClient};
+use crate::command::Command;
+use protocol::{ClientToServer, CommandResult, ServerToClient};
 
 /// What the socket loop hands to the running `App`.
 ///
@@ -34,6 +36,17 @@ pub enum SessionEvent {
     },
     /// A message from the attached client.
     Message(ClientToServer),
+    /// Run a command and answer on `reply`.
+    ///
+    /// The reply channel travels with the request rather than going to the
+    /// attached client's frame sink, because the caller is usually a one-shot
+    /// `wv exec` connection with no interest in frames. If the sender is
+    /// dropped without answering, the caller sees the connection close and
+    /// reports that as a failure.
+    Request {
+        command: Command,
+        reply: oneshot::Sender<CommandResult>,
+    },
     /// A client connection ended. Carries the id so a late notice from an
     /// evicted client cannot tear down the client that replaced it.
     ClientGone { id: u64 },

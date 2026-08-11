@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -22,6 +23,8 @@ struct NativePane {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    /// The child's pid, kept so its working directory can be read back.
+    pid: Option<u32>,
 }
 
 pub struct NativeBackend {
@@ -168,6 +171,8 @@ impl PaneBackend for NativeBackend {
         };
 
         let killer = child.clone_killer();
+        // Read the pid before the child moves into the waiter thread.
+        let pid = child.process_id();
         let dead = Arc::new(AtomicBool::new(false));
         Self::spawn_reader(
             id,
@@ -187,6 +192,7 @@ impl PaneBackend for NativeBackend {
                 master: pair.master,
                 writer,
                 killer,
+                pid,
             },
         );
 
@@ -220,6 +226,41 @@ impl PaneBackend for NativeBackend {
         pane.killer.kill()?;
 
         Ok(())
+    }
+
+    /// Read the pane process's name from `/proc/<pid>/comm`.
+    async fn pane_process_name(&mut self, pane: PaneId) -> Result<Option<String>, Error> {
+        let Some(pid) = self.panes.get(&pane).and_then(|pane| pane.pid) else {
+            return Ok(None);
+        };
+
+        match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+            Ok(name) => Ok(Some(name.trim_end().to_owned())),
+            Err(error) => {
+                tracing::debug!("could not read command of pane {pane:?} (pid {pid}): {error}");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Read a pane's working directory from `/proc/<pid>/cwd`.
+    ///
+    /// This is the shell's own cwd, so a new pane opens wherever the focused
+    /// pane has `cd`-ed to, which is what tmux does and what people expect.
+    /// Any failure — the process just exited, `/proc` not mounted — is a
+    /// `None` rather than an error: it only costs the caller a fallback.
+    async fn pane_cwd(&mut self, pane: PaneId) -> Result<Option<PathBuf>, Error> {
+        let Some(pid) = self.panes.get(&pane).and_then(|pane| pane.pid) else {
+            return Ok(None);
+        };
+
+        match std::fs::read_link(format!("/proc/{pid}/cwd")) {
+            Ok(cwd) => Ok(Some(cwd)),
+            Err(error) => {
+                tracing::debug!("could not read cwd of pane {pane:?} (pid {pid}): {error}");
+                Ok(None)
+            }
+        }
     }
 }
 

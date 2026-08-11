@@ -14,18 +14,21 @@ if ! wv ls | awk '{print $1}' | grep -qx "$session"; then
   wv --bare --session "$session" >/dev/null
 fi
 
-run() { wv exec --session "$session" "$1"; }
+# `wv exec` exits non-zero and explains itself when a command cannot run, so
+# `set -e` stops the script on a bad target rather than building half a layout.
+run() { wv exec --session "$session" "$@"; }
 
-# Workspace 1: editor on the left, two stacked shells on the right.
-run split-v
-run focus-right
-run split-h
-run focus-left
+# Window 1: editor on the left, two stacked shells on the right.
+# `-h` is tmux's spelling: it puts the panes side by side.
+run split-window -h
+run select-pane -R
+run split-window -v
+run select-pane -L
 
-# Workspace 2: a single wide pane for logs.
-run workspace-2
+# Window 2: a single wide pane for logs.
+run select-window -t :2
 
 # Back to the editor before attaching.
-run workspace-1
+run select-window -t :1
 
 exec wv attach "$session"

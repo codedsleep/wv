@@ -15,7 +15,9 @@ use futures::StreamExt;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
-use super::protocol::{read_frame, write_frame, ClientToServer, ExitReason, ServerToClient};
+use super::protocol::{
+    read_frame, write_frame, write_hello, ClientToServer, ExitReason, ServerToClient,
+};
 use crate::term::TerminalGuard;
 
 /// How long `wv` waits for a freshly spawned server to bind its socket.
@@ -75,6 +77,7 @@ pub async fn run(stream: UnixStream, name: &str) -> anyhow::Result<ClientOutcome
     );
 
     let (mut read_half, mut write_half) = stream.into_split();
+    write_hello(&mut write_half).await?;
     write_frame(
         &mut write_half,
         &ClientToServer::Attach {
@@ -129,6 +132,11 @@ pub async fn run(stream: UnixStream, name: &str) -> anyhow::Result<ClientOutcome
                         }
                         Some(Ok(ServerToClient::Error(message))) => {
                             tracing::warn!("session error: {message}");
+                        }
+                        // An attached client has no requests in flight yet;
+                        // PR 7's command prompt is the first thing to send one.
+                        Some(Ok(ServerToClient::Reply { id, result })) => {
+                            tracing::debug!("unexpected reply to request {id}: {result:?}");
                         }
                         Some(Err(error)) => return Err(error),
                         None => return Ok(ClientOutcome::ConnectionLost),

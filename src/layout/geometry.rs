@@ -16,7 +16,7 @@ pub struct FRect {
     pub h: f32,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Direction {
     Left,
     Right,
@@ -24,7 +24,7 @@ pub enum Direction {
     Down,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Split {
     Horizontal,
     Vertical,

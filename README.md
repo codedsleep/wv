@@ -115,7 +115,28 @@ preset = "tokyonight"   # or "nord"
 # accent           = "#f7768e"
 ```
 
-The config parser currently accepts a single modifier (`Ctrl+` or `Alt+`). Multi-modifier chords aren't expressible yet.
+The TOML parser accepts a single modifier (`Ctrl+` or `Alt+`). Multi-modifier chords aren't expressible there — use the tmux-syntax file below, which takes `M-C-x`.
+
+### tmux-syntax config
+
+`wv` also reads `$XDG_CONFIG_HOME/weave/weave.conf` (or `~/.config/weave/weave.conf`), applied after the TOML so it wins:
+
+```sh
+set -g prefix C-a
+unbind C-b
+bind C-a send-keys C-a
+
+bind -n M-Left  select-pane -L
+bind '|' split-window -h
+bind '-' split-window -v
+bind -r H resize-pane -L 5
+
+source-file extra.conf
+```
+
+Lines that can't be honoured are logged with their file and line number rather than aborting the file. Options weave accepts but doesn't act on say so explicitly — `history-limit` warns that there's no scrollback rather than silently doing nothing. See [`docs/TMUX_PARITY.md`](docs/TMUX_PARITY.md).
+
+`C-b` is the prefix, with tmux's default bindings behind it (`c`, `%`, `"`, `x`, `z`, `&`, `d`, `n`/`p`/`l`, digits, arrows). The `Alt` chords below still work with no prefix.
 
 ## Sessions
 
@@ -131,13 +152,17 @@ wv (client)                          wv --server --session NAME (daemon)
 wv                     # start a session (auto-named weave-<uid>) and attach
 wv --session main      # start or attach to a session by name
 wv --bare              # create a session without attaching; prints its name
-wv attach [name]       # reattach; with no name, the most recent session
+wv attach [-d] [name]  # reattach; -d detaches everyone else first
 wv ls                  # list live sessions
+wv has-session [name]  # exit 0 if it is live, 1 if not
+wv kill-server         # end every session
 ```
 
 `Alt+D` detaches: the server keeps running with every pane alive, and the client restores your terminal and prints `[detached from NAME]`. `Alt+Shift+Q` quits, which shuts the session down and kills its panes.
 
-Sockets live in `$XDG_RUNTIME_DIR/weave/<name>.sock` (falling back to a private directory under `/tmp`). A socket whose server has gone away is unlinked automatically, so a name is never stuck. One client renders a session at a time: attaching from a second terminal takes over and the first client is told why it was dropped.
+Sockets live in `$XDG_RUNTIME_DIR/weave/<name>.sock` (falling back to a private directory under `/tmp`). A socket whose server has gone away is unlinked automatically, so a name is never stuck.
+
+Several terminals can watch one session at once, each with its own diff stream. The session renders at the size of the smallest attached terminal; larger ones see it in their top-left corner. `wv attach -d` joins and detaches everyone else.
 
 The server ignores `SIGINT` and `SIGHUP`, so neither `Ctrl-C` nor closing the terminal can take a session down; `SIGTERM` shuts it down cleanly.
 
@@ -146,14 +171,76 @@ The server ignores `SIGINT` and `SIGHUP`, so neither `Ctrl-C` nor closing the te
 `wv exec` sends a command to a running session over its socket. It is the same command enum the keybindings produce, so scripted changes animate exactly like typed ones.
 
 ```sh
-wv --bare --session main            # create an empty session, print its name
-wv exec --session main split-v      # ... drive its layout from anywhere
-wv exec --session main focus-left
-wv exec --session main workspace-2
-exec wv attach main                 # ... then take it over interactively
+wv --bare --session main                      # create an empty session, print its name
+wv exec --session main split-window -h        # ... drive its layout from anywhere
+wv exec --session main select-pane -t %1
+wv exec --session main select-window -t :2
+exec wv attach main                           # ... then take it over interactively
 ```
 
-Accepted commands: `split-h`, `split-v`, `focus-left`, `focus-right`, `focus-up`, `focus-down`, `close`, `detach`, `quit`, and `workspace-1` .. `workspace-9`. With no `--session`, the most recent live session is used.
+Commands use tmux's names and flags, including `-t session:window.pane` targets:
+
+- `split-window [-h|-v] [-d] [-p percent|-l size] [-c dir] [-t target] [command...]`
+- `select-pane [-L|-R|-U|-D] [-l] [-t target]`
+- `select-window [-t target] [-n|-p|-l]`, `next-window`, `previous-window`, `last-window`
+- `new-window [-d] [-n name] [-c dir] [-t target] [command...]`
+- `kill-window [-t target]`, `rename-window [-t target] <name>`
+- `kill-pane [-t target]`, `detach-client`, `kill-session`
+- `display-message -p [-t target] [text]`
+- `send-keys [-l] [-t target] <keys...>`
+- `respawn-pane [-k] [-c dir] [-t target] [command...]`
+- `resize-pane [-L|-R|-U|-D [n]] [-x n] [-y n] [-Z] [-t target]`
+- `swap-pane [-U|-D|-s src|-t dst] [-d]`, `rotate-window [-U|-D]`
+- `select-layout even-horizontal|even-vertical|main-vertical|main-horizontal|tiled`
+- `capture-pane [-p] [-S n] [-E n] [-t target]`
+- `list-panes [-a] [-F fmt]`, `list-windows [-F fmt]`, `list-sessions [-F fmt]`
+- `break-pane [-s src] [-t dst] [-n name] [-d]`, `join-pane [-s src] [-t dst] [-h|-v] [-d]`
+- `run-shell [-b] <command>`, `if-shell [-b] <test> <then> [else]`
+- `wait-for [-S] <channel>`
+- `bind-key`, `unbind-key`, `list-keys`, `set-option`, `show-options`
+
+Targets accept pane ids (`%1`), pane indices (`.0`), window indices (`:2`), window
+names (`:build`), and the relative forms `+`, `-`, `!`, `{last}`, `{top}`,
+`{bottom}`, `{left}`, `{right}`.
+
+Windows are nine numbered slots. A window with no name of its own takes one from
+its focused pane's title, so `-t :vim` finds the window running vim;
+`rename-window` pins a name against that. See
+[`docs/TMUX_PARITY.md`](docs/TMUX_PARITY.md) for what that trades away.
+
+The older weave names still work: `split-h`, `split-v`, `focus-left`, `focus-right`,
+`focus-up`, `focus-down`, `close`, `detach`, `quit`, and `workspace-1` .. `workspace-9`.
+With no `--session`, the most recent live session is used.
+
+New panes open in the focused pane's current directory, and `send-keys` puts
+exactly the bytes on the PTY that pressing the keys would:
+
+```sh
+wv exec --session main split-window -h -d -- npm run dev
+wv exec --session main send-keys -t %1 'cargo test' Enter
+wv exec --session main send-keys -t %2 C-c
+```
+
+Scripts read state back out with format strings:
+
+```sh
+wv exec --session main list-panes -F '#{pane_id} #{pane_current_path}'
+wv exec --session main capture-pane -t build.1 -p
+wv exec --session main display-message -p '#{window_name}'
+```
+
+`wv exec` reports what the command produced: output on stdout, failures on
+stderr with a non-zero exit, so a script can branch on it.
+
+```sh
+if ! wv exec --session main kill-pane -t %9; then
+  echo "no such pane" >&2
+fi
+```
+
+**Coming from tmux?** [`docs/TMUX_PARITY.md`](docs/TMUX_PARITY.md) is the full matrix of
+what is supported, what is planned, and the one trap worth knowing: `split-window -h`
+and weave's `split-h` mean opposite things, and both keep their original meaning.
 
 ## Logs
 

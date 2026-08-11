@@ -5,14 +5,21 @@
 //! loop and rendered frames back out.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{bail, Context};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::time::timeout;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 
 use super::paths;
-use super::protocol::{read_frame, write_frame, ClientToServer, ServerToClient};
+use super::protocol::{
+    check_protocol_version, read_frame, write_frame, write_hello, ClientToServer, CommandResult,
+    ServerToClient,
+};
 use super::SessionEvent;
+use crate::command::Command;
 
 const APP_EVENT_CAPACITY: usize = 64;
 
@@ -107,7 +114,28 @@ async fn serve_connection(
     stream: UnixStream,
     app_tx: mpsc::Sender<SessionEvent>,
 ) -> anyhow::Result<()> {
-    let (mut read_half, write_half) = stream.into_split();
+    let (mut read_half, mut write_half) = stream.into_split();
+
+    // Every connection opens with a version handshake, so a client from a
+    // different build fails loudly here instead of decoding frames into the
+    // wrong variants further down.
+    match read_frame::<_, ClientToServer>(&mut read_half).await? {
+        Some(ClientToServer::Hello { protocol_version }) => {
+            if let Err(error) = check_protocol_version(protocol_version) {
+                let message = format!("{error:#}");
+                tracing::warn!("rejecting client {id}: {message}");
+                let _ = write_frame(&mut write_half, &ServerToClient::Error(message)).await;
+                return Ok(());
+            }
+        }
+        // A connect-and-close is how `ls`, `attach` and the server itself
+        // check that a socket is live, not a misbehaving client.
+        None => {
+            tracing::debug!("client {id} was a liveness probe");
+            return Ok(());
+        }
+        other => bail!("client {id} sent {other:?} instead of a protocol handshake"),
+    }
 
     let handshake: Option<ClientToServer> = read_frame(&mut read_half).await?;
     let (cols, rows, truecolor) = match handshake {
@@ -117,17 +145,47 @@ async fn serve_connection(
             truecolor,
         }) => (cols, rows, truecolor),
         // `wv exec` is a one-shot: a single command, no rendering, no attach.
-        Some(message @ (ClientToServer::Exec(_) | ClientToServer::Quit)) => {
+        // The reply goes back on this connection before it closes, so the
+        // caller learns what the command produced and whether it worked.
+        Some(ClientToServer::Request {
+            id: request_id,
+            command,
+        }) => {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            app_tx
+                .send(SessionEvent::Request {
+                    command,
+                    reply: reply_tx,
+                })
+                .await
+                .context("session app stopped accepting events")?;
+
+            // A dropped sender means the app went away mid-command — a real
+            // failure for the caller, not a silent success.
+            let result = reply_rx.await.unwrap_or_else(|_| CommandResult::Error {
+                message: "the session ended before the command completed".to_owned(),
+            });
+            write_frame(
+                &mut write_half,
+                &ServerToClient::Reply {
+                    id: request_id,
+                    result,
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+        Some(message @ ClientToServer::Quit) => {
             app_tx
                 .send(SessionEvent::Message(message))
                 .await
                 .context("session app stopped accepting events")?;
             return Ok(());
         }
-        // A connect-and-close is how `ls`, `attach` and the server itself
-        // check that a socket is live, not a misbehaving client.
+        // The handshake frame arrived but nothing followed it: a probe that
+        // speaks the protocol, still not a client.
         None => {
-            tracing::debug!("client {id} was a liveness probe");
+            tracing::debug!("client {id} said hello and left");
             return Ok(());
         }
         other => bail!("client {id} sent {other:?} instead of an attach handshake"),
@@ -195,14 +253,79 @@ async fn write_frames(
     }
 }
 
-/// Send a one-shot command to a running session, as `wv exec` does.
-pub async fn send_command(path: &Path, message: &ClientToServer) -> anyhow::Result<()> {
+/// The id `wv exec` uses; it only ever has one request in flight.
+const ONE_SHOT_REQUEST_ID: u64 = 0;
+
+/// How long a one-shot waits for the session to answer.
+///
+/// A command runs on the session's event loop between frames, so a healthy
+/// session replies in microseconds. This bound exists so a wedged session
+/// fails a script instead of hanging it.
+///
+/// `wait-for` is exempt: waiting for a signal is the whole point of it, and
+/// there is no sensible upper bound on how long that takes.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run one command against a running session and return what it produced.
+///
+/// This is the whole of `wv exec`'s transport: connect, handshake, request,
+/// reply, close.
+pub async fn request(path: &Path, command: Command) -> anyhow::Result<CommandResult> {
+    // Blocking until something signals is what `wait-for` is for, so it must
+    // not be cut off by the reply timeout.
+    let waits_indefinitely = matches!(
+        command,
+        Command::WaitFor {
+            action: crate::command::WaitAction::Wait,
+            ..
+        }
+    );
     let mut stream = UnixStream::connect(path)
         .await
         .with_context(|| format!("failed to connect to session socket {}", path.display()))?;
-    write_frame(&mut stream, message).await?;
+    write_hello(&mut stream).await?;
+    write_frame(
+        &mut stream,
+        &ClientToServer::Request {
+            id: ONE_SHOT_REQUEST_ID,
+            command,
+        },
+    )
+    .await?;
 
-    Ok(())
+    let frame = if waits_indefinitely {
+        read_frame::<_, ServerToClient>(&mut stream)
+            .await
+            .context("failed to read the session server's reply")?
+    } else {
+        timeout(REPLY_TIMEOUT, read_frame::<_, ServerToClient>(&mut stream))
+            .await
+            .with_context(|| {
+                format!(
+                    "the session did not answer within {} seconds",
+                    REPLY_TIMEOUT.as_secs()
+                )
+            })?
+            .context("failed to read the session server's reply")?
+    };
+
+    match frame {
+        Some(ServerToClient::Reply { id, result }) => {
+            // Ids exist for clients with several requests in flight; a
+            // mismatch here means the stream is not what we think it is.
+            if id == ONE_SHOT_REQUEST_ID {
+                Ok(result)
+            } else {
+                bail!("session replied to request {id}, but we sent {ONE_SHOT_REQUEST_ID}")
+            }
+        }
+        // The version gate answers with a bare error and closes.
+        Some(ServerToClient::Error(message)) => bail!(message),
+        Some(other) => bail!("unexpected reply from session server: {other:?}"),
+        None => bail!(
+            "the session closed the connection without replying; it may be running an older `wv`"
+        ),
+    }
 }
 
 /// Channel type used by the app to push frames at the attached client.
