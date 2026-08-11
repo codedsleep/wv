@@ -1188,14 +1188,25 @@ impl App {
     /// Returns whether anything changed, so a pane that has just started or
     /// finished an agent redraws the bar even on an otherwise still frame.
     async fn poll_agent_commands(&mut self) -> bool {
+        let names = agent::parse_list(self.options.get("agent-commands").unwrap_or_default());
         let mut changed = false;
 
         for pane in self.pane_ids() {
-            let command = self
+            let candidates = self
                 .backend
-                .pane_foreground_name(pane)
+                .pane_foreground_names(pane)
                 .await
                 .unwrap_or_default();
+            // The group leader is the running command only when the shell
+            // handed the terminal over. When it did not, the leader is that
+            // shell and the agent is below it, so an agent anywhere in the
+            // group wins. A pane running anything else still reports its
+            // leader, which is what the rest of the bar reads.
+            let command = candidates
+                .iter()
+                .find(|command| agent::agent_rank(command, &names).is_some())
+                .or_else(|| candidates.first())
+                .cloned();
             if command.as_deref() != self.agents.foreground(pane) {
                 self.agents.set_foreground(pane, command);
                 changed = true;

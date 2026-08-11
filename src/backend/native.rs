@@ -249,30 +249,24 @@ impl PaneBackend for NativeBackend {
     /// kernel currently gives the terminal's input to. That is the job running
     /// in the pane, which is the one worth naming — `/proc/<pid>/comm` only
     /// ever says `fish`.
-    async fn pane_foreground_name(&mut self, pane: PaneId) -> Result<Option<String>, Error> {
+    async fn pane_foreground_names(&mut self, pane: PaneId) -> Result<Vec<String>, Error> {
         let Some(pid) = self.panes.get(&pane).and_then(|pane| pane.pid) else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
 
         let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat,
             Err(error) => {
                 tracing::debug!("could not read stat of pane {pane:?} (pid {pid}): {error}");
-                return Ok(None);
+                return Ok(Vec::new());
             }
         };
 
         let Some(tpgid) = foreground_pgid(&stat) else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
 
-        match std::fs::read_to_string(format!("/proc/{tpgid}/comm")) {
-            Ok(name) => Ok(Some(name.trim_end().to_owned())),
-            Err(error) => {
-                tracing::debug!("could not read command of foreground job {tpgid}: {error}");
-                Ok(None)
-            }
-        }
+        Ok(foreground_group_names(tpgid))
     }
 
     /// Read a pane's working directory from `/proc/<pid>/cwd`.
@@ -310,6 +304,95 @@ fn foreground_pgid(stat: &str) -> Option<i32> {
     (tpgid > 0).then_some(tpgid)
 }
 
+/// Pull `pgrp` out of a `/proc/<pid>/stat` line.
+///
+/// Counted from the last `)` for the same reason as `tpgid`, and third after
+/// it: state, ppid, pgrp.
+fn process_group(stat: &str) -> Option<i32> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+
+    rest.split_whitespace().nth(2)?.parse().ok()
+}
+
+/// How deep below the group leader the foreground scan looks, and how many
+/// commands it will name.
+///
+/// A wrapper shell puts the real job one level down, and a launcher one below
+/// that. Deeper than this is the job's own work — the subprocesses a build or
+/// an agent spawns — which the pane is not meaningfully "running".
+const FOREGROUND_MAX_DEPTH: usize = 4;
+const FOREGROUND_MAX_NAMES: usize = 16;
+
+/// Every command in the foreground process group, leader first.
+///
+/// The leader alone is not enough: a shell running `fish -c claude` does no job
+/// control, so it never hands the terminal to the agent. The group stays the
+/// shell's, the leader stays `fish`, and the agent sits below it in that same
+/// group — invisible to anything that reads only `/proc/<tpgid>/comm`. Walking
+/// the leader's children finds it.
+///
+/// The walk stays inside the group, so a pane's background jobs are not named,
+/// and a child that has left the group takes its descendants out of the walk
+/// with it. Children come from `/proc/<pid>/task/<pid>/children`, which is the
+/// main thread's — a job spawned from some other thread of the shell is missed,
+/// which no shell does.
+fn foreground_group_names(leader: i32) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut frontier = vec![leader];
+
+    for _ in 0..=FOREGROUND_MAX_DEPTH {
+        if frontier.is_empty() || names.len() >= FOREGROUND_MAX_NAMES {
+            break;
+        }
+
+        let mut next = Vec::new();
+        for pid in frontier {
+            // Read fresh rather than trusting the parent's view: the walk races
+            // processes starting and exiting, and a stale answer names a job
+            // that is no longer the pane's.
+            if !in_group(pid, leader) {
+                continue;
+            }
+            if let Some(name) = comm(pid) {
+                names.push(name);
+            }
+            if names.len() >= FOREGROUND_MAX_NAMES {
+                break;
+            }
+            next.extend(children(pid));
+        }
+        frontier = next;
+    }
+
+    names
+}
+
+/// A process's name, or `None` if it exited mid-walk.
+fn comm(pid: i32) -> Option<String> {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|name| name.trim_end().to_owned())
+}
+
+/// Whether a process is still in `group`.
+fn in_group(pid: i32, group: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| process_group(&stat))
+        == Some(group)
+}
+
+/// A process's direct children.
+fn children(pid: i32) -> Vec<i32> {
+    std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+        .map(|list| {
+            list.split_whitespace()
+                .filter_map(|pid| pid.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn emit_pane_died(id: PaneId, event_tx: &EventSender, dead: &AtomicBool) {
     if !dead.swap(true, Ordering::SeqCst) {
         let _ = event_tx.blocking_send(BackendEvent::PaneDied(id));
@@ -328,7 +411,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::foreground_pgid;
+    use super::{foreground_pgid, process_group};
 
     /// A real line, trimmed to the fields that matter.
     #[test]
@@ -336,6 +419,27 @@ mod tests {
         let stat = "1234 (fish) S 1 1234 1234 34816 5678 4194304 0 0";
 
         assert_eq!(foreground_pgid(stat), Some(5678));
+    }
+
+    #[test]
+    fn reads_pgrp_from_a_stat_line() {
+        let stat = "1234 (fish) S 1 4321 1234 34816 5678 4194304 0 0";
+
+        assert_eq!(process_group(stat), Some(4321));
+    }
+
+    /// The same escaping problem as `tpgid`, and the same fix.
+    #[test]
+    fn a_command_containing_parens_does_not_shift_the_pgrp_field() {
+        let stat = "1234 (od) ) (weird) S 1 4321 1234 34816 5678 4194304 0 0";
+
+        assert_eq!(process_group(stat), Some(4321));
+    }
+
+    #[test]
+    fn a_truncated_stat_line_has_no_pgrp() {
+        assert_eq!(process_group("1234 (fish) S 1"), None);
+        assert_eq!(process_group("garbage"), None);
     }
 
     /// The comm field is not escaped, so a process named `a ) b` would break
