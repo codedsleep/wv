@@ -88,21 +88,19 @@ impl AgentTracker {
     }
 }
 
-/// Whether `command` is one of the configured agent commands.
+/// Where `command` sits in the configured agent list, if it is one.
 ///
-/// Compared against the file name so a command found by absolute path still
-/// matches, and case-insensitively because argv[0] casing is not worth caring
-/// about.
-pub fn is_agent(command: &str, agents: &[String]) -> bool {
-    let name = command
-        .rsplit('/')
-        .next()
-        .unwrap_or(command)
-        .trim();
+/// The position doubles as the kind's sort rank, so the bar groups agents in
+/// the order `agent-commands` names them and keeps that order as panes come
+/// and go. Compared against the file name so a command found by absolute path
+/// still matches, and case-insensitively because argv[0] casing is not worth
+/// caring about.
+pub fn agent_rank(command: &str, agents: &[String]) -> Option<usize> {
+    let name = command.rsplit('/').next().unwrap_or(command).trim();
 
     agents
         .iter()
-        .any(|agent| agent.trim().eq_ignore_ascii_case(name))
+        .position(|agent| agent.trim().eq_ignore_ascii_case(name))
 }
 
 /// Split an option's comma-separated list into trimmed, non-empty entries.
@@ -142,9 +140,7 @@ pub fn looks_like_a_question(lines: &[String], patterns: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        is_agent, looks_like_a_question, parse_list, AgentState, AgentTracker,
-    };
+    use super::{agent_rank, looks_like_a_question, parse_list, AgentState, AgentTracker};
     use crate::backend::PaneId;
     use std::time::{Duration, Instant};
 
@@ -232,20 +228,22 @@ mod tests {
         assert_eq!(tracker.foreground(PaneId(1)), None);
     }
 
+    /// The position is the kind's sort rank, so it has to be the index in the
+    /// configured list rather than merely "yes, an agent".
     #[test]
-    fn agents_match_by_file_name_and_ignore_case() {
+    fn agents_rank_by_file_name_and_ignore_case() {
         let agents = parse_list("claude, codex");
 
-        assert!(is_agent("claude", &agents));
-        assert!(is_agent("/usr/local/bin/codex", &agents));
-        assert!(is_agent("Claude", &agents));
-        assert!(!is_agent("fish", &agents));
-        assert!(!is_agent("claudette", &agents));
+        assert_eq!(agent_rank("claude", &agents), Some(0));
+        assert_eq!(agent_rank("/usr/local/bin/codex", &agents), Some(1));
+        assert_eq!(agent_rank("Claude", &agents), Some(0));
+        assert_eq!(agent_rank("fish", &agents), None);
+        assert_eq!(agent_rank("claudette", &agents), None);
     }
 
     #[test]
     fn an_empty_agent_list_matches_nothing() {
-        assert!(!is_agent("claude", &[]));
+        assert_eq!(agent_rank("claude", &[]), None);
     }
 
     #[test]
