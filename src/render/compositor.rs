@@ -62,7 +62,7 @@ fn compose_node(node: &Node, panes: &[Pane], back: &mut Surface) {
                 return;
             };
 
-            let content_rect = inset_rect(frect_to_covering_rect(*rect_current));
+            let content_rect = frect_to_covering_rect(*rect_current).content();
             let mut clipped = Surface::new(content_rect.w, content_rect.h);
             pane.cells_into(&mut clipped, 0, 0);
             back.blit(&clipped, content_rect.x, content_rect.y);
@@ -86,15 +86,6 @@ fn frect_to_covering_rect(rect: FRect) -> Rect {
         y: top,
         w: right.saturating_sub(left),
         h: bottom.saturating_sub(top),
-    }
-}
-
-fn inset_rect(rect: Rect) -> Rect {
-    Rect {
-        x: rect.x.saturating_add(1),
-        y: rect.y.saturating_add(1),
-        w: rect.w.saturating_sub(2),
-        h: rect.h.saturating_sub(2),
     }
 }
 
@@ -126,7 +117,7 @@ fn ceil_to_u16(value: f32) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose, ComposeOptions, inset_rect};
+    use super::{compose, ComposeOptions};
     use crate::anim::timeline::Timeline;
     use crate::backend::PaneId;
     use crate::config::ThemeConfig;
@@ -372,7 +363,7 @@ mod tests {
                     return;
                 };
 
-                let content_rect = inset_rect(*rect_target);
+                let content_rect = rect_target.content();
                 let mut clipped = Surface::new(content_rect.w, content_rect.h);
                 pane.cells_into(&mut clipped, 0, 0);
                 back.blit(&clipped, content_rect.x, content_rect.y);

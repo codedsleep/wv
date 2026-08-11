@@ -53,6 +53,20 @@ impl From<Rect> for FRect {
 }
 
 impl Rect {
+    /// The area inside the pane's border — everything the process can draw on.
+    ///
+    /// A leaf's rect covers its border too, so this is the size a pane's PTY
+    /// and emulator must use. Handing them the full rect gives the process two
+    /// more columns and rows than are ever shown, and the overflow is clipped.
+    pub fn content(self) -> Self {
+        Self {
+            x: self.x.saturating_add(1),
+            y: self.y.saturating_add(1),
+            w: self.w.saturating_sub(2),
+            h: self.h.saturating_sub(2),
+        }
+    }
+
     pub fn split(self, split: Split, ratio: f32) -> (Self, Self) {
         match split {
             Split::Horizontal => {
