@@ -55,7 +55,7 @@ impl Node {
                 *rect = root_rect;
                 let (a_rect, b_rect) = root_rect.split(*split, *ratio_target);
                 a.compute_layout(a_rect);
-                b.compute_layout(share_divider(b_rect, *split));
+                b.compute_layout(b_rect);
             }
         }
     }
@@ -398,80 +398,76 @@ struct NeighborCandidate {
 }
 
 fn shared_edge_overlap(focused: Rect, candidate: Rect, dir: Direction) -> Option<u16> {
-    // Panes that share a border overlap by one cell on that edge, so "touching"
-    // means the edges meet *or* overlap by one — not that they are equal.
-    let touches = match dir {
-        Direction::Left => edges_meet(rect_right(candidate), focused.x),
-        Direction::Right => edges_meet(rect_right(focused), candidate.x),
-        Direction::Up => edges_meet(rect_bottom(candidate), focused.y),
-        Direction::Down => edges_meet(rect_bottom(focused), candidate.y),
+    let overlap = match dir {
+        Direction::Left
+            if rect_right(candidate) == focused.x
+                && ranges_overlap(
+                    focused.y,
+                    rect_bottom(focused),
+                    candidate.y,
+                    rect_bottom(candidate),
+                ) =>
+        {
+            range_overlap(
+                focused.y,
+                rect_bottom(focused),
+                candidate.y,
+                rect_bottom(candidate),
+            )
+        }
+        Direction::Right
+            if candidate.x == rect_right(focused)
+                && ranges_overlap(
+                    focused.y,
+                    rect_bottom(focused),
+                    candidate.y,
+                    rect_bottom(candidate),
+                ) =>
+        {
+            range_overlap(
+                focused.y,
+                rect_bottom(focused),
+                candidate.y,
+                rect_bottom(candidate),
+            )
+        }
+        Direction::Up
+            if rect_bottom(candidate) == focused.y
+                && ranges_overlap(
+                    focused.x,
+                    rect_right(focused),
+                    candidate.x,
+                    rect_right(candidate),
+                ) =>
+        {
+            range_overlap(
+                focused.x,
+                rect_right(focused),
+                candidate.x,
+                rect_right(candidate),
+            )
+        }
+        Direction::Down
+            if candidate.y == rect_bottom(focused)
+                && ranges_overlap(
+                    focused.x,
+                    rect_right(focused),
+                    candidate.x,
+                    rect_right(candidate),
+                ) =>
+        {
+            range_overlap(
+                focused.x,
+                rect_right(focused),
+                candidate.x,
+                rect_right(candidate),
+            )
+        }
+        _ => 0,
     };
-    if !touches {
-        return None;
-    }
 
-    // How much of the shared edge the two panes have in common, which is what
-    // picks the best neighbour when several sit along it.
-    let (a_start, a_end, b_start, b_end) = match dir {
-        Direction::Left | Direction::Right => (
-            focused.y,
-            rect_bottom(focused),
-            candidate.y,
-            rect_bottom(candidate),
-        ),
-        Direction::Up | Direction::Down => (
-            focused.x,
-            rect_right(focused),
-            candidate.x,
-            rect_right(candidate),
-        ),
-    };
-    if !ranges_overlap(a_start, a_end, b_start, b_end) {
-        return None;
-    }
-
-    Some(range_overlap(a_start, a_end, b_start, b_end))
+    (overlap > 0).then_some(overlap)
 }
-
-/// Whether one pane's far edge meets another's near edge.
-///
-/// Exactly equal when the panes merely abut, and one apart when they share a
-/// border — [`share_divider`] pulls the second pane back onto the first's last
-/// line, so its start sits one before the other's end.
-fn edges_meet(end: u16, start: u16) -> bool {
-    end == start || end == start.saturating_add(1)
-}
-
-/// Pull the second half of a split back onto the first half's last line, so
-/// the two panes share one border rather than drawing two side by side.
-///
-/// Without this every pane draws its own box and adjacent panes leave a
-/// two-cell gap between their contents — which reads as far worse vertically,
-/// where a terminal cell is about twice as tall as it is wide. Overlapping by
-/// one means both panes draw a border on the same line, over each other, with
-/// the same glyph.
-///
-/// Only ever shrinks the gap, never a pane below the two cells it needs for a
-/// border of its own.
-fn share_divider(rect: Rect, split: Split) -> Rect {
-    match split {
-        Split::Horizontal if rect.y > 0 && rect.h >= MIN_SHARED_EXTENT => Rect {
-            y: rect.y - 1,
-            h: rect.h + 1,
-            ..rect
-        },
-        Split::Vertical if rect.x > 0 && rect.w >= MIN_SHARED_EXTENT => Rect {
-            x: rect.x - 1,
-            w: rect.w + 1,
-            ..rect
-        },
-        _ => rect,
-    }
-}
-
-/// A pane needs two cells across to have a border at all; below that, sharing
-/// one would leave nothing to share.
-const MIN_SHARED_EXTENT: u16 = 2;
 
 fn rect_right(rect: Rect) -> u16 {
     rect.x.saturating_add(rect.w)
@@ -606,7 +602,7 @@ pub fn main_and_stack(
 
 #[cfg(test)]
 mod tests {
-    use super::{rect_bottom, rect_right, Node};
+    use super::{rect_right, Node};
     use crate::backend::PaneId;
     use crate::layout::geometry::{Direction, FRect, Rect, Split};
 
@@ -670,10 +666,7 @@ mod tests {
     }
 
     #[test]
-    /// Halves cover the root and overlap by exactly one cell — the column
-    /// they both draw a border on, so there is one divider between them
-    /// rather than two.
-    fn split_then_compute_layout_covers_root_sharing_one_divider() {
+    fn split_then_compute_layout_covers_root_without_overlap() {
         let mut tree = leaf(1);
         tree.split_focused(PaneId(1), Split::Vertical, PaneId(2));
         tree.compute_layout(ROOT);
@@ -686,36 +679,8 @@ mod tests {
         assert_eq!(left.h, ROOT.h);
         assert_eq!(right.y, ROOT.y);
         assert_eq!(right.h, ROOT.h);
-        assert_eq!(rect_right(left), right.x + 1, "one shared column");
-        assert_eq!(rect_right(right), rect_right(ROOT), "still covers the root");
-        assert_eq!(left.w + right.w, ROOT.w + 1, "the shared column counts twice");
-    }
-
-    /// The same for a horizontal split, which is where the gap was worst.
-    #[test]
-    fn a_horizontal_split_shares_one_row() {
-        let mut tree = leaf(1);
-        tree.split_focused(PaneId(1), Split::Horizontal, PaneId(2));
-        tree.compute_layout(ROOT);
-
-        let top = rect_for(&tree, 1);
-        let bottom = rect_for(&tree, 2);
-
-        assert_eq!(rect_bottom(top), bottom.y + 1, "one shared row");
-        assert_eq!(rect_bottom(bottom), rect_bottom(ROOT));
-    }
-
-    /// A pane too small to hold a border of its own keeps its rect rather than
-    /// being shrunk further.
-    #[test]
-    fn sharing_never_shrinks_a_pane_past_its_border() {
-        let tiny = Rect { x: 0, y: 0, w: 4, h: 1 };
-        assert_eq!(super::share_divider(tiny, Split::Horizontal), tiny);
-
-        // Nor does it pull a pane off the top-left edge of the screen.
-        let at_origin = Rect { x: 0, y: 0, w: 4, h: 4 };
-        assert_eq!(super::share_divider(at_origin, Split::Horizontal), at_origin);
-        assert_eq!(super::share_divider(at_origin, Split::Vertical), at_origin);
+        assert_eq!(rect_right(left), right.x);
+        assert_eq!(left.w + right.w, ROOT.w);
     }
 
     #[test]
