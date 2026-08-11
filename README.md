@@ -163,6 +163,11 @@ flash, a desktop notification. Turn it off with `set -g agent-bell off`. Agents
 finishing together ring once, and nothing rings for agents that were already
 stopped when weave started watching.
 
+An agent that ends by exiting rings the same way — a one-shot run that stops
+when its answer does, or an agent started as its pane's own command, which
+takes the pane with it. Closing a pane yourself does not ring, and neither does
+quitting an agent that had already stopped.
+
 `agent-commands` is matched against the file name, so an agent started by
 absolute path still counts. `agent-waiting-patterns` is matched
 case-insensitively against the last few non-blank lines, so a question that has

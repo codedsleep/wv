@@ -395,6 +395,12 @@ pub struct App {
     /// stops can be spotted. Only transitions ring the bell; the state itself
     /// says nothing about when it changed.
     agent_states: HashMap<PaneId, agent::AgentState>,
+    /// A pane whose agent was still working when the pane itself ended, which
+    /// is the one finish no poll of the panes can find: by the time anything
+    /// looks, there is no pane left to look at. Recorded where the pane dies
+    /// and rung on the next tick, so it joins whatever else finished in the
+    /// same breath rather than ringing over it.
+    agent_died_working: Option<PaneId>,
     backend: BoxedBackend,
     output_rx: mpsc::Receiver<(PaneId, Bytes)>,
     event_rx: mpsc::Receiver<BackendEvent>,
@@ -810,6 +816,7 @@ impl App {
             agents_asking: HashMap::new(),
             agent_indicators: Vec::new(),
             agent_states: HashMap::new(),
+            agent_died_working: None,
             backend: backend_parts.backend,
             output_rx: backend_parts.output_rx,
             event_rx: backend_parts.event_rx,
@@ -1091,13 +1098,30 @@ impl App {
     /// the desktop — and it reaches you through ssh, which nothing weave could
     /// play locally would. Two agents finishing in the same poll ring once,
     /// because two bells a millisecond apart are one sound anyway.
+    ///
+    /// Walked over what was running last tick rather than what is running now,
+    /// because an agent that exits is news the same way one that goes quiet is,
+    /// and it leaves no entry to walk over: a one-shot `claude -p` ends when its
+    /// answer does, and an agent started as its pane's own command takes the
+    /// pane with it. Gone counts as no longer working, so those ring; an agent
+    /// that was already sitting idle when it exited does not, because quitting
+    /// something that had already stopped is not it finishing.
     fn tick_agent_bell(&mut self) {
         let states = self.agent_pane_states();
+        // Taken whether or not it is going to ring, for the same reason the
+        // states below are recorded with the bell off: a finish nobody was
+        // listening for does not queue up to ring later.
+        let died = self.agent_died_working.take().is_some();
 
         let finished = self.options.flag("agent-bell")
-            && states.iter().any(|(pane, state)| {
-                agent::just_finished(self.agent_states.get(pane).copied(), *state)
-            });
+            && (died
+                || self.agent_states.iter().any(|(pane, previous)| {
+                    let current = states
+                        .get(pane)
+                        .copied()
+                        .unwrap_or(agent::AgentState::Idle);
+                    agent::just_finished(Some(*previous), current)
+                }));
 
         // Recorded even with the bell off, so turning it on mid-session does
         // not ring for everything that stopped while it was off.
@@ -1105,6 +1129,18 @@ impl App {
 
         if finished {
             self.ring_bell();
+        }
+    }
+
+    /// Remember that a pane died with an agent still working in it.
+    ///
+    /// Recorded rather than rung on the spot so that a window's worth of panes
+    /// dying together is still one bell, and so it is dropped unheard when
+    /// nobody is attached, like every other transition that happens while no
+    /// one is watching.
+    fn note_agent_pane_died(&mut self, pane: PaneId) {
+        if self.is_watched() && self.agent_states.get(&pane) == Some(&agent::AgentState::Working) {
+            self.agent_died_working = Some(pane);
         }
     }
 
@@ -3552,6 +3588,11 @@ impl App {
         match event {
             BackendEvent::PaneDied(id) => {
                 tracing::info!("pane died: {id:?}");
+                // Before the pane goes, because removing it takes what it was
+                // doing with it. Only a pane that ended on its own arrives
+                // here; closing one deliberately kills it and drops it in the
+                // same breath, and a pane you closed yourself is not news.
+                self.note_agent_pane_died(id);
                 self.remove_pane(id);
                 let owning_ws = self.workspace_of_pane(id);
                 if let Some(ws_idx) = owning_ws {
@@ -4107,6 +4148,7 @@ impl App {
             agents_asking: HashMap::new(),
             agent_indicators: Vec::new(),
             agent_states: HashMap::new(),
+            agent_died_working: None,
             backend,
             output_rx,
             event_rx,
@@ -4982,6 +5024,113 @@ mod tests {
         assert!(
             !heard_a_bell(&mut rx),
             "it stopped once, so it is worth one bell"
+        );
+    }
+
+    /// An agent that ends when its work does — a one-shot run, or one started
+    /// as its pane's own command, which closes the pane on the way out — has
+    /// finished in the only sense that matters, so it rings like any other.
+    #[tokio::test]
+    async fn an_agent_that_exits_while_working_rings_the_bell() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_output(pane, std::time::Instant::now());
+        app.tick_agent_bell();
+        assert!(!heard_a_bell(&mut rx), "an agent still working is not news");
+
+        // The agent is gone: either the shell is back in the foreground, or
+        // the pane went with it. Both leave the pane out of the agent states.
+        app.agents.set_foreground(pane, Some("fish".to_owned()));
+        app.tick_agent_bell();
+        assert!(heard_a_bell(&mut rx), "the run ended; say so");
+
+        app.tick_agent_bell();
+        assert!(
+            !heard_a_bell(&mut rx),
+            "it ended once, so it is worth one bell"
+        );
+    }
+
+    /// An agent started as its pane's own command takes the pane with it when
+    /// it ends, so the finish has to be caught where the pane dies — after the
+    /// removal there is nothing left to poll.
+    #[tokio::test]
+    async fn a_pane_dying_with_a_working_agent_rings_the_bell() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_output(pane, std::time::Instant::now());
+        app.tick_agent_bell();
+        assert!(!heard_a_bell(&mut rx), "an agent still working is not news");
+
+        app.handle_backend_event(crate::backend::BackendEvent::PaneDied(pane));
+        app.tick_agent_bell();
+        assert!(heard_a_bell(&mut rx), "the pane ended mid-run; say so");
+
+        app.tick_agent_bell();
+        assert!(
+            !heard_a_bell(&mut rx),
+            "it ended once, so it is worth one bell"
+        );
+    }
+
+    /// Closing a pane yourself kills it, which arrives as the same death. You
+    /// were there — you do not need to be told.
+    #[tokio::test]
+    async fn closing_a_pane_yourself_does_not_ring() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_output(pane, std::time::Instant::now());
+        app.tick_agent_bell();
+
+        app.execute(command("kill-pane")).await.expect("pane killed");
+        // The kill drops the pane, so the death that follows finds nothing.
+        app.handle_backend_event(crate::backend::BackendEvent::PaneDied(pane));
+        app.tick_agent_bell();
+        assert!(!heard_a_bell(&mut rx), "you closed it; that is not news");
+    }
+
+    /// Quitting an agent that had already stopped is not it finishing — the
+    /// news was the stop, and that already rang.
+    #[tokio::test]
+    async fn quitting_an_idle_agent_does_not_ring() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_output(pane, std::time::Instant::now());
+        app.tick_agent_bell();
+
+        go_quiet(&mut app, pane);
+        app.tick_agent_bell();
+        assert!(heard_a_bell(&mut rx), "the agent stopped; that is the news");
+
+        app.agents.set_foreground(pane, Some("fish".to_owned()));
+        app.tick_agent_bell();
+        assert!(
+            !heard_a_bell(&mut rx),
+            "quitting what had already stopped is not a second finish"
         );
     }
 
