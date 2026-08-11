@@ -47,6 +47,10 @@ pub struct ThemeConfig {
     pub status_fg: Color,
     pub status_bg: Color,
     pub accent: Color,
+    /// Agent working, waiting on you, and idle, in that order.
+    pub agent_working: Color,
+    pub agent_waiting: Color,
+    pub agent_idle: Color,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -410,6 +414,9 @@ impl ThemePreset {
                 status_fg: rgb(0xec, 0xef, 0xf4),
                 status_bg: rgb(0x2e, 0x34, 0x40),
                 accent: rgb(0xbf, 0x61, 0x6a),
+                agent_working: rgb(0xa3, 0xbe, 0x8c),
+                agent_waiting: rgb(0xeb, 0xcb, 0x8b),
+                agent_idle: rgb(0x4c, 0x56, 0x6a),
             },
             Self::TokyoNight => ThemeConfig {
                 border_focused: rgb(0x7d, 0xcf, 0xff),
@@ -417,6 +424,9 @@ impl ThemePreset {
                 status_fg: rgb(0xc0, 0xca, 0xf5),
                 status_bg: rgb(0x1a, 0x1b, 0x26),
                 accent: rgb(0xf7, 0x76, 0x8e),
+                agent_working: rgb(0x9e, 0xce, 0x6a),
+                agent_waiting: rgb(0xe0, 0xaf, 0x68),
+                agent_idle: rgb(0x41, 0x48, 0x68),
             },
         }
     }
@@ -440,6 +450,18 @@ impl ThemeConfig {
         }
         if let Some(value) = raw.accent {
             self.accent = parse_theme_color_or_fallback("accent", &value, preset.accent);
+        }
+        if let Some(value) = raw.agent_working {
+            self.agent_working =
+                parse_theme_color_or_fallback("agent_working", &value, preset.agent_working);
+        }
+        if let Some(value) = raw.agent_waiting {
+            self.agent_waiting =
+                parse_theme_color_or_fallback("agent_waiting", &value, preset.agent_waiting);
+        }
+        if let Some(value) = raw.agent_idle {
+            self.agent_idle =
+                parse_theme_color_or_fallback("agent_idle", &value, preset.agent_idle);
         }
     }
 }
@@ -524,6 +546,9 @@ struct RawTheme {
     status_fg: Option<String>,
     status_bg: Option<String>,
     accent: Option<String>,
+    agent_working: Option<String>,
+    agent_waiting: Option<String>,
+    agent_idle: Option<String>,
 }
 
 #[cfg(test)]

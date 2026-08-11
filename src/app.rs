@@ -11,6 +11,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
+use crate::agent::{self, AgentTracker};
 use crate::anim::timeline::Timeline;
 use crate::anim::tween::Easing;
 use crate::backend::native::NativeBackend;
@@ -125,6 +126,9 @@ impl Workspace {
     }
 }
 
+/// How often the panes' foreground jobs are re-read from `/proc`.
+const AGENT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
 #[cfg(test)]
 const fn test_theme() -> ThemeConfig {
     ThemeConfig {
@@ -133,6 +137,9 @@ const fn test_theme() -> ThemeConfig {
         status_fg: crossterm::style::Color::White,
         status_bg: crossterm::style::Color::DarkBlue,
         accent: crossterm::style::Color::Red,
+        agent_working: crossterm::style::Color::Green,
+        agent_waiting: crossterm::style::Color::Yellow,
+        agent_idle: crossterm::style::Color::DarkGrey,
     }
 }
 
@@ -338,6 +345,13 @@ pub struct App {
     /// Where this session is listening, so `rename-session` can move it.
     session_socket: Option<crate::session::server::SocketPath>,
     resize_mode: ResizeMode,
+    /// What each pane is running and when it last spoke, for the agent
+    /// indicators in the status bar.
+    agents: AgentTracker,
+    /// When the foreground jobs were last polled. Reading `/proc` for every
+    /// pane is cheap but not free, and a job changes far more slowly than a
+    /// frame is drawn.
+    agents_polled: std::time::Instant,
     backend: BoxedBackend,
     output_rx: mpsc::Receiver<(PaneId, Bytes)>,
     event_rx: mpsc::Receiver<BackendEvent>,
@@ -747,6 +761,8 @@ impl App {
             session_name: None,
             session_socket: None,
             resize_mode: ResizeMode::Normal,
+            agents: AgentTracker::default(),
+            agents_polled: std::time::Instant::now(),
             backend: backend_parts.backend,
             output_rx: backend_parts.output_rx,
             event_rx: backend_parts.event_rx,
@@ -981,6 +997,112 @@ impl App {
             .iter()
             .enumerate()
             .all(|(i, ws)| i == self.current_workspace || ws.is_empty())
+    }
+
+    /// Keep the agent indicators current.
+    ///
+    /// Two things move them: a pane's foreground job changing, which is polled,
+    /// and an agent going quiet, which no event announces — so while any agent
+    /// is inside its activity window the bar is kept redrawing, or the moment
+    /// it turns grey would wait for unrelated output.
+    async fn tick_agents(&mut self) {
+        if !self.options.flag("agent-status") || !self.is_watched() {
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        if now.duration_since(self.agents_polled) >= AGENT_POLL_INTERVAL {
+            self.agents_polled = now;
+            if self.poll_agent_commands().await {
+                self.dirty = true;
+            }
+        }
+
+        let window = self.agent_activity_window();
+        if self
+            .pane_ids()
+            .iter()
+            .any(|pane| self.agents.is_active(*pane, now, window))
+        {
+            self.dirty = true;
+        }
+    }
+
+    /// How long after its last output an agent still counts as working.
+    fn agent_activity_window(&self) -> Duration {
+        Duration::from_millis(
+            self.options
+                .number("agent-activity-time")
+                .unwrap_or(2_000),
+        )
+    }
+
+    /// Re-read which pane is running what.
+    ///
+    /// Returns whether anything changed, so a pane that has just started or
+    /// finished an agent redraws the bar even on an otherwise still frame.
+    async fn poll_agent_commands(&mut self) -> bool {
+        let mut changed = false;
+
+        for pane in self.pane_ids() {
+            let command = self
+                .backend
+                .pane_foreground_name(pane)
+                .await
+                .unwrap_or_default();
+            if command.as_deref() != self.agents.foreground(pane) {
+                self.agents.set_foreground(pane, command);
+                changed = true;
+            }
+        }
+
+        changed
+    }
+
+    /// Every agent running in this session, in window then layout order.
+    ///
+    /// The whole session rather than the current window: knowing an agent in
+    /// window 3 has stopped is the point, and you cannot see window 3.
+    fn agent_indicators(&self) -> Vec<chrome::AgentIndicator> {
+        if !self.options.flag("agent-status") {
+            return Vec::new();
+        }
+
+        let names = agent::parse_list(
+            self.options
+                .get("agent-commands")
+                .unwrap_or_default(),
+        );
+        let patterns = agent::parse_list(
+            self.options
+                .get("agent-waiting-patterns")
+                .unwrap_or_default(),
+        );
+        let window = self.agent_activity_window();
+        let now = std::time::Instant::now();
+
+        let mut indicators = Vec::new();
+        for (index, workspace) in self.workspaces.iter().enumerate() {
+            for pane in workspace.leaf_panes() {
+                let Some(command) = self.agents.foreground(pane) else {
+                    continue;
+                };
+                if !agent::is_agent(command, &names) {
+                    continue;
+                }
+
+                let asking = self
+                    .pane(pane)
+                    .is_some_and(|pane| agent::looks_like_a_question(&pane.capture_lines(), &patterns));
+                indicators.push(chrome::AgentIndicator {
+                    window: u8::try_from(index + 1).unwrap_or(u8::MAX),
+                    name: command.to_owned(),
+                    state: self.agents.state(pane, now, window, asking),
+                });
+            }
+        }
+
+        indicators
     }
 
     fn workspace_indicators(&self) -> Vec<chrome::WorkspaceIndicator> {
@@ -1251,6 +1373,8 @@ impl App {
                     self.tick(dt).await?;
                 }
                 Some((id, bytes)) = self.output_rx.recv() => {
+                    // Output is the signal the agent indicators run on.
+                    self.agents.note_output(id, std::time::Instant::now());
                     if let Some(replies) = self.pane_mut(id).map(|pane| pane.process(&bytes)) {
                         self.dirty = true;
                         // A pane that asked its terminal a question is waiting
@@ -3368,6 +3492,7 @@ impl App {
         self.last_tick_dt = dt;
         self.advance_message(dt);
         self.advance_animations(dt).await?;
+        self.tick_agents().await;
 
         // With nobody watching there is nothing to render for: keep pane state
         // and tweens current, but skip compositing entirely.
@@ -3392,11 +3517,13 @@ impl App {
         );
         if self.status_bar {
             let indicators = self.workspace_indicators();
+            let agents = self.agent_indicators();
             let status_left = self.status_left();
             chrome::draw_status_bar(
                 &mut self.back,
                 &status_left,
                 &indicators,
+                &agents,
                 chrono::Local::now(),
                 self.theme,
             );
@@ -3595,6 +3722,7 @@ impl App {
 
     fn remove_pane(&mut self, id: PaneId) {
         self.panes.retain(|pane| pane.id() != id);
+        self.agents.forget(id);
         // Retire the `%N` with the pane. Numbers are never reused, so a stale
         // `%N` in a script fails loudly instead of hitting somebody else's pane.
         self.pane_numbers.remove(&id);
@@ -3675,6 +3803,8 @@ impl App {
             session_name: None,
             session_socket: None,
             resize_mode: ResizeMode::Normal,
+            agents: AgentTracker::default(),
+            agents_polled: std::time::Instant::now(),
             backend,
             output_rx,
             event_rx,
@@ -4387,6 +4517,96 @@ mod tests {
             "new pane should be ~30 cells wide, got {}",
             new_rect.w
         );
+    }
+
+    /// The bar carries the whole session, not just the window you are looking
+    /// at: an agent that has stopped in window 2 is exactly the one you cannot
+    /// see.
+    #[tokio::test]
+    async fn agent_indicators_cover_every_window_and_ignore_plain_shells() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+        app.execute(command("new-window")).await.expect("new window");
+
+        let panes = app.pane_ids();
+        assert_eq!(panes.len(), 3, "two panes in window 1, one in window 2");
+        app.agents.set_foreground(panes[0], Some("claude".to_owned()));
+        app.agents.set_foreground(panes[1], Some("fish".to_owned()));
+        app.agents
+            .set_foreground(panes[2], Some("/usr/bin/opencode".to_owned()));
+
+        let indicators = app.agent_indicators();
+
+        let seen: Vec<(u8, &str)> = indicators
+            .iter()
+            .map(|agent| (agent.window, agent.name.as_str()))
+            .collect();
+        assert_eq!(seen, vec![(1, "claude"), (2, "/usr/bin/opencode")]);
+    }
+
+    #[tokio::test]
+    async fn an_agent_is_working_while_it_prints_and_idle_once_it_stops() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+
+        app.agents.note_output(pane, std::time::Instant::now());
+        assert_eq!(
+            app.agent_indicators().first().map(|a| a.state),
+            Some(crate::agent::AgentState::Working)
+        );
+
+        // Rewind the last-output stamp past the activity window.
+        app.agents.note_output(
+            pane,
+            std::time::Instant::now()
+                .checked_sub(Duration::from_secs(30))
+                .expect("the clock has been up for 30s"),
+        );
+        assert_eq!(
+            app.agent_indicators().first().map(|a| a.state),
+            Some(crate::agent::AgentState::Idle)
+        );
+    }
+
+    /// A quiet agent sitting on a question is the one worth a colour of its own.
+    #[tokio::test]
+    async fn a_quiet_agent_at_a_prompt_is_waiting() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_output(
+            pane,
+            std::time::Instant::now()
+                .checked_sub(Duration::from_secs(30))
+                .expect("the clock has been up for 30s"),
+        );
+
+        if let Some(p) = app.pane_mut(pane) {
+            p.process(b"Do you want to proceed?\r\n  1. Yes\r\n");
+        }
+
+        assert_eq!(
+            app.agent_indicators().first().map(|a| a.state),
+            Some(crate::agent::AgentState::Waiting)
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_status_off_hides_the_indicators() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+
+        app.execute(command("set-option agent-status off"))
+            .await
+            .expect("option set");
+
+        assert!(app.agent_indicators().is_empty());
     }
 
     #[tokio::test]
@@ -5446,10 +5666,12 @@ mod tests {
         let surface = app.compose_current_surface();
         let mut back = surface.clone();
         let indicators = app.workspace_indicators();
+        let agents = app.agent_indicators();
         crate::render::chrome::draw_status_bar(
             &mut back,
             &app.status_left(),
             &indicators,
+            &agents,
             chrono::Local::now(),
             app.theme,
         );

@@ -17,6 +17,7 @@ An animated tiling terminal multiplexer in Rust.
 - **BSP splits.** Recursive horizontal/vertical splits with geometric focus navigation (`h/j/k/l`).
 - **Configurable themes.** Hex color overrides for borders, status bar, and accent; ships with `nord` and `tokyonight` presets (default `nord`).
 - **Window names from pane titles.** OSC 0/2 sequences (`printf '\e]2;hello\a'`) name the window they are in, so the status bar reads `1:vim`. Per-pane title labels are off by default — a caption over every pane is noise when the pane's contents already say what it is — but `pane_titles = true` brings them back.
+- **Agent status in the bar.** Panes running a coding agent (`claude`, `codex`, `opencode`) are listed on the right of the status bar, coloured green while the agent is producing output, amber when it has stopped at a question, and grey when it is done. The whole session is covered, not just the window on screen, so an agent that has finished in window 3 is visible from window 1. See [Agent status](#agent-status).
 - **Truecolor with graceful degradation.** Detects `COLORTERM=truecolor`; otherwise quantizes RGB to the xterm-256 cube.
 - **Panic-safe.** Terminal state is always restored on crash; panic info goes to the log file.
 - **`#![forbid(unsafe_code)]`** at the crate root.
@@ -113,9 +114,40 @@ preset = "nord"   # or "tokyonight"
 # status_fg        = "#eceff4"
 # status_bg        = "#2e3440"
 # accent           = "#bf616a"
+# agent_working    = "#a3be8c"
+# agent_waiting    = "#ebcb8b"
+# agent_idle       = "#4c566a"
 ```
 
 The TOML parser accepts a single modifier (`Ctrl+` or `Alt+`). Multi-modifier chords aren't expressible there — use the tmux-syntax file below, which takes `M-C-x`.
+
+### Agent status
+
+Each pane's foreground job is read from `/proc`, so a shell sitting at a prompt
+reports `fish` and one running an agent reports the agent. Agent panes are then
+listed on the right of the status bar as `● 1:claude`, where the number is the
+window to switch to.
+
+The colour is the state, and the state comes from the pane's own output — the
+agent is not asked and needs no setup:
+
+| Colour | State   | Meaning                                                   |
+| ------ | ------- | --------------------------------------------------------- |
+| green  | working | printed something within `agent-activity-time`             |
+| amber  | waiting | quiet, and the bottom of the pane matches a waiting pattern |
+| grey   | idle    | quiet, asking for nothing                                  |
+
+```sh
+set -g agent-status on
+set -g agent-commands 'claude,codex,opencode'
+set -g agent-activity-time 2000
+set -g agent-waiting-patterns 'do you want,(y/n),proceed?,continue?'
+```
+
+`agent-commands` is matched against the file name, so an agent started by
+absolute path still counts. `agent-waiting-patterns` is matched
+case-insensitively against the last few non-blank lines, so a question that has
+scrolled away no longer counts as one.
 
 ### tmux-syntax config
 

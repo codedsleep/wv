@@ -3,6 +3,7 @@
 use crossterm::style::Color;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::agent::AgentState;
 use crate::anim::timeline::Timeline;
 use crate::backend::PaneId;
 use crate::config::ThemeConfig;
@@ -17,6 +18,8 @@ pub const UNFOCUSED_BORDER: Color = Color::Rgb {
     g: 0x48,
     b: 0x68,
 };
+/// The dot beside an agent's name. Its colour carries the state.
+const AGENT_MARK: char = '\u{25cf}';
 const DEBUG_FG: Color = Color::Black;
 const DEBUG_BG: Color = Color::White;
 
@@ -26,6 +29,15 @@ pub struct DebugOverlay {
     pub frame_ms: f64,
     pub tweens: usize,
     pub dirty_cells: usize,
+}
+
+/// One agent in the status bar.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentIndicator {
+    /// The window it is running in, so the bar says where to go.
+    pub window: u8,
+    pub name: String,
+    pub state: AgentState,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -79,6 +91,7 @@ pub fn draw_status_bar(
     surface: &mut Surface,
     status_left: &str,
     workspaces: &[WorkspaceIndicator],
+    agents: &[AgentIndicator],
     now: chrono::DateTime<chrono::Local>,
     theme: ThemeConfig,
 ) {
@@ -141,6 +154,53 @@ pub fn draw_status_bar(
                 theme.status_bg,
             );
         }
+
+        // Agents sit between the windows and the clock, right-aligned against
+        // it: the bar's left end changes length as windows come and go, and an
+        // indicator that moves is one you have to read rather than glance at.
+        draw_agents(surface, y, x, clock_start, agents, theme);
+    }
+}
+
+/// The agent indicators, right-aligned into `[left, right)`.
+///
+/// Drawn only if the whole run fits. Half a list is worse than none: a dot
+/// with no name beside it says an agent needs you without saying which.
+fn draw_agents(
+    surface: &mut Surface,
+    y: u16,
+    left: u16,
+    right: u16,
+    agents: &[AgentIndicator],
+    theme: ThemeConfig,
+) {
+    if agents.is_empty() {
+        return;
+    }
+
+    let labels: Vec<String> = agents
+        .iter()
+        .map(|agent| format!("{AGENT_MARK} {}:{} ", agent.window, agent.name))
+        .collect();
+    let width = labels
+        .iter()
+        .map(|label| UnicodeWidthStr::width(label.as_str()))
+        .sum::<usize>();
+    let Ok(width) = u16::try_from(width) else {
+        return;
+    };
+    if width > right.saturating_sub(left) {
+        return;
+    }
+
+    let mut x = right - width;
+    for (agent, label) in agents.iter().zip(&labels) {
+        let fg = match agent.state {
+            AgentState::Working => theme.agent_working,
+            AgentState::Waiting => theme.agent_waiting,
+            AgentState::Idle => theme.agent_idle,
+        };
+        x = write_status_text(surface, x, y, right, label, fg, theme.status_bg);
     }
 }
 
@@ -301,7 +361,11 @@ mod tests {
     use chrono::TimeZone;
     use crossterm::style::Color;
 
-    use super::{draw_borders, draw_debug_overlay, draw_status_bar, truncate_title, DebugOverlay};
+    use super::{
+        draw_borders, draw_debug_overlay, draw_status_bar, truncate_title, DebugOverlay,
+        AGENT_MARK,
+    };
+    use crate::agent::AgentState;
     use crate::anim::timeline::Timeline;
     use crate::backend::PaneId;
     use crate::config::ThemeConfig;
@@ -316,6 +380,9 @@ mod tests {
         status_fg: Color::White,
         status_bg: Color::DarkBlue,
         accent: Color::Red,
+        agent_working: Color::Green,
+        agent_waiting: Color::Yellow,
+        agent_idle: Color::DarkGrey,
     };
 
     #[test]
@@ -380,6 +447,93 @@ mod tests {
         assert_eq!(focused_corner.fg, Color::Cyan);
         assert_eq!(unfocused_corner.ch, '┌');
         assert_eq!(unfocused_corner.fg, Color::DarkGrey);
+    }
+
+    fn agent(window: u8, name: &str, state: AgentState) -> super::AgentIndicator {
+        super::AgentIndicator {
+            window,
+            name: name.to_owned(),
+            state,
+        }
+    }
+
+    fn bottom_row(surface: &Surface) -> String {
+        (0..surface.width)
+            .map(|x| surface.get(x, surface.height - 1).expect("cell exists").ch)
+            .collect()
+    }
+
+    fn test_time() -> chrono::DateTime<chrono::Local> {
+        chrono::Local
+            .with_ymd_and_hms(2026, 5, 11, 14, 23, 11)
+            .single()
+            .expect("test time exists")
+    }
+
+    #[test]
+    fn agents_are_right_aligned_against_the_clock_and_coloured_by_state() {
+        let mut surface = Surface::new(60, 4);
+        let agents = [
+            agent(1, "claude", AgentState::Working),
+            agent(2, "codex", AgentState::Waiting),
+            agent(3, "opencode", AgentState::Idle),
+        ];
+
+        draw_status_bar(&mut surface, "s", &[], &agents, test_time(), TEST_THEME);
+
+        let bottom = bottom_row(&surface);
+        assert!(bottom.contains("1:claude"), "{bottom}");
+        assert!(bottom.contains("2:codex"), "{bottom}");
+        assert!(bottom.contains("3:opencode"), "{bottom}");
+        // Right up against the clock, which keeps the far right.
+        assert!(bottom.ends_with("14:23:11"), "{bottom}");
+
+        // Cell positions, not byte offsets: the mark is three bytes wide but
+        // one cell.
+        let cells: Vec<char> = bottom.chars().collect();
+        let colour_of = |needle: &str| {
+            let needle: Vec<char> = needle.chars().collect();
+            let at = cells
+                .windows(needle.len())
+                .position(|window| window == needle.as_slice())
+                .expect("label is on the bar");
+            // The mark sits two cells before the window number.
+            let x = u16::try_from(at - 2).expect("fits");
+            surface.get(x, surface.height - 1).expect("cell exists")
+        };
+        assert_eq!(colour_of("1:claude").ch, AGENT_MARK);
+        assert_eq!(colour_of("1:claude").fg, TEST_THEME.agent_working);
+        assert_eq!(colour_of("2:codex").fg, TEST_THEME.agent_waiting);
+        assert_eq!(colour_of("3:opencode").fg, TEST_THEME.agent_idle);
+    }
+
+    /// Half a list is worse than none: a dot with no name beside it says an
+    /// agent needs you without saying which.
+    #[test]
+    fn agents_are_dropped_rather_than_clipped_when_the_bar_is_narrow() {
+        let mut surface = Surface::new(24, 4);
+        let agents = [agent(1, "claude", AgentState::Working)];
+
+        draw_status_bar(
+            &mut surface,
+            "a-long-session-name",
+            &[],
+            &agents,
+            test_time(),
+            TEST_THEME,
+        );
+
+        let bottom = bottom_row(&surface);
+        assert!(!bottom.contains(AGENT_MARK), "{bottom}");
+    }
+
+    #[test]
+    fn no_agents_leaves_the_bar_as_it_was() {
+        let mut surface = Surface::new(60, 4);
+
+        draw_status_bar(&mut surface, "s", &[], &[], test_time(), TEST_THEME);
+
+        assert!(!bottom_row(&surface).contains(AGENT_MARK));
     }
 
     #[test]
@@ -447,7 +601,7 @@ mod tests {
             },
         ];
 
-        draw_status_bar(&mut surface, "NORMAL", &workspaces, now, TEST_THEME);
+        draw_status_bar(&mut surface, "NORMAL", &workspaces, &[], now, TEST_THEME);
 
         let bottom: String = (0..surface.width)
             .map(|x| surface.get(x, surface.height - 1).expect("cell exists").ch)

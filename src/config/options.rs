@@ -187,6 +187,37 @@ pub const OPTIONS: &[OptionSpec] = &[
         status: OptionStatus::Inert("weave has no command prompt"),
         default: "emacs",
     },
+    // Agent status. Not tmux options — weave-specific.
+    OptionSpec {
+        name: "agent-status",
+        kind: OptionKind::Flag,
+        status: OptionStatus::Live,
+        default: "on",
+    },
+    OptionSpec {
+        name: "agent-commands",
+        kind: OptionKind::String,
+        status: OptionStatus::Live,
+        default: "claude,codex,opencode",
+    },
+    // How long after its last output an agent still counts as working. Long
+    // enough to bridge the gaps an agent leaves while it thinks, short enough
+    // that a finished one goes grey while you are still looking.
+    OptionSpec {
+        name: "agent-activity-time",
+        kind: OptionKind::Number,
+        status: OptionStatus::Live,
+        default: "2000",
+    },
+    // Text that means an agent has stopped to ask you something. Matched
+    // case-insensitively against the bottom of the pane; the defaults cover
+    // the prompts Claude Code and Codex stop at.
+    OptionSpec {
+        name: "agent-waiting-patterns",
+        kind: OptionKind::String,
+        status: OptionStatus::Live,
+        default: "do you want,(y/n),(y/N),proceed?,continue?,esc to cancel",
+    },
 ];
 
 pub fn spec(name: &str) -> Option<&'static OptionSpec> {
