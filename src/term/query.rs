@@ -55,6 +55,9 @@ pub struct QueryScanner {
 enum Parsed {
     /// A query, and how many bytes it occupies.
     Query(Query, usize),
+    /// A sequence the emulator does not implement, the bytes to feed it in
+    /// place of the original, and how many bytes the original occupies.
+    Rewritten(Vec<u8>, usize),
     /// Some other escape sequence, and how many bytes to skip over.
     Other(usize),
     /// The sequence runs past the end of the buffer.
@@ -81,6 +84,12 @@ impl QueryScanner {
                 Parsed::Query(query, length) => {
                     push_data(&mut segments, &buf[data_start..index]);
                     segments.push(Segment::Query(query));
+                    index += length;
+                    data_start = index;
+                }
+                Parsed::Rewritten(bytes, length) => {
+                    push_data(&mut segments, &buf[data_start..index]);
+                    segments.push(Segment::Data(bytes));
                     index += length;
                     data_start = index;
                 }
@@ -138,6 +147,17 @@ fn parse_csi(buf: &[u8]) -> Parsed {
                 (b">" | b">0", b'c') => Parsed::Query(Query::SecondaryDeviceAttributes, length),
                 (b"5", b'n') => Parsed::Query(Query::DeviceStatus, length),
                 (b"6", b'n') => Parsed::Query(Query::CursorPosition, length),
+                // HVP is CUP under another name — same parameters, same
+                // effect — but `vt100` implements only CUP and drops HVP on
+                // the floor. A program that positions with HVP then paints its
+                // whole interface from wherever the cursor happened to be:
+                // btop uses HVP exclusively, and renders as a heap of
+                // overlapping, wrapping boxes.
+                (params, b'f') if is_numeric_params(params) => {
+                    let mut rewritten = buf[..length].to_vec();
+                    rewritten[length - 1] = b'H';
+                    Parsed::Rewritten(rewritten, length)
+                }
                 _ => Parsed::Other(length),
             };
         }
@@ -147,6 +167,16 @@ fn parse_csi(buf: &[u8]) -> Parsed {
     }
 
     Parsed::Incomplete
+}
+
+/// Whether a CSI's parameter bytes are a plain numeric list.
+///
+/// Anything else — a private marker like `?`, or an intermediate byte — means
+/// the sequence is not the one it looks like, so it is left alone.
+fn is_numeric_params(params: &[u8]) -> bool {
+    params
+        .iter()
+        .all(|byte| byte.is_ascii_digit() || *byte == b';')
 }
 
 fn parse_string_sequence(buf: &[u8]) -> Parsed {
@@ -280,6 +310,42 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(forwarded, &burst[..burst.len() - 4]);
+    }
+
+    /// `vt100` implements CUP but not HVP, so HVP has to arrive as CUP or the
+    /// move is silently dropped.
+    #[test]
+    fn hvp_is_rewritten_to_cup() {
+        let mut scanner = QueryScanner::default();
+
+        assert_eq!(
+            scanner.feed(b"a\x1b[3;5fb"),
+            vec![data(b"a"), data(b"\x1b[3;5H"), data(b"b")]
+        );
+    }
+
+    #[test]
+    fn hvp_without_parameters_is_still_rewritten() {
+        let mut scanner = QueryScanner::default();
+
+        assert_eq!(scanner.feed(b"\x1b[f"), vec![data(b"\x1b[H")]);
+    }
+
+    #[test]
+    fn an_hvp_split_across_reads_is_still_rewritten() {
+        let mut scanner = QueryScanner::default();
+
+        assert_eq!(scanner.feed(b"out\x1b[12;"), vec![data(b"out")]);
+        assert_eq!(scanner.feed(b"34f"), vec![data(b"\x1b[12;34H")]);
+    }
+
+    /// Only a plain numeric HVP is CUP by another name. A private-marker
+    /// sequence that happens to end in `f` means something else entirely.
+    #[test]
+    fn a_private_sequence_ending_in_f_is_left_alone() {
+        let mut scanner = QueryScanner::default();
+
+        assert_eq!(scanner.feed(b"\x1b[?7f"), vec![data(b"\x1b[?7f")]);
     }
 
     #[test]
