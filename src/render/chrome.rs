@@ -13,11 +13,6 @@ use crate::term::cell::{Cell, CellAttrs};
 use crate::term::pane::Pane;
 use crate::term::surface::Surface;
 
-pub const UNFOCUSED_BORDER: Color = Color::Rgb {
-    r: 0x41,
-    g: 0x48,
-    b: 0x68,
-};
 /// The dot beside an agent's name. Its colour carries the state.
 const AGENT_MARK: char = '\u{25cf}';
 const DEBUG_FG: Color = Color::Black;
@@ -72,6 +67,10 @@ pub struct StatusBar<'a> {
     /// What sits in the leftmost segment: normally the session name, and a
     /// message or an open prompt while either is up.
     pub left: &'a str,
+    /// Whether `left` is a message or an open prompt rather than the session
+    /// name. tmux gives those their own `message-style`, and the block
+    /// changing colour is what says "this is not what you usually read here".
+    pub left_is_notice: bool,
     pub workspaces: &'a [WorkspaceIndicator],
     pub agents: &'a [AgentIndicator],
     /// The host, as tmux's `#H` shows it.
@@ -154,12 +153,20 @@ pub fn draw_status_bar(surface: &mut Surface, bar: &StatusBar<'_>, theme: ThemeC
 /// The session segment and the window segments, drawn from the left edge.
 fn left_run(bar: &StatusBar<'_>, theme: ThemeConfig) -> Run {
     let mut run = Run::default();
-    run.push_str_bold(
-        &format!(" {} ", bar.left),
-        theme.status_bg,
-        theme.status_session,
-    );
-    run.close_segment(bar, theme.status_session, theme);
+    // `message-style bg=brightblack,fg=cyan`, and unbolded: a message is read
+    // once and gone, so it should not also carry the session's weight.
+    let (text_color, block) = if bar.left_is_notice {
+        (theme.accent, theme.status_segment)
+    } else {
+        (theme.status_bg, theme.status_session)
+    };
+    let left = format!(" {} ", bar.left);
+    if bar.left_is_notice {
+        run.push_str(&left, text_color, block);
+    } else {
+        run.push_str_bold(&left, text_color, block);
+    }
+    run.close_segment(bar, block, theme);
 
     let thin = if bar.powerline {
         SEP_RIGHT_THIN
@@ -628,6 +635,7 @@ mod tests {
     ) -> super::StatusBar<'a> {
         super::StatusBar {
             left,
+            left_is_notice: false,
             workspaces,
             agents,
             host: "testhost",
@@ -774,6 +782,30 @@ mod tests {
             cell_at(&surface, char_index(&bottom, "testhost")).bg,
             TEST_THEME.accent
         );
+    }
+
+    /// A message borrows the session's slot, so it has to be told apart by
+    /// colour — otherwise a three-second notice reads as a renamed session.
+    #[test]
+    fn a_message_takes_the_session_block_but_not_its_colours() {
+        let mut surface = Surface::new(100, 4);
+        let mut bar = status_bar("saved", &[], &[]);
+        bar.left_is_notice = true;
+
+        draw_status_bar(&mut surface, &bar, TEST_THEME);
+
+        let bottom = bottom_row(&surface);
+        let notice = cell_at(&surface, char_index(&bottom, "saved"));
+        assert_eq!(notice.bg, TEST_THEME.status_segment);
+        assert_eq!(notice.fg, TEST_THEME.accent);
+        assert!(
+            !notice.attrs.contains(CellAttrs::BOLD),
+            "read once and gone, so not a heading: {bottom}"
+        );
+
+        // The wedge closing it follows the block, or the seam shows.
+        let wedge = cell_at(&surface, char_index(&bottom, &SEP_RIGHT.to_string()));
+        assert_eq!(wedge.fg, TEST_THEME.status_segment);
     }
 
     /// Every window boundary carries two wedges, not one: the segment's colour

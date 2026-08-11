@@ -426,8 +426,12 @@ impl ThemePreset {
             // behind the bar, nord3 for the quiet segments, nord9 for the
             // session and nord8 for whatever is current.
             Self::Nord => ThemeConfig {
-                border_focused: rgb(0x88, 0xc0, 0xd0),
-                border_unfocused: rgb(0x3b, 0x42, 0x52),
+                // `pane-active-border-style fg=blue` and `pane-border-style
+                // fg=brightblack`. Blue rather than cyan: cyan is what marks
+                // the *current window*, and one accent doing two jobs is one
+                // fewer thing the eye can rely on.
+                border_focused: rgb(0x81, 0xa1, 0xc1),
+                border_unfocused: rgb(0x4c, 0x56, 0x6a),
                 status_fg: rgb(0xe5, 0xe9, 0xf0),
                 status_bg: rgb(0x3b, 0x42, 0x52),
                 status_segment: rgb(0x4c, 0x56, 0x6a),
@@ -441,7 +445,9 @@ impl ThemePreset {
                 agent_idle: rgb(0x61, 0x6e, 0x88),
             },
             Self::TokyoNight => ThemeConfig {
-                border_focused: rgb(0x7d, 0xcf, 0xff),
+                // Same split as nord: the border takes the session's blue, so
+                // the brighter accent stays reserved for the current window.
+                border_focused: rgb(0x7a, 0xa2, 0xf7),
                 border_unfocused: rgb(0x41, 0x48, 0x68),
                 status_fg: rgb(0xc0, 0xca, 0xf5),
                 status_bg: rgb(0x1a, 0x1b, 0x26),
@@ -709,17 +715,17 @@ mod tests {
         assert_eq!(
             config.theme.border_focused,
             Color::Rgb {
-                r: 0x88,
-                g: 0xc0,
-                b: 0xd0
+                r: 0x81,
+                g: 0xa1,
+                b: 0xc1
             }
         );
         assert_eq!(
             config.theme.border_unfocused,
             Color::Rgb {
-                r: 0x3b,
-                g: 0x42,
-                b: 0x52
+                r: 0x4c,
+                g: 0x56,
+                b: 0x6a
             }
         );
     }
@@ -805,9 +811,9 @@ mod tests {
         assert_eq!(
             config.theme.border_focused,
             Color::Rgb {
-                r: 0x88,
-                g: 0xc0,
-                b: 0xd0
+                r: 0x81,
+                g: 0xa1,
+                b: 0xc1
             }
         );
         assert_eq!(
@@ -839,9 +845,9 @@ mod tests {
         assert_eq!(
             config.theme.border_unfocused,
             Color::Rgb {
-                r: 0x3b,
-                g: 0x42,
-                b: 0x52
+                r: 0x4c,
+                g: 0x56,
+                b: 0x6a
             }
         );
         assert_eq!(
@@ -869,9 +875,9 @@ mod tests {
         assert_eq!(
             config.theme.border_focused,
             Color::Rgb {
-                r: 0x88,
-                g: 0xc0,
-                b: 0xd0
+                r: 0x81,
+                g: 0xa1,
+                b: 0xc1
             }
         );
         assert_eq!(
@@ -897,9 +903,9 @@ mod tests {
         assert_eq!(
             config.theme.border_focused,
             Color::Rgb {
-                r: 0x88,
-                g: 0xc0,
-                b: 0xd0
+                r: 0x81,
+                g: 0xa1,
+                b: 0xc1
             }
         );
         assert_eq!(
