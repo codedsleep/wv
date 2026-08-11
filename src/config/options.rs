@@ -227,6 +227,17 @@ pub const OPTIONS: &[OptionSpec] = &[
         status: OptionStatus::Live,
         default: "on",
     },
+    // How long an agent has to have been working before stopping is worth a
+    // bell. The screen is the activity signal, and a footer repainting its
+    // clock moves it for one poll, which would otherwise read as a whole turn
+    // beginning and ending. Long enough to rule those out, short enough that a
+    // quick answer still rings.
+    OptionSpec {
+        name: "agent-minimum-run",
+        kind: OptionKind::Number,
+        status: OptionStatus::Live,
+        default: "3000",
+    },
     // Text that means an agent has stopped to ask you something. Matched
     // case-insensitively against the bottom of the pane; the defaults cover
     // the prompts Claude Code and Codex stop at.
