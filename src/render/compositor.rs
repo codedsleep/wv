@@ -133,6 +133,9 @@ mod tests {
         status_fg: crossterm::style::Color::White,
         status_bg: crossterm::style::Color::DarkBlue,
         accent: crossterm::style::Color::Red,
+        agent_working: crossterm::style::Color::Green,
+        agent_waiting: crossterm::style::Color::Yellow,
+        agent_idle: crossterm::style::Color::DarkGrey,
     };
 
     #[test]

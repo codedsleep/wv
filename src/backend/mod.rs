@@ -68,6 +68,20 @@ pub trait PaneBackend: Send {
     ) -> Result<Option<String>, anyhow::Error> {
         Ok(None)
     }
+
+    /// The name of the foreground job in a pane.
+    ///
+    /// This is what the pane is *running* — the agent, the build, the editor —
+    /// as opposed to the shell that launched it, which is what
+    /// `pane_process_name` reports. A pane sitting at a prompt reports the
+    /// shell, because the shell is then the foreground job. Default:
+    /// `Ok(None)`.
+    async fn pane_foreground_name(
+        &mut self,
+        _pane: PaneId,
+    ) -> Result<Option<String>, anyhow::Error> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

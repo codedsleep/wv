@@ -22,6 +22,9 @@ const TEST_THEME: ThemeConfig = ThemeConfig {
     status_fg: Color::White,
     status_bg: Color::DarkBlue,
     accent: Color::Red,
+    agent_working: Color::Green,
+    agent_waiting: Color::Yellow,
+    agent_idle: Color::DarkGrey,
 };
 
 #[test]

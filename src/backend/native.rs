@@ -243,6 +243,38 @@ impl PaneBackend for NativeBackend {
         }
     }
 
+    /// Read the pane's foreground job from `/proc/<pid>/stat`.
+    ///
+    /// Field 8 of the shell's stat line is `tpgid`: the process group the
+    /// kernel currently gives the terminal's input to. That is the job running
+    /// in the pane, which is the one worth naming — `/proc/<pid>/comm` only
+    /// ever says `fish`.
+    async fn pane_foreground_name(&mut self, pane: PaneId) -> Result<Option<String>, Error> {
+        let Some(pid) = self.panes.get(&pane).and_then(|pane| pane.pid) else {
+            return Ok(None);
+        };
+
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(error) => {
+                tracing::debug!("could not read stat of pane {pane:?} (pid {pid}): {error}");
+                return Ok(None);
+            }
+        };
+
+        let Some(tpgid) = foreground_pgid(&stat) else {
+            return Ok(None);
+        };
+
+        match std::fs::read_to_string(format!("/proc/{tpgid}/comm")) {
+            Ok(name) => Ok(Some(name.trim_end().to_owned())),
+            Err(error) => {
+                tracing::debug!("could not read command of foreground job {tpgid}: {error}");
+                Ok(None)
+            }
+        }
+    }
+
     /// Read a pane's working directory from `/proc/<pid>/cwd`.
     ///
     /// This is the shell's own cwd, so a new pane opens wherever the focused
@@ -264,6 +296,20 @@ impl PaneBackend for NativeBackend {
     }
 }
 
+/// Pull `tpgid` out of a `/proc/<pid>/stat` line.
+///
+/// The second field is the executable name in parentheses and may itself
+/// contain spaces and parentheses, so the fields are counted from the last
+/// `)` rather than split from the start. After it come state, ppid, pgrp,
+/// session, `tty_nr`, tpgid — `tpgid` sixth.
+fn foreground_pgid(stat: &str) -> Option<i32> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let tpgid: i32 = rest.split_whitespace().nth(5)?.parse().ok()?;
+
+    // -1 means the terminal has no foreground process group at all.
+    (tpgid > 0).then_some(tpgid)
+}
+
 fn emit_pane_died(id: PaneId, event_tx: &EventSender, dead: &AtomicBool) {
     if !dead.swap(true, Ordering::SeqCst) {
         let _ = event_tx.blocking_send(BackendEvent::PaneDied(id));
@@ -278,4 +324,39 @@ where
         wait();
         emit_pane_died(id, &event_tx, &dead);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::foreground_pgid;
+
+    /// A real line, trimmed to the fields that matter.
+    #[test]
+    fn reads_tpgid_from_a_stat_line() {
+        let stat = "1234 (fish) S 1 1234 1234 34816 5678 4194304 0 0";
+
+        assert_eq!(foreground_pgid(stat), Some(5678));
+    }
+
+    /// The comm field is not escaped, so a process named `a ) b` would break
+    /// any parser that split from the left.
+    #[test]
+    fn a_command_containing_spaces_and_parens_does_not_shift_the_fields() {
+        let stat = "1234 (od) ) (weird) S 1 1234 1234 34816 5678 4194304 0 0";
+
+        assert_eq!(foreground_pgid(stat), Some(5678));
+    }
+
+    #[test]
+    fn no_foreground_process_group_is_none() {
+        let stat = "1234 (fish) S 1 1234 1234 34816 -1 4194304 0 0";
+
+        assert_eq!(foreground_pgid(stat), None);
+    }
+
+    #[test]
+    fn a_truncated_stat_line_is_none() {
+        assert_eq!(foreground_pgid("1234 (fish) S 1"), None);
+        assert_eq!(foreground_pgid("nonsense"), None);
+    }
 }
