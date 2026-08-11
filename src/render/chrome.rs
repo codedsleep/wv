@@ -36,6 +36,11 @@ pub struct WorkspaceIndicator {
     pub pane_count: usize,
 }
 
+/// Draw every pane's border.
+///
+/// Two passes, unfocused first. Adjacent panes share border cells, so whoever
+/// draws last owns the colour of the shared cell — and that has to be the
+/// focused pane, or its highlight disappears wherever it touches a neighbour.
 pub fn draw_borders(
     surface: &mut Surface,
     tree: &Node,
@@ -45,10 +50,29 @@ pub fn draw_borders(
     timeline: &Timeline,
     pane_titles: bool,
 ) {
+    draw_border_pass(surface, tree, panes, focused, theme, timeline, pane_titles, false);
+    draw_border_pass(surface, tree, panes, focused, theme, timeline, pane_titles, true);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_border_pass(
+    surface: &mut Surface,
+    tree: &Node,
+    panes: &[Pane],
+    focused: Option<PaneId>,
+    theme: ThemeConfig,
+    timeline: &Timeline,
+    pane_titles: bool,
+    focused_pass: bool,
+) {
     match tree {
         Node::Leaf {
             pane, rect_target, ..
         } => {
+            if (focused == Some(*pane)) != focused_pass {
+                return;
+            }
+
             let color = timeline.pane_border_color(
                 *pane,
                 focused,
@@ -65,8 +89,12 @@ pub fn draw_borders(
             }
         }
         Node::Internal { a, b, .. } => {
-            draw_borders(surface, a, panes, focused, theme, timeline, pane_titles);
-            draw_borders(surface, b, panes, focused, theme, timeline, pane_titles);
+            draw_border_pass(
+                surface, a, panes, focused, theme, timeline, pane_titles, focused_pass,
+            );
+            draw_border_pass(
+                surface, b, panes, focused, theme, timeline, pane_titles, focused_pass,
+            );
         }
     }
 }
@@ -190,6 +218,57 @@ pub fn leaf_count(tree: Option<&Node>) -> usize {
     tree.map_or(0, count_leaves)
 }
 
+/// Which way a box-drawing glyph connects, as a bitmask.
+///
+/// Adjacent panes share border cells, so a glyph landing on one already drawn
+/// has to *merge* with it — a corner arriving on a straight run is a
+/// T-junction, not a corner. Turning both into edge sets and back is the
+/// simplest way to get every combination right.
+mod edges {
+    pub const NORTH: u8 = 1;
+    pub const SOUTH: u8 = 2;
+    pub const EAST: u8 = 4;
+    pub const WEST: u8 = 8;
+
+    /// The edges a glyph connects along, or `None` if it is not a border.
+    pub const fn of(ch: char) -> Option<u8> {
+        Some(match ch {
+            '─' => EAST | WEST,
+            '│' => NORTH | SOUTH,
+            '┌' => SOUTH | EAST,
+            '┐' => SOUTH | WEST,
+            '└' => NORTH | EAST,
+            '┘' => NORTH | WEST,
+            '├' => NORTH | SOUTH | EAST,
+            '┤' => NORTH | SOUTH | WEST,
+            '┬' => EAST | WEST | SOUTH,
+            '┴' => EAST | WEST | NORTH,
+            '┼' => NORTH | SOUTH | EAST | WEST,
+            _ => return None,
+        })
+    }
+
+    /// The glyph that connects exactly these edges.
+    pub const fn glyph(mask: u8) -> char {
+        match mask {
+            m if m == EAST | WEST => '─',
+            m if m == NORTH | SOUTH => '│',
+            m if m == SOUTH | EAST => '┌',
+            m if m == SOUTH | WEST => '┐',
+            m if m == NORTH | EAST => '└',
+            m if m == NORTH | WEST => '┘',
+            m if m == NORTH | SOUTH | EAST => '├',
+            m if m == NORTH | SOUTH | WEST => '┤',
+            m if m == EAST | WEST | SOUTH => '┬',
+            m if m == EAST | WEST | NORTH => '┴',
+            m if m == NORTH | SOUTH | EAST | WEST => '┼',
+            // A lone stub — one edge, or none — reads best as a straight run.
+            m if m & (NORTH | SOUTH) != 0 => '│',
+            _ => '─',
+        }
+    }
+}
+
 fn draw_rect_border(surface: &mut Surface, rect: Rect, color: Color) {
     if rect.w == 0 || rect.h == 0 {
         return;
@@ -198,21 +277,42 @@ fn draw_rect_border(surface: &mut Surface, rect: Rect, color: Color) {
     let right = rect.x.saturating_add(rect.w.saturating_sub(1));
     let bottom = rect.y.saturating_add(rect.h.saturating_sub(1));
 
-    // Shared edges between adjacent panes overdraw, T-junctions deferred.
-    for x in rect.x..=right {
-        surface.set(x, rect.y, border_cell('─', color));
-        surface.set(x, bottom, border_cell('─', color));
+    // The runs stop short of the corners, which are set explicitly below.
+    // Merging a run's edges into a corner would invent connections that are
+    // not there — a top-left corner would pick up north and west and come out
+    // as a cross.
+    for x in (rect.x.saturating_add(1))..right {
+        merge_border(surface, x, rect.y, '─', color);
+        merge_border(surface, x, bottom, '─', color);
     }
 
-    for y in rect.y..=bottom {
-        surface.set(rect.x, y, border_cell('│', color));
-        surface.set(right, y, border_cell('│', color));
+    for y in (rect.y.saturating_add(1))..bottom {
+        merge_border(surface, rect.x, y, '│', color);
+        merge_border(surface, right, y, '│', color);
     }
 
-    surface.set(rect.x, rect.y, border_cell('┌', color));
-    surface.set(right, rect.y, border_cell('┐', color));
-    surface.set(rect.x, bottom, border_cell('└', color));
-    surface.set(right, bottom, border_cell('┘', color));
+    merge_border(surface, rect.x, rect.y, '┌', color);
+    merge_border(surface, right, rect.y, '┐', color);
+    merge_border(surface, rect.x, bottom, '└', color);
+    merge_border(surface, right, bottom, '┘', color);
+}
+
+/// Draw a border glyph, joining it to whatever border is already there.
+///
+/// Panes that share a divider draw over each other, so a corner landing on an
+/// existing run becomes the junction that connects both — otherwise the last
+/// pane drawn wins and its neighbours look like they are missing edges.
+fn merge_border(surface: &mut Surface, x: u16, y: u16, ch: char, color: Color) {
+    let Some(incoming) = edges::of(ch) else {
+        return;
+    };
+
+    let existing = surface
+        .get(x, y)
+        .and_then(|cell| edges::of(cell.ch))
+        .unwrap_or(0);
+
+    surface.set(x, y, border_cell(edges::glyph(existing | incoming), color));
 }
 
 fn border_cell(ch: char, color: Color) -> Cell {
@@ -317,6 +417,35 @@ mod tests {
         status_bg: Color::DarkBlue,
         accent: Color::Red,
     };
+
+    /// Every combination of edges resolves to the right glyph, and merging is
+    /// order-independent — a corner arriving on a run must give the same
+    /// junction as a run arriving on a corner.
+    #[test]
+    fn border_glyphs_merge_into_junctions() {
+        use super::edges;
+
+        for (a, b, expected) in [
+            ('─', '│', '┼'),
+            ('┌', '─', '┬'),
+            ('┌', '│', '├'),
+            ('┘', '─', '┴'),
+            ('┐', '│', '┤'),
+            ('└', '┐', '┼'),
+            ('─', '─', '─'),
+            ('│', '│', '│'),
+        ] {
+            let merged = edges::glyph(
+                edges::of(a).expect("a border") | edges::of(b).expect("a border"),
+            );
+            assert_eq!(merged, expected, "{a} + {b}");
+
+            let reversed = edges::glyph(
+                edges::of(b).expect("a border") | edges::of(a).expect("a border"),
+            );
+            assert_eq!(reversed, expected, "{b} + {a} should match {a} + {b}");
+        }
+    }
 
     #[test]
     fn draw_borders_marks_focused_and_unfocused_panes() {
