@@ -3558,6 +3558,7 @@ impl App {
         // Every window, because the loop below resizes every pane in the
         // session and reads each one's rect out of its own window's tree.
         self.recompute_every_layout();
+        self.snap_hidden_layouts();
 
         // Every pane gets the size of its own slot in the new layout. Handing
         // them all the terminal size instead leaves each one drawing a screen
@@ -3777,6 +3778,30 @@ impl App {
             let zoomed = workspace.zoomed;
             if let Some(root) = workspace.root.as_mut() {
                 Self::lay_out(root, root_rect, zoomed);
+            }
+        }
+    }
+
+    /// Put the windows nobody is looking at straight at their new geometry.
+    ///
+    /// The compositor blits a pane at `rect_current`, and the only thing that
+    /// moves it is a tween. A window you have not switched to has none in
+    /// flight, so after a resize it keeps being drawn into the slots the old
+    /// terminal size gave it — content squeezed into a corner and clipped,
+    /// inside borders that are already in the right place because those come
+    /// from `rect_target`. There is nothing to animate towards on a screen
+    /// nobody can see, so the rects just snap.
+    ///
+    /// The current window is left alone: it may have a split or close mid-flight
+    /// that the timeline owns, and whoever resizes it settles that themselves.
+    fn snap_hidden_layouts(&mut self) {
+        let current = self.current_workspace;
+        for (index, workspace) in self.workspaces.iter_mut().enumerate() {
+            if index == current {
+                continue;
+            }
+            if let Some(root) = workspace.root.as_mut() {
+                snap_leaves_to_target(root);
             }
         }
     }
@@ -4904,6 +4929,34 @@ mod tests {
                 app.pane(pane).expect("pane exists").size(),
                 (148, 71),
                 "emulator grid follows the PTY for hidden windows too"
+            );
+        }
+    }
+
+    /// The compositor blits a pane at `rect_current`, and only the timeline
+    /// moves that. A window nobody has switched to has no tween in flight, so
+    /// after a resize its panes keep being drawn into the slots the old
+    /// terminal size gave them — squeezed into a corner, clipped narrow, while
+    /// the borders around them (drawn from `rect_target`) sit correctly.
+    #[tokio::test]
+    async fn a_host_resize_moves_where_hidden_windows_are_drawn_too() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.execute(command("new-window -t :4")).await.expect("new window");
+        app.execute(command("split-window -h")).await.expect("split");
+        app.execute(command("select-window -t :1")).await.expect("back to 1");
+        let background: Vec<PaneId> = app.workspaces[3].leaf_panes();
+        assert_eq!(background.len(), 2, "window 4 has both panes");
+
+        app.resize_to(300, 74).await;
+
+        for pane in background {
+            let drawn = app.leaf_rect_current(pane).expect("laid out");
+            let target = app.leaf_rect_target(pane).expect("laid out");
+            assert_eq!(
+                drawn,
+                FRect::from(target),
+                "hidden pane {pane:?} is still drawn at its old slot"
             );
         }
     }
