@@ -215,37 +215,79 @@ impl Node {
         if first == second {
             return false;
         }
-        if self.find_leaf(first).is_none() || self.find_leaf(second).is_none() {
+        let (Some(first_current), Some(second_current)) =
+            (self.leaf_current(first), self.leaf_current(second))
+        else {
             return false;
-        }
+        };
 
         // One pass, each leaf visited once. Replacing them one at a time
         // instead would find the leaf just written and swap it straight back.
-        self.walk_leaves_mut(&mut |pane| {
+        //
+        // The current rect travels with the pane rather than staying with the
+        // slot: it is where the pane is drawn right now, so carrying it over
+        // makes the pane slide from where it was into its new slot. Leaving it
+        // behind teleports the pane and, because the slot's rect already sits
+        // at its target, leaves it with no tween — and the resize that runs
+        // when a tween completes never happens.
+        self.walk_leaves_mut(&mut |pane, rect_current| {
             if *pane == first {
                 *pane = second;
+                *rect_current = second_current;
             } else if *pane == second {
                 *pane = first;
+                *rect_current = first_current;
             }
         });
 
         true
     }
 
+    /// Every leaf's pane and the rect it is currently drawn at, in layout order.
+    pub fn leaf_placements(&self) -> Vec<(PaneId, FRect)> {
+        let mut out = Vec::new();
+        self.collect_placements(&mut out);
+        out
+    }
+
+    fn collect_placements(&self, out: &mut Vec<(PaneId, FRect)>) {
+        match self {
+            Self::Leaf {
+                pane, rect_current, ..
+            } => out.push((*pane, *rect_current)),
+            Self::Internal { a, b, .. } => {
+                a.collect_placements(out);
+                b.collect_placements(out);
+            }
+        }
+    }
+
     /// Overwrite every leaf's pane in layout order, for `rotate-window`.
     ///
-    /// The shape is untouched; only which pane sits where changes.
-    pub fn set_leaves(&mut self, panes: &mut impl Iterator<Item = PaneId>) {
-        self.walk_leaves_mut(&mut |pane| {
-            if let Some(next) = panes.next() {
+    /// The shape is untouched; only which pane sits where changes. Each pane
+    /// brings its current rect with it, for the reason [`Self::swap_leaves`]
+    /// explains.
+    pub fn set_leaves(&mut self, panes: &mut impl Iterator<Item = (PaneId, FRect)>) {
+        self.walk_leaves_mut(&mut |pane, rect_current| {
+            if let Some((next, next_current)) = panes.next() {
                 *pane = next;
+                *rect_current = next_current;
             }
         });
     }
 
-    fn walk_leaves_mut(&mut self, visit: &mut impl FnMut(&mut PaneId)) {
+    fn leaf_current(&self, pane: PaneId) -> Option<FRect> {
+        match self.find_leaf(pane)? {
+            Self::Leaf { rect_current, .. } => Some(*rect_current),
+            Self::Internal { .. } => None,
+        }
+    }
+
+    fn walk_leaves_mut(&mut self, visit: &mut impl FnMut(&mut PaneId, &mut FRect)) {
         match self {
-            Self::Leaf { pane, .. } => visit(pane),
+            Self::Leaf {
+                pane, rect_current, ..
+            } => visit(pane, rect_current),
             Self::Internal { a, b, .. } => {
                 a.walk_leaves_mut(visit);
                 b.walk_leaves_mut(visit);
@@ -744,6 +786,42 @@ mod tests {
                 );
             }
             Node::Internal { .. } => unreachable!("test starts with a leaf"),
+        }
+    }
+
+    #[test]
+    fn swap_carries_each_pane_current_rect_to_its_new_slot() {
+        let mut tree = leaf(1);
+        tree.split_focused(PaneId(1), Split::Vertical, PaneId(2));
+        tree.compute_layout(ROOT);
+        // Both panes at rest in their own slots, as they are after any layout
+        // settles.
+        snap_current_to_target(&mut tree);
+        let left = tree.leaf_current(PaneId(1)).expect("leaf exists");
+        let right = tree.leaf_current(PaneId(2)).expect("leaf exists");
+        assert_ne!(left, right);
+
+        assert!(tree.swap_leaves(PaneId(1), PaneId(2)));
+
+        // Each pane still sits where it was drawn, so it has somewhere to
+        // animate from — and a resize to run when it arrives.
+        assert_eq!(tree.leaf_current(PaneId(1)), Some(left));
+        assert_eq!(tree.leaf_current(PaneId(2)), Some(right));
+        assert_eq!(rect_for(&tree, 1), ROOT.split(Split::Vertical, 0.5).1);
+        assert_eq!(rect_for(&tree, 2), ROOT.split(Split::Vertical, 0.5).0);
+    }
+
+    fn snap_current_to_target(node: &mut Node) {
+        match node {
+            Node::Leaf {
+                rect_current,
+                rect_target,
+                ..
+            } => *rect_current = FRect::from(*rect_target),
+            Node::Internal { a, b, .. } => {
+                snap_current_to_target(a);
+                snap_current_to_target(b);
+            }
         }
     }
 
