@@ -388,6 +388,17 @@ pub struct App {
     /// far too expensive to redo on every frame. A prompt appears at the speed
     /// a person reads, so the poll interval is resolution enough.
     agents_asking: HashMap<PaneId, bool>,
+    /// A hash of what each agent pane's screen said at the last poll.
+    ///
+    /// This is the activity signal: an agent counts as working while its screen
+    /// keeps changing, not while its PTY keeps producing bytes. The two are not
+    /// the same, and the difference is the whole point — an idle Claude Code
+    /// writes eight bytes a second forever to blink its cursor, and an idle
+    /// Codex around fifty. Bytes alone therefore never stop arriving, which
+    /// pinned every real agent to `Working` for good and meant the bell never
+    /// rang. A blinking cursor moves no cells, so the hash holds still through
+    /// it and moves for output anyone could actually read.
+    agent_screens: HashMap<PaneId, u64>,
     /// The indicators the status bar was last drawn with, so a frame is only
     /// forced when one of them actually changes.
     agent_indicators: Vec<chrome::AgentIndicator>,
@@ -395,6 +406,21 @@ pub struct App {
     /// stops can be spotted. Only transitions ring the bell; the state itself
     /// says nothing about when it changed.
     agent_states: HashMap<PaneId, agent::AgentState>,
+    /// When each pane's current run of `Working` began, so a finish can be
+    /// told from a flicker.
+    ///
+    /// The screen is the activity signal, and plenty of things move it that are
+    /// not an agent working: a footer repainting its clock or token count marks
+    /// the pane busy for one poll and then lets it fall quiet, which reads as a
+    /// finish and rings, over and over, for a pane that has been idle all
+    /// along. A run has to have lasted to have finished.
+    agent_working_since: HashMap<PaneId, std::time::Instant>,
+    /// A pane whose agent was still working when the pane itself ended, which
+    /// is the one finish no poll of the panes can find: by the time anything
+    /// looks, there is no pane left to look at. Recorded where the pane dies
+    /// and rung on the next tick, so it joins whatever else finished in the
+    /// same breath rather than ringing over it.
+    agent_died_working: Option<PaneId>,
     backend: BoxedBackend,
     output_rx: mpsc::Receiver<(PaneId, Bytes)>,
     event_rx: mpsc::Receiver<BackendEvent>,
@@ -808,8 +834,11 @@ impl App {
             agents: AgentTracker::default(),
             agents_polled: std::time::Instant::now(),
             agents_asking: HashMap::new(),
+            agent_screens: HashMap::new(),
             agent_indicators: Vec::new(),
             agent_states: HashMap::new(),
+            agent_working_since: HashMap::new(),
+            agent_died_working: None,
             backend: backend_parts.backend,
             output_rx: backend_parts.output_rx,
             event_rx: backend_parts.event_rx,
@@ -1071,7 +1100,7 @@ impl App {
         let now = std::time::Instant::now();
         if now.duration_since(self.agents_polled) >= AGENT_POLL_INTERVAL {
             self.agents_polled = now;
-            self.refresh_agents_asking();
+            self.refresh_agent_screens();
             self.poll_agent_commands().await;
         }
 
@@ -1091,20 +1120,104 @@ impl App {
     /// the desktop — and it reaches you through ssh, which nothing weave could
     /// play locally would. Two agents finishing in the same poll ring once,
     /// because two bells a millisecond apart are one sound anyway.
+    ///
+    /// Walked over what was running last tick rather than what is running now,
+    /// because an agent that exits is news the same way one that goes quiet is,
+    /// and it leaves no entry to walk over: a one-shot `claude -p` ends when its
+    /// answer does, and an agent started as its pane's own command takes the
+    /// pane with it. Gone counts as no longer working, so those ring; an agent
+    /// that was already sitting idle when it exited does not, because quitting
+    /// something that had already stopped is not it finishing.
     fn tick_agent_bell(&mut self) {
         let states = self.agent_pane_states();
+        let now = std::time::Instant::now();
+        // Taken whether or not it is going to ring, for the same reason the
+        // states below are recorded with the bell off: a finish nobody was
+        // listening for does not queue up to ring later.
+        let died = self.agent_died_working.take();
+        let focused = self.current().focused;
+        let least = self.agent_minimum_run();
 
-        let finished = self.options.flag("agent-bell")
-            && states.iter().any(|(pane, state)| {
-                agent::just_finished(self.agent_states.get(pane).copied(), *state)
-            });
+        let mut finished = self.agent_states.iter().any(|(pane, previous)| {
+            let current = states
+                .get(pane)
+                .copied()
+                .unwrap_or(agent::AgentState::Idle);
+            agent::just_finished(Some(*previous), current) && self.worth_a_bell(*pane, focused, least, now)
+        });
+        // A pane that died taking its agent with it is judged the same way,
+        // except that it is gone: its run length is whatever it had managed
+        // before it went, and it cannot be the pane you are typing into,
+        // because closing one yourself never records a death.
+        if let Some(pane) = died {
+            finished |= self.ran_long_enough(pane, least, now);
+        }
+        finished &= self.options.flag("agent-bell");
 
         // Recorded even with the bell off, so turning it on mid-session does
-        // not ring for everything that stopped while it was off.
+        // not ring for everything that stopped while it was off. The run
+        // stamps go last, after every question about how long a pane had been
+        // working has been asked: a pane that stopped this tick still needs
+        // the start of the run it just ended.
+        for (pane, state) in &states {
+            if *state == agent::AgentState::Working {
+                self.agent_working_since.entry(*pane).or_insert(now);
+            } else {
+                self.agent_working_since.remove(pane);
+            }
+        }
+        self.agent_working_since
+            .retain(|pane, _| states.contains_key(pane));
         self.agent_states = states;
 
         if finished {
             self.ring_bell();
+        }
+    }
+
+    /// Whether a pane that just stopped is worth telling you about.
+    ///
+    /// Two things disqualify it. The pane you are typing into is one: your own
+    /// keystrokes move the screen exactly like output does, so a message typed
+    /// to an agent reads as the agent working and pressing send reads as it
+    /// finishing. You are already looking at that pane, so it is never news.
+    /// The other is a run too short to have been one — see
+    /// [`Self::ran_long_enough`].
+    fn worth_a_bell(
+        &self,
+        pane: PaneId,
+        focused: Option<PaneId>,
+        least: Duration,
+        now: std::time::Instant,
+    ) -> bool {
+        focused != Some(pane) && self.ran_long_enough(pane, least, now)
+    }
+
+    /// Whether a pane's run of `Working` lasted long enough to count.
+    ///
+    /// A screen that moves once and settles is a repaint, not a turn: the
+    /// clock in an agent's footer ticking over marks the pane busy for a
+    /// single poll, and without this every one of those would ring.
+    fn ran_long_enough(&self, pane: PaneId, least: Duration, now: std::time::Instant) -> bool {
+        self.agent_working_since
+            .get(&pane)
+            .is_some_and(|since| now.duration_since(*since) >= least)
+    }
+
+    /// How long an agent has to have been working before stopping is news.
+    fn agent_minimum_run(&self) -> Duration {
+        Duration::from_millis(self.options.number("agent-minimum-run").unwrap_or(3_000))
+    }
+
+    /// Remember that a pane died with an agent still working in it.
+    ///
+    /// Recorded rather than rung on the spot so that a window's worth of panes
+    /// dying together is still one bell, and so it is dropped unheard when
+    /// nobody is attached, like every other transition that happens while no
+    /// one is watching.
+    fn note_agent_pane_died(&mut self, pane: PaneId) {
+        if self.is_watched() && self.agent_states.get(&pane) == Some(&agent::AgentState::Working) {
+            self.agent_died_working = Some(pane);
         }
     }
 
@@ -1145,32 +1258,48 @@ impl App {
         }
     }
 
-    /// Re-read which panes are sitting at a question.
+    /// Re-read what each agent pane's screen says.
     ///
-    /// Answering that means reading a pane's entire screen back as text and
-    /// scanning it, so it happens at the poll interval rather than per frame.
-    fn refresh_agents_asking(&mut self) {
+    /// Two things come out of it: whether the pane is sitting at a question,
+    /// and whether it changed at all since the last poll — which is what
+    /// "working" means. Both want the pane's entire screen back as text, which
+    /// is far too expensive per frame, so they share one capture at the poll
+    /// interval. A prompt appears at the speed a person reads and so does the
+    /// output above it, making 500ms resolution enough for either.
+    fn refresh_agent_screens(&mut self) {
         let patterns = agent::parse_list(
             self.options
                 .get("agent-waiting-patterns")
                 .unwrap_or_default(),
         );
+        let now = std::time::Instant::now();
 
         self.agents_asking.clear();
-        if patterns.is_empty() {
-            return;
-        }
 
         for pane in self.pane_ids() {
             // Only panes running an agent are ever asked about, so scanning
             // the rest would be work nothing reads.
             if self.agents.foreground(pane).is_none() {
+                self.agent_screens.remove(&pane);
                 continue;
             }
-            let asking = self.pane(pane).is_some_and(|pane| {
-                agent::looks_like_a_question(&pane.capture_lines(), &patterns)
-            });
+            let Some(lines) = self.pane(pane).map(Pane::capture_lines) else {
+                continue;
+            };
+
+            // No patterns means nothing is ever waiting, but the screen still
+            // has to be hashed: turning the question off must not also turn
+            // off the bell.
+            let asking = !patterns.is_empty() && agent::looks_like_a_question(&lines, &patterns);
             self.agents_asking.insert(pane, asking);
+
+            let hash = hash_screen(&lines);
+            // A pane first seen counts as having changed, so an agent that is
+            // already mid-run when weave starts watching reads as working
+            // rather than having to change twice before it registers.
+            if self.agent_screens.insert(pane, hash) != Some(hash) {
+                self.agents.note_output(pane, now);
+            }
         }
     }
 
@@ -1550,8 +1679,10 @@ impl App {
                     self.tick(dt).await?;
                 }
                 Some((id, bytes)) = self.output_rx.recv() => {
-                    // Output is the signal the agent indicators run on.
-                    self.agents.note_output(id, std::time::Instant::now());
+                    // Bytes land in the emulator here; whether they amounted to
+                    // anything is read off the screen at the agent poll, since
+                    // an idle agent's cursor blink arrives here just as output
+                    // does and means nothing.
                     if let Some(replies) = self.pane_mut(id).map(|pane| pane.process(&bytes)) {
                         self.dirty = true;
                         // A pane that asked its terminal a question is waiting
@@ -3552,6 +3683,11 @@ impl App {
         match event {
             BackendEvent::PaneDied(id) => {
                 tracing::info!("pane died: {id:?}");
+                // Before the pane goes, because removing it takes what it was
+                // doing with it. Only a pane that ended on its own arrives
+                // here; closing one deliberately kills it and drops it in the
+                // same breath, and a pane you closed yourself is not news.
+                self.note_agent_pane_died(id);
                 self.remove_pane(id);
                 let owning_ws = self.workspace_of_pane(id);
                 if let Some(ws_idx) = owning_ws {
@@ -4013,6 +4149,8 @@ impl App {
         self.panes.retain(|pane| pane.id() != id);
         self.agents.forget(id);
         self.agent_states.remove(&id);
+        self.agents_asking.remove(&id);
+        self.agent_screens.remove(&id);
         // Retire the `%N` with the pane. Numbers are never reused, so a stale
         // `%N` in a script fails loudly instead of hitting somebody else's pane.
         self.pane_numbers.remove(&id);
@@ -4105,8 +4243,11 @@ impl App {
             agents: AgentTracker::default(),
             agents_polled: std::time::Instant::now(),
             agents_asking: HashMap::new(),
+            agent_screens: HashMap::new(),
             agent_indicators: Vec::new(),
             agent_states: HashMap::new(),
+            agent_working_since: HashMap::new(),
+            agent_died_working: None,
             backend,
             output_rx,
             event_rx,
@@ -4337,6 +4478,21 @@ fn collect_leaf_targets(node: &Node, targets: &mut Vec<(PaneId, Rect)>) {
 
 fn frame_interval(target_fps: u16) -> Duration {
     Duration::from_nanos(1_000_000_000 / u64::from(target_fps))
+}
+
+/// Condense a pane's visible text into one value to compare against the last
+/// poll's.
+///
+/// Text only: colour and cursor position are deliberately left out. An agent
+/// repainting the same words in the same places has not done anything you
+/// would want to be told about, and the cursor moving on its own — which is
+/// what a blink is — is the noise this whole approach exists to ignore.
+fn hash_screen(lines: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    lines.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The host this session is on, for the right end of the status bar — tmux's
@@ -4946,6 +5102,30 @@ mod tests {
         );
     }
 
+    /// Move the focus off `pane`.
+    ///
+    /// The pane you are typing into never rings, so a test about a bell has to
+    /// be looking somewhere else — which is also the real case the bell is for.
+    async fn look_away_from(app: &mut App, pane: PaneId) {
+        app.execute(command("split-window -h")).await.expect("split");
+        assert_ne!(
+            app.current().focused,
+            Some(pane),
+            "the split should have taken the focus off the agent"
+        );
+    }
+
+    /// Backdate the start of a pane's run, so stopping reads as finishing a
+    /// turn rather than as a footer repainting for a single poll.
+    fn worked_a_while(app: &mut App, pane: PaneId) {
+        app.agent_working_since.insert(
+            pane,
+            std::time::Instant::now()
+                .checked_sub(Duration::from_secs(30))
+                .expect("the clock has been up for 30s"),
+        );
+    }
+
     /// Whether a client was sent a bell, draining whatever else is queued.
     fn heard_a_bell(rx: &mut mpsc::UnboundedReceiver<ServerToClient>) -> bool {
         let mut heard = false;
@@ -4968,12 +5148,14 @@ mod tests {
         app.attach_client(1, 80, 24, true, frames).await;
 
         let pane = app.pane_ids()[0];
+        look_away_from(&mut app, pane).await;
         app.agents.set_foreground(pane, Some("claude".to_owned()));
         app.agents.note_output(pane, std::time::Instant::now());
 
         app.tick_agent_bell();
         assert!(!heard_a_bell(&mut rx), "an agent still working is not news");
 
+        worked_a_while(&mut app, pane);
         go_quiet(&mut app, pane);
         app.tick_agent_bell();
         assert!(heard_a_bell(&mut rx), "the agent stopped; say so");
@@ -4983,6 +5165,298 @@ mod tests {
             !heard_a_bell(&mut rx),
             "it stopped once, so it is worth one bell"
         );
+    }
+
+    /// The bug this whole approach exists for: a real agent's PTY never goes
+    /// quiet. Idle Claude Code writes eight bytes a second and idle Codex
+    /// around fifty, purely to blink a cursor, so byte arrival said "working"
+    /// forever, the state never left `Working`, and the bell never rang for
+    /// any agent anyone actually uses. None of that traffic changes a cell.
+    #[tokio::test]
+    async fn a_blinking_cursor_is_not_an_agent_still_working() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        look_away_from(&mut app, pane).await;
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        if let Some(p) = app.pane_mut(pane) {
+            p.process(b"thinking...\r\n");
+        }
+        app.refresh_agent_screens();
+
+        app.tick_agent_bell();
+        assert!(!heard_a_bell(&mut rx), "an agent still working is not news");
+        worked_a_while(&mut app, pane);
+
+        // What an idle agent actually sends: hide the cursor, put it back,
+        // show it again. Not one cell of text differs afterwards.
+        go_quiet(&mut app, pane);
+        for _ in 0..5 {
+            if let Some(p) = app.pane_mut(pane) {
+                p.process(b"\x1b[?25l\x1b[1;1H\x1b[?25h");
+            }
+            app.refresh_agent_screens();
+        }
+
+        app.tick_agent_bell();
+        assert!(
+            heard_a_bell(&mut rx),
+            "the screen stopped changing, so the agent stopped"
+        );
+    }
+
+    /// The other half of the same rule: output that does change the screen
+    /// keeps the agent working, so the bell waits for it to genuinely finish.
+    #[tokio::test]
+    async fn output_that_changes_the_screen_still_counts_as_working() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        look_away_from(&mut app, pane).await;
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.refresh_agent_screens();
+        app.tick_agent_bell();
+        let _ = heard_a_bell(&mut rx);
+        worked_a_while(&mut app, pane);
+
+        for line in 0..5 {
+            // Backdate the activity first: without a fresh change this pane
+            // would read as stopped, so only the new text can keep it working.
+            go_quiet(&mut app, pane);
+            if let Some(p) = app.pane_mut(pane) {
+                p.process(format!("line {line}\r\n").as_bytes());
+            }
+            app.refresh_agent_screens();
+            app.tick_agent_bell();
+            assert!(
+                !heard_a_bell(&mut rx),
+                "it printed something new; it has not finished"
+            );
+        }
+
+        go_quiet(&mut app, pane);
+        app.refresh_agent_screens();
+        app.tick_agent_bell();
+        assert!(heard_a_bell(&mut rx), "now it has stopped; say so");
+    }
+
+    /// An agent that ends when its work does — a one-shot run, or one started
+    /// as its pane's own command, which closes the pane on the way out — has
+    /// finished in the only sense that matters, so it rings like any other.
+    #[tokio::test]
+    async fn an_agent_that_exits_while_working_rings_the_bell() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        look_away_from(&mut app, pane).await;
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_output(pane, std::time::Instant::now());
+        app.tick_agent_bell();
+        assert!(!heard_a_bell(&mut rx), "an agent still working is not news");
+        worked_a_while(&mut app, pane);
+
+        // The agent is gone: either the shell is back in the foreground, or
+        // the pane went with it. Both leave the pane out of the agent states.
+        app.agents.set_foreground(pane, Some("fish".to_owned()));
+        app.tick_agent_bell();
+        assert!(heard_a_bell(&mut rx), "the run ended; say so");
+
+        app.tick_agent_bell();
+        assert!(
+            !heard_a_bell(&mut rx),
+            "it ended once, so it is worth one bell"
+        );
+    }
+
+    /// An agent started as its pane's own command takes the pane with it when
+    /// it ends, so the finish has to be caught where the pane dies — after the
+    /// removal there is nothing left to poll.
+    #[tokio::test]
+    async fn a_pane_dying_with_a_working_agent_rings_the_bell() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_output(pane, std::time::Instant::now());
+        app.tick_agent_bell();
+        assert!(!heard_a_bell(&mut rx), "an agent still working is not news");
+        worked_a_while(&mut app, pane);
+
+        app.handle_backend_event(crate::backend::BackendEvent::PaneDied(pane));
+        app.tick_agent_bell();
+        assert!(heard_a_bell(&mut rx), "the pane ended mid-run; say so");
+
+        app.tick_agent_bell();
+        assert!(
+            !heard_a_bell(&mut rx),
+            "it ended once, so it is worth one bell"
+        );
+    }
+
+    /// Closing a pane yourself kills it, which arrives as the same death. You
+    /// were there — you do not need to be told.
+    #[tokio::test]
+    async fn closing_a_pane_yourself_does_not_ring() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_output(pane, std::time::Instant::now());
+        app.tick_agent_bell();
+
+        app.execute(command("kill-pane")).await.expect("pane killed");
+        // The kill drops the pane, so the death that follows finds nothing.
+        app.handle_backend_event(crate::backend::BackendEvent::PaneDied(pane));
+        app.tick_agent_bell();
+        assert!(!heard_a_bell(&mut rx), "you closed it; that is not news");
+    }
+
+    /// Quitting an agent that had already stopped is not it finishing — the
+    /// news was the stop, and that already rang.
+    #[tokio::test]
+    async fn quitting_an_idle_agent_does_not_ring() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        look_away_from(&mut app, pane).await;
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_output(pane, std::time::Instant::now());
+        app.tick_agent_bell();
+        worked_a_while(&mut app, pane);
+
+        go_quiet(&mut app, pane);
+        app.tick_agent_bell();
+        assert!(heard_a_bell(&mut rx), "the agent stopped; that is the news");
+
+        app.agents.set_foreground(pane, Some("fish".to_owned()));
+        app.tick_agent_bell();
+        assert!(
+            !heard_a_bell(&mut rx),
+            "quitting what had already stopped is not a second finish"
+        );
+    }
+
+    /// Typing to an agent moves its screen exactly like the agent's own output
+    /// does, so writing a message read as a turn and sending it read as that
+    /// turn ending — a bell for every prompt, at the one pane you were already
+    /// looking at.
+    #[tokio::test]
+    async fn typing_at_the_focused_agent_does_not_ring() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        assert_eq!(app.current().focused, Some(pane), "you are typing here");
+
+        // A message typed a character at a time, then a pause for thought.
+        for letter in b"write me a test" {
+            if let Some(p) = app.pane_mut(pane) {
+                p.process(&[*letter]);
+            }
+            app.refresh_agent_screens();
+            app.tick_agent_bell();
+        }
+        worked_a_while(&mut app, pane);
+        go_quiet(&mut app, pane);
+        app.tick_agent_bell();
+
+        assert!(
+            !heard_a_bell(&mut rx),
+            "you stopped typing; the agent has not finished anything"
+        );
+    }
+
+    /// An idle agent still repaints: a footer clock ticking over changes a cell
+    /// and nothing else. That marked the pane busy for one poll and let it fall
+    /// quiet again, which read as a whole turn beginning and ending, so an
+    /// agent nobody had touched rang every time its clock moved.
+    #[tokio::test]
+    async fn a_screen_that_moves_once_and_settles_does_not_ring() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        look_away_from(&mut app, pane).await;
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.refresh_agent_screens();
+        app.tick_agent_bell();
+        let _ = heard_a_bell(&mut rx);
+
+        // The clock in the footer, ticking over while nothing else happens.
+        for minute in 0..5 {
+            if let Some(p) = app.pane_mut(pane) {
+                p.process(format!("\x1b[24;1Hidle 12:{minute:02}").as_bytes());
+            }
+            app.refresh_agent_screens();
+            app.tick_agent_bell();
+            go_quiet(&mut app, pane);
+            app.tick_agent_bell();
+            assert!(
+                !heard_a_bell(&mut rx),
+                "a repaint is not a turn, however often it repeats"
+            );
+        }
+    }
+
+    /// The rule the two above must not cost: an agent that really did work,
+    /// in a window you are not looking at, is the whole point of the bell.
+    #[tokio::test]
+    async fn a_real_run_in_an_unfocused_pane_still_rings() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        look_away_from(&mut app, pane).await;
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+
+        // Output over several polls, which is what a turn looks like.
+        for line in 0..6 {
+            if let Some(p) = app.pane_mut(pane) {
+                p.process(format!("working on it {line}\r\n").as_bytes());
+            }
+            app.refresh_agent_screens();
+            app.tick_agent_bell();
+            go_quiet(&mut app, pane);
+        }
+        worked_a_while(&mut app, pane);
+
+        app.refresh_agent_screens();
+        app.tick_agent_bell();
+        assert!(heard_a_bell(&mut rx), "that was a turn, and it ended");
     }
 
     /// Everything is idle when a session starts. Ringing for that would make
@@ -5017,9 +5491,11 @@ mod tests {
             .expect("option set");
 
         let pane = app.pane_ids()[0];
+        look_away_from(&mut app, pane).await;
         app.agents.set_foreground(pane, Some("claude".to_owned()));
         app.agents.note_output(pane, std::time::Instant::now());
         app.tick_agent_bell();
+        worked_a_while(&mut app, pane);
 
         go_quiet(&mut app, pane);
         app.tick_agent_bell();
@@ -5042,19 +5518,24 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         let pane = app.pane_ids()[0];
         app.agents.set_foreground(pane, Some("claude".to_owned()));
-        app.agents.note_output(
-            pane,
-            std::time::Instant::now()
-                .checked_sub(Duration::from_secs(30))
-                .expect("the clock has been up for 30s"),
-        );
 
         if let Some(p) = app.pane_mut(pane) {
             p.process(b"Do you want to proceed?\r\n  1. Yes\r\n");
         }
         // Reading the screen for a question is poll-rate work, not per-frame
         // work, so the indicators only learn about it at the next poll.
-        app.refresh_agents_asking();
+        app.refresh_agent_screens();
+
+        // Printing the question was itself a change, so the pane is working
+        // until it settles. Age that out and poll again: the screen still says
+        // the same thing, so nothing is recorded and the agent has gone quiet.
+        app.agents.note_output(
+            pane,
+            std::time::Instant::now()
+                .checked_sub(Duration::from_secs(30))
+                .expect("the clock has been up for 30s"),
+        );
+        app.refresh_agent_screens();
 
         assert_eq!(
             app.agent_indicators().first().map(|a| a.state),

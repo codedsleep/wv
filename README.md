@@ -154,6 +154,7 @@ set -g agent-commands 'claude,codex,opencode'
 set -g agent-activity-time 2000
 set -g agent-waiting-patterns 'do you want,(y/n),proceed?,continue?'
 set -g agent-bell on
+set -g agent-minimum-run 3000
 ```
 
 When an agent leaves the working state — finished, or stopped at a question —
@@ -162,6 +163,20 @@ looking at still reaches you. Your terminal decides what a bell is: a sound, a
 flash, a desktop notification. Turn it off with `set -g agent-bell off`. Agents
 finishing together ring once, and nothing rings for agents that were already
 stopped when weave started watching.
+
+The bell is for the pane you cannot see, so the focused one never rings. Your
+own keystrokes move an agent's screen exactly like its output does, and without
+that rule typing a message read as a turn and sending it read as that turn
+ending. Nor does a screen that moves once and settles: an idle agent still
+repaints its footer, and a clock ticking over would otherwise be a whole turn
+beginning and ending every minute. `agent-minimum-run` is how long a run has to
+have lasted before stopping is worth hearing about — lower it if a quick answer
+should ring too, raise it if a busy footer still gets through.
+
+An agent that ends by exiting rings the same way — a one-shot run that stops
+when its answer does, or an agent started as its pane's own command, which
+takes the pane with it. Closing a pane yourself does not ring, and neither does
+quitting an agent that had already stopped.
 
 `agent-commands` is matched against the file name, so an agent started by
 absolute path still counts. `agent-waiting-patterns` is matched
