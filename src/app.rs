@@ -1168,7 +1168,7 @@ impl App {
         let pane_ids = self.current().leaf_panes();
         self.resize_mode = ResizeMode::HostResize;
         for pane in pane_ids {
-            if let Some(rect) = self.leaf_rect_target(pane) {
+            if let Some(rect) = self.leaf_rect_target(pane).map(Rect::content) {
                 if let Some(p) = self.pane_mut(pane) {
                     p.resize(rect.w, rect.h);
                 }
@@ -1651,14 +1651,16 @@ impl App {
         let number = self.register_pane_number(pane_id);
         tracing::debug!("spawned pane %{number}");
 
+        // The pane has no slot in the tree yet, so start it at the size a lone
+        // pane would get. Whatever places it corrects this.
+        let initial = self.root_rect().content();
         if resize_immediately {
-            self.resize_pane(pane_id, self.back.width, self.back.height)
+            self.resize_pane(pane_id, initial.w, initial.h)
                 .await
                 .context("failed to resize shell pane")?;
         }
 
-        self.panes
-            .push(Pane::new(pane_id, self.back.width, self.back.height));
+        self.panes.push(Pane::new(pane_id, initial.w, initial.h));
 
         Ok(pane_id)
     }
@@ -2719,12 +2721,19 @@ impl App {
             .iter()
             .position(|candidate| *candidate == pane)
             .unwrap_or(0);
-        let rect = self.leaf_rect_target(pane).unwrap_or(Rect {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        });
+        // `#{pane_width}` is what the process can draw on, not what the slot
+        // takes up on screen.
+        let rect = self
+            .leaf_rect_target(pane)
+            .map_or(
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 0,
+                    h: 0,
+                },
+                Rect::content,
+            );
 
         vars.set(
             "pane_id",
@@ -3333,14 +3342,20 @@ impl App {
 
         self.front = Surface::new(cols, rows);
         self.back = Surface::new(cols, rows);
-        for pane in &mut self.panes {
-            pane.resize(cols, rows);
-        }
         self.recompute_layout();
 
+        // Every pane gets the size of its own slot in the new layout. Handing
+        // them all the terminal size instead leaves each one drawing a screen
+        // far wider than the slot it is blitted into.
         self.resize_mode = ResizeMode::HostResize;
         for pane_id in self.pane_ids() {
-            if let Err(error) = self.resize_pane(pane_id, cols, rows).await {
+            let rect = self
+                .leaf_rect_target(pane_id)
+                .map_or_else(|| self.root_rect().content(), Rect::content);
+            if let Some(pane) = self.pane_mut(pane_id) {
+                pane.resize(rect.w, rect.h);
+            }
+            if let Err(error) = self.resize_pane(pane_id, rect.w, rect.h).await {
                 tracing::warn!("failed to resize backend pane: {error:#}");
             }
         }
@@ -3455,7 +3470,7 @@ impl App {
             let Some(rect) = self.leaf_rect_current(*pane) else {
                 continue;
             };
-            let rect = rect.to_rect();
+            let rect = rect.to_rect().content();
             self.resize_pane(*pane, rect.w, rect.h).await?;
             // The PTY alone is not enough: the emulator keeps its own grid, and
             // a stale grid reflows the pane's output to the width it used to
@@ -3600,6 +3615,7 @@ impl App {
     async fn fit_pane_to_window(&mut self, pane: PaneId, rect: Rect) -> anyhow::Result<()> {
         self.timeline.clear_pane_tweens(pane);
 
+        let rect = rect.content();
         let previous = self.resize_mode;
         self.resize_mode = ResizeMode::HostResize;
         let resized = self.resize_pane(pane, rect.w, rect.h).await;
@@ -4390,6 +4406,35 @@ mod tests {
             "moving %1's right border right should widen it: {before} -> {after}"
         );
         assert!(!app.timeline.is_idle(), "a resize should animate");
+    }
+
+    /// A pane's rect covers its border, so the process behind it must be sized
+    /// to the inside. Handing it the whole rect makes it draw two columns and
+    /// rows that are clipped away when the pane is blitted.
+    #[tokio::test]
+    async fn a_host_resize_sizes_each_pane_to_the_inside_of_its_slot() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.execute(command("split-window -h")).await.expect("split");
+        app.advance_animations(OPEN_NEW_PANE_DURATION)
+            .await
+            .expect("open animation completes");
+        handle.clear_resized();
+
+        app.resize_to(100, 30).await;
+
+        // Status bar takes a row, so the slots are 50x29 each.
+        let expected = [(PaneId(1), 48, 27), (PaneId(2), 48, 27)];
+        for want in expected {
+            assert!(
+                handle.resized().contains(&want),
+                "expected {want:?} in {:?}",
+                handle.resized()
+            );
+        }
+        for pane in &app.panes {
+            assert_eq!(pane.size(), (48, 27), "emulator grid follows the PTY");
+        }
     }
 
     /// `-L` moves a border, it does not always enlarge — which side the pane
@@ -5842,8 +5887,9 @@ mod tests {
 
         let resized = handle.resized();
         assert_eq!(resized.len(), 2);
-        assert!(resized.contains(&(PaneId(1), 40, 23)));
-        assert!(resized.contains(&(PaneId(2), 40, 23)));
+        // Each pane gets the inside of its slot, not the slot itself.
+        assert!(resized.contains(&(PaneId(1), 38, 21)));
+        assert!(resized.contains(&(PaneId(2), 38, 21)));
         match app.workspaces[app.current_workspace]
             .root
             .as_ref()
@@ -5884,7 +5930,7 @@ mod tests {
             .await
             .expect("close animation completes");
 
-        assert_eq!(handle.resized(), vec![(PaneId(1), 80, 23)]);
+        assert_eq!(handle.resized(), vec![(PaneId(1), 78, 21)]);
         assert!(app.workspaces[app.current_workspace]
             .root
             .as_ref()

@@ -102,6 +102,12 @@ impl Pane {
         lines
     }
 
+    /// The emulator grid's `(cols, rows)`.
+    pub fn size(&self) -> (u16, u16) {
+        let (rows, cols) = self.screen().size();
+        (cols, rows)
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.parser.set_size(rows, cols);
         self.dirty = true;
