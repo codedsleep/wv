@@ -15,7 +15,7 @@ An animated tiling terminal multiplexer in Rust.
 - **Smooth animated layout.** Every topology change is interpolated frame-by-frame with sub-cell precision. PTYs are resized only at tween completion, so children never see per-frame `SIGWINCH` storms.
 - **Detach and reattach.** A session server owns the PTYs, the terminal state and the layout; the client owns only your terminal. Close the terminal and the session keeps running.
 - **BSP splits.** Recursive horizontal/vertical splits with geometric focus navigation (`h/j/k/l`).
-- **Configurable themes.** Hex color overrides for borders, status bar, and accent; ships with `nord` and `tokyonight` presets (default `tokyonight`).
+- **Configurable themes.** Hex color overrides for borders, status bar, and accent; ships with `nord` and `tokyonight` presets (default `nord`).
 - **Window names from pane titles.** OSC 0/2 sequences (`printf '\e]2;hello\a'`) name the window they are in, so the status bar reads `1:vim`. Per-pane title labels are off by default — a caption over every pane is noise when the pane's contents already say what it is — but `pane_titles = true` brings them back.
 - **Truecolor with graceful degradation.** Detects `COLORTERM=truecolor`; otherwise quantizes RGB to the xterm-256 cube.
 - **Panic-safe.** Terminal state is always restored on crash; panic info goes to the log file.
@@ -101,13 +101,13 @@ pane_titles  = false  # a title label on every pane's top border
 target_fps   = 160
 
 [theme]
-preset = "tokyonight"   # or "nord"
+preset = "nord"   # or "tokyonight"
 # Per-key overrides win over the preset:
-# border_focused   = "#7dcfff"
-# border_unfocused = "#414868"
-# status_fg        = "#c0caf5"
-# status_bg        = "#1a1b26"
-# accent           = "#f7768e"
+# border_focused   = "#88c0d0"
+# border_unfocused = "#3b4252"
+# status_fg        = "#eceff4"
+# status_bg        = "#2e3440"
+# accent           = "#bf616a"
 ```
 
 The TOML parser accepts a single modifier (`Ctrl+` or `Alt+`). Multi-modifier chords aren't expressible there — use the tmux-syntax file below, which takes `M-C-x`.
