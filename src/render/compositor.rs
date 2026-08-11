@@ -130,6 +130,8 @@ mod tests {
         border_unfocused: crossterm::style::Color::DarkGrey,
         status_fg: crossterm::style::Color::White,
         status_bg: crossterm::style::Color::DarkBlue,
+        status_segment: crossterm::style::Color::DarkBlue,
+        status_session: crossterm::style::Color::DarkBlue,
         accent: crossterm::style::Color::Red,
         agent_working: crossterm::style::Color::Green,
         agent_waiting: crossterm::style::Color::Yellow,

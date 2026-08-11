@@ -187,6 +187,15 @@ pub const OPTIONS: &[OptionSpec] = &[
         status: OptionStatus::Inert("weave has no command prompt"),
         default: "emacs",
     },
+    // Whether the status bar draws its segments with the powerline glyphs.
+    // They live in the private-use area, so a terminal without a patched font
+    // renders them as tofu; turning this off falls back to plain separators.
+    OptionSpec {
+        name: "status-powerline",
+        kind: OptionKind::Flag,
+        status: OptionStatus::Live,
+        default: "on",
+    },
     // Agent status. Not tmux options — weave-specific.
     OptionSpec {
         name: "agent-status",

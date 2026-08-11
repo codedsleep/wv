@@ -45,7 +45,14 @@ pub struct ThemeConfig {
     pub border_focused: Color,
     pub border_unfocused: Color,
     pub status_fg: Color,
+    /// The bar itself, behind everything the segments do not cover.
     pub status_bg: Color,
+    /// A status-bar segment that is not calling for attention: the windows you
+    /// are not in, and the clock.
+    pub status_segment: Color,
+    /// The leftmost segment, which holds the session name.
+    pub status_session: Color,
+    /// The current window, and the host at the far right.
     pub accent: Color,
     /// Agent working, waiting on you, and idle, in that order.
     pub agent_working: Color,
@@ -249,6 +256,13 @@ impl Config {
         if let Some(target_fps) = raw.ui.target_fps {
             config.ui.target_fps = normalize_target_fps(target_fps);
         }
+        if let Some(powerline) = raw.ui.status_powerline {
+            let value = if powerline { "on" } else { "off" };
+            config
+                .options
+                .set("status-powerline", value)
+                .expect("status-powerline is a flag");
+        }
         config.theme.apply_overrides(raw.theme, preset_theme);
 
         Ok(config)
@@ -408,12 +422,17 @@ impl ThemePreset {
 
     const fn theme(self) -> ThemeConfig {
         match self {
+            // The colours `nordtheme/tmux` draws its status line with: nord1
+            // behind the bar, nord3 for the quiet segments, nord9 for the
+            // session and nord8 for whatever is current.
             Self::Nord => ThemeConfig {
                 border_focused: rgb(0x88, 0xc0, 0xd0),
                 border_unfocused: rgb(0x3b, 0x42, 0x52),
-                status_fg: rgb(0xec, 0xef, 0xf4),
-                status_bg: rgb(0x2e, 0x34, 0x40),
-                accent: rgb(0xbf, 0x61, 0x6a),
+                status_fg: rgb(0xe5, 0xe9, 0xf0),
+                status_bg: rgb(0x3b, 0x42, 0x52),
+                status_segment: rgb(0x4c, 0x56, 0x6a),
+                status_session: rgb(0x81, 0xa1, 0xc1),
+                accent: rgb(0x88, 0xc0, 0xd0),
                 agent_working: rgb(0xa3, 0xbe, 0x8c),
                 agent_waiting: rgb(0xeb, 0xcb, 0x8b),
                 agent_idle: rgb(0x4c, 0x56, 0x6a),
@@ -423,7 +442,9 @@ impl ThemePreset {
                 border_unfocused: rgb(0x41, 0x48, 0x68),
                 status_fg: rgb(0xc0, 0xca, 0xf5),
                 status_bg: rgb(0x1a, 0x1b, 0x26),
-                accent: rgb(0xf7, 0x76, 0x8e),
+                status_segment: rgb(0x29, 0x2e, 0x42),
+                status_session: rgb(0x7a, 0xa2, 0xf7),
+                accent: rgb(0x7d, 0xcf, 0xff),
                 agent_working: rgb(0x9e, 0xce, 0x6a),
                 agent_waiting: rgb(0xe0, 0xaf, 0x68),
                 agent_idle: rgb(0x41, 0x48, 0x68),
@@ -447,6 +468,14 @@ impl ThemeConfig {
         }
         if let Some(value) = raw.status_bg {
             self.status_bg = parse_theme_color_or_fallback("status_bg", &value, preset.status_bg);
+        }
+        if let Some(value) = raw.status_segment {
+            self.status_segment =
+                parse_theme_color_or_fallback("status_segment", &value, preset.status_segment);
+        }
+        if let Some(value) = raw.status_session {
+            self.status_session =
+                parse_theme_color_or_fallback("status_session", &value, preset.status_session);
         }
         if let Some(value) = raw.accent {
             self.accent = parse_theme_color_or_fallback("accent", &value, preset.accent);
@@ -535,6 +564,7 @@ struct RawUi {
     status_bar: Option<bool>,
     pane_titles: Option<bool>,
     target_fps: Option<u16>,
+    status_powerline: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -545,6 +575,8 @@ struct RawTheme {
     border_unfocused: Option<String>,
     status_fg: Option<String>,
     status_bg: Option<String>,
+    status_segment: Option<String>,
+    status_session: Option<String>,
     accent: Option<String>,
     agent_working: Option<String>,
     agent_waiting: Option<String>,
@@ -742,17 +774,17 @@ mod tests {
         assert_eq!(
             config.theme.status_bg,
             Color::Rgb {
-                r: 0x2e,
-                g: 0x34,
-                b: 0x40
+                r: 0x3b,
+                g: 0x42,
+                b: 0x52
             }
         );
         assert_eq!(
             config.theme.accent,
             Color::Rgb {
-                r: 0xbf,
-                g: 0x61,
-                b: 0x6a
+                r: 0x88,
+                g: 0xc0,
+                b: 0xd0
             }
         );
     }
@@ -778,9 +810,9 @@ mod tests {
         assert_eq!(
             config.theme.status_bg,
             Color::Rgb {
-                r: 0x2e,
-                g: 0x34,
-                b: 0x40
+                r: 0x3b,
+                g: 0x42,
+                b: 0x52
             }
         );
     }
@@ -842,9 +874,9 @@ mod tests {
         assert_eq!(
             config.theme.status_bg,
             Color::Rgb {
-                r: 0x2e,
-                g: 0x34,
-                b: 0x40
+                r: 0x3b,
+                g: 0x42,
+                b: 0x52
             }
         );
     }
@@ -870,9 +902,9 @@ mod tests {
         assert_eq!(
             config.theme.status_bg,
             Color::Rgb {
-                r: 0x2e,
-                g: 0x34,
-                b: 0x40
+                r: 0x3b,
+                g: 0x42,
+                b: 0x52
             }
         );
     }

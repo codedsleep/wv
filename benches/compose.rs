@@ -14,6 +14,8 @@ const BENCH_THEME: ThemeConfig = ThemeConfig {
     border_unfocused: Color::DarkGrey,
     status_fg: Color::White,
     status_bg: Color::DarkBlue,
+    status_segment: Color::DarkBlue,
+    status_session: Color::DarkBlue,
     accent: Color::Red,
     agent_working: Color::Green,
     agent_waiting: Color::Yellow,

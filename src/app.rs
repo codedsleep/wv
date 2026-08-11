@@ -136,6 +136,8 @@ const fn test_theme() -> ThemeConfig {
         border_unfocused: crossterm::style::Color::DarkGrey,
         status_fg: crossterm::style::Color::White,
         status_bg: crossterm::style::Color::DarkBlue,
+        status_segment: crossterm::style::Color::DarkBlue,
+        status_session: crossterm::style::Color::DarkBlue,
         accent: crossterm::style::Color::Red,
         agent_working: crossterm::style::Color::Green,
         agent_waiting: crossterm::style::Color::Yellow,
@@ -1180,6 +1182,7 @@ impl App {
                     name: self.window_name(idx),
                     is_current,
                     pane_count: ws.pane_count(),
+                    flags: self.window_flags(idx),
                 })
             })
             .collect()
@@ -2882,18 +2885,28 @@ impl App {
             .set("window_panes", workspace.pane_count().to_string())
             .set_flag("window_active", is_current)
             .set_flag("window_zoomed_flag", workspace.zoomed.is_some())
-            // tmux's `#F`: `*` for the active window, `Z` when it is zoomed.
-            .set(
-                "window_flags",
-                match (is_current, workspace.zoomed.is_some()) {
-                    (true, true) => "*Z",
-                    (true, false) => "*",
-                    (false, true) => "Z",
-                    (false, false) => "",
-                },
-            );
+            .set("window_flags", self.window_flags(window));
 
         vars
+    }
+
+    /// tmux's `#F`: `*` for the active window, `-` for the last one you were
+    /// in, `Z` when it is zoomed.
+    fn window_flags(&self, index: usize) -> String {
+        let mut flags = String::new();
+        if index == self.current_workspace {
+            flags.push('*');
+        } else if self.last_workspace == Some(index) {
+            flags.push('-');
+        }
+        if self
+            .workspaces
+            .get(index)
+            .is_some_and(|workspace| workspace.zoomed.is_some())
+        {
+            flags.push('Z');
+        }
+        flags
     }
 
     /// The variables describing one pane, including its window's.
@@ -3587,10 +3600,14 @@ impl App {
             let status_left = self.status_left();
             chrome::draw_status_bar(
                 &mut self.back,
-                &status_left,
-                &indicators,
-                &agents,
-                chrono::Local::now(),
+                &chrome::StatusBar {
+                    left: &status_left,
+                    workspaces: &indicators,
+                    agents: &agents,
+                    host: hostname(),
+                    now: chrono::Local::now(),
+                    powerline: self.options.flag("status-powerline"),
+                },
                 self.theme,
             );
         }
@@ -4103,6 +4120,24 @@ fn collect_leaf_targets(node: &Node, targets: &mut Vec<(PaneId, Rect)>) {
 
 fn frame_interval(target_fps: u16) -> Duration {
     Duration::from_nanos(1_000_000_000 / u64::from(target_fps))
+}
+
+/// The host this session is on, for the right end of the status bar — tmux's
+/// `#H`.
+///
+/// Read once and kept: a machine does not rename itself while you are looking
+/// at it, and this is wanted on every frame.
+fn hostname() -> &'static str {
+    static HOSTNAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HOSTNAME.get_or_init(|| {
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .or_else(|| std::env::var("HOSTNAME").ok())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "localhost".to_owned())
+    })
 }
 
 fn collapsed_open_rect(split: Split, old_parent_rect: Rect, new_target: Rect) -> FRect {
@@ -5063,6 +5098,17 @@ mod tests {
         assert_eq!(app.request_output("list-windows -F #F").await, "*Z");
     }
 
+    /// tmux marks the window you came from, which is the one `select-window -l`
+    /// and `-t :!` go back to — worth seeing before you press the key.
+    #[tokio::test]
+    async fn window_flags_mark_the_last_window() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 100, 24, PaneId(1));
+        app.execute(command("new-window")).await.expect("new window");
+
+        assert_eq!(app.request_output("list-windows -F #F").await, "-\n*");
+    }
+
     #[tokio::test]
     async fn a_bad_format_is_rejected_rather_than_expanded_to_nothing() {
         let (backend, _handle) = mock_backend(PaneId(2));
@@ -5804,10 +5850,14 @@ mod tests {
         let agents = app.agent_indicators();
         crate::render::chrome::draw_status_bar(
             &mut back,
-            &app.status_left(),
-            &indicators,
-            &agents,
-            chrono::Local::now(),
+            &crate::render::chrome::StatusBar {
+                left: &app.status_left(),
+                workspaces: &indicators,
+                agents: &agents,
+                host: super::hostname(),
+                now: chrono::Local::now(),
+                powerline: app.options.flag("status-powerline"),
+            },
             app.theme,
         );
         (0..back.width)
@@ -5823,7 +5873,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.session_name = Some("dev".to_owned());
 
-        assert!(status_row(&app).starts_with("[dev] "), "{}", status_row(&app));
+        assert!(status_row(&app).starts_with(" dev "), "{}", status_row(&app));
     }
 
     #[tokio::test]
@@ -5831,12 +5881,12 @@ mod tests {
         let (backend, _handle) = mock_backend(PaneId(2));
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.session_name = Some("before".to_owned());
-        assert!(status_row(&app).starts_with("[before] "));
+        assert!(status_row(&app).starts_with(" before "));
 
         // Rename through the same path a command takes.
         app.session_name = Some("after".to_owned());
 
-        assert!(status_row(&app).starts_with("[after] "), "{}", status_row(&app));
+        assert!(status_row(&app).starts_with(" after "), "{}", status_row(&app));
     }
 
     #[tokio::test]
@@ -5846,7 +5896,7 @@ mod tests {
         app.session_name = Some("dev".to_owned());
 
         app.show_message("saved".to_owned());
-        assert!(status_row(&app).starts_with("[saved] "), "{}", status_row(&app));
+        assert!(status_row(&app).starts_with(" saved "), "{}", status_row(&app));
 
         app.message = None;
         app.prompt = Some(Prompt {
@@ -5856,14 +5906,14 @@ mod tests {
             template: "rename-window %%".to_owned(),
         });
         assert!(
-            status_row(&app).starts_with("[rename-window: api"),
+            status_row(&app).starts_with(" rename-window: api"),
             "{}",
             status_row(&app)
         );
 
         // And the name comes back when both are gone.
         app.prompt = None;
-        assert!(status_row(&app).starts_with("[dev] "));
+        assert!(status_row(&app).starts_with(" dev "));
     }
 
     #[tokio::test]
@@ -5871,7 +5921,7 @@ mod tests {
         let (backend, _handle) = mock_backend(PaneId(2));
         let app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
 
-        assert!(status_row(&app).starts_with("[weave] "), "{}", status_row(&app));
+        assert!(status_row(&app).starts_with(" weave "), "{}", status_row(&app));
     }
 
     /// A waiting caller gets the command's output, not just "it ran".
