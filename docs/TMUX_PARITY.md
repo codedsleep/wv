@@ -139,7 +139,7 @@ What follows from that:
 - **Names work as they do in tmux.** A window with no name takes it from the
   focused pane's OSC title, so a window running `vim` labels itself `vim`.
   `rename-window` pins the name and stops it following the title. Either way
-  `-t :build` finds it, and the status bar shows `3:build`.
+  `-t :build` finds it, and the status bar shows `3 ❯ build`.
 - `new-window` takes the **lowest-numbered free window**, or the one `-t`
   names if it is free. With all nine in use it fails and says so.
 - `select-window` **fails** on a window that does not exist, as in tmux. The
@@ -172,7 +172,7 @@ costs you that line and nothing else.
 
 - **live** — weave reads it: `prefix`, `prefix2`, `status`,
   `pane-border-status`, `repeat-time`, `default-shell`, `automatic-rename`,
-  `target-fps`.
+  `target-fps`, `status-powerline`.
 - **inert** — a real tmux option weave stores so `show-options` round-trips,
   but nothing reads. Setting one logs *why*: `history-limit` does nothing
   because there is no scrollback, `base-index` because windows are fixed slots.
@@ -259,17 +259,38 @@ set -g pane-border-status on
 ## The status bar
 
 ```
-[dev] 1:editor  2:build      14:23:11
+ dev  1 ❯ editor   2 ❯ build *      2026-05-11 ❮ 14:23  localhost 
 ```
 
-The far left is the **session name**, so a renamed session shows its new name
-on the next frame. A `display-message` without `-p`, and an open
-`command-prompt`, take that slot over while they are up — which is where tmux
-puts them too. Running outside a session it reads `[weave]`.
+Laid out the way tmux's `nordtheme/tmux` lays it out: blocks of colour with a
+powerline wedge over each boundary, rather than a line of text.
 
-Then the windows as `index:name`, the current one highlighted in the accent
-colour, and a clock on the right. `status-left`, `status-right` and
-`status-style` are accepted as options but inert: the bar is not format-driven.
+The leftmost block is the **session name**, so a renamed session shows its new
+name on the next frame. A `display-message` without `-p`, and an open
+`command-prompt`, take that block over while they are up — which is where tmux
+puts them too. Running outside a session it reads `weave`.
+
+Then one block per window, `index ❯ name flags`, the current one in the accent
+colour. The flags are tmux's `#F`: `*` for the current window, `-` for the last
+one you were in, `Z` when it is zoomed.
+
+The right end holds the date, the clock and the host — tmux's `#H`. A bar too
+narrow for all three keeps the clock and drops the rest: the time is the part
+you glance at, the date and the host the parts you already know.
+
+`status-left`, `status-right` and `status-style` are still accepted as options
+but inert: the bar is not format-driven.
+
+### Without a patched font
+
+The wedges are private-use codepoints, so a terminal running a font that has
+not been patched draws a row of tofu. Turning them off falls back to plain
+separators — `1 > editor`, `date | time` — and leaves the colours doing the
+work:
+
+```sh
+set -g status-powerline off
+```
 
 ## Renaming a session
 

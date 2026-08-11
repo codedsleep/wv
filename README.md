@@ -16,7 +16,7 @@ An animated tiling terminal multiplexer in Rust.
 - **Detach and reattach.** A session server owns the PTYs, the terminal state and the layout; the client owns only your terminal. Close the terminal and the session keeps running.
 - **BSP splits.** Recursive horizontal/vertical splits with geometric focus navigation (`h/j/k/l`).
 - **Configurable themes.** Hex color overrides for borders, status bar, and accent; ships with `nord` and `tokyonight` presets (default `nord`).
-- **Window names from pane titles.** OSC 0/2 sequences (`printf '\e]2;hello\a'`) name the window they are in, so the status bar reads `1:vim`. Per-pane title labels are off by default — a caption over every pane is noise when the pane's contents already say what it is — but `pane_titles = true` brings them back.
+- **Window names from pane titles.** OSC 0/2 sequences (`printf '\e]2;hello\a'`) name the window they are in, so the status bar reads `1 ❯ vim`. Per-pane title labels are off by default — a caption over every pane is noise when the pane's contents already say what it is — but `pane_titles = true` brings them back.
 - **Agent status in the bar.** Panes running a coding agent (`claude`, `codex`, `opencode`) are listed on the right of the status bar, grouped by kind and coloured green while the agent is producing output, amber when it has stopped at a question, and grey when it is done. The whole session is covered, not just the window on screen, so an agent that has finished in another window is still visible. See [Agent status](#agent-status).
 - **Truecolor with graceful degradation.** Detects `COLORTERM=truecolor`; otherwise quantizes RGB to the xterm-256 cube.
 - **Panic-safe.** Terminal state is always restored on crash; panic info goes to the log file.
@@ -103,6 +103,7 @@ Bezier curves were tuned against [Hyprland's](https://wiki.hyprland.org/Configur
 [ui]
 border_color = "cyan"   # legacy override; takes a back seat to [theme]
 status_bar   = true
+status_powerline = true   # off falls back to plain separators
 pane_titles  = false  # a title label on every pane's top border
 target_fps   = 160
 
@@ -111,9 +112,11 @@ preset = "nord"   # or "tokyonight"
 # Per-key overrides win over the preset:
 # border_focused   = "#88c0d0"
 # border_unfocused = "#3b4252"
-# status_fg        = "#eceff4"
-# status_bg        = "#2e3440"
-# accent           = "#bf616a"
+# status_fg        = "#e5e9f0"
+# status_bg        = "#3b4252"   # the bar itself
+# status_segment   = "#4c566a"   # the quiet blocks: other windows, the clock
+# status_session   = "#81a1c1"   # the session block on the far left
+# accent           = "#88c0d0"   # the current window, and the host
 # agent_working    = "#a3be8c"
 # agent_waiting    = "#ebcb8b"
 # agent_idle       = "#4c566a"
@@ -198,8 +201,10 @@ wv has-session [name]  # exit 0 if it is live, 1 if not
 wv kill-server         # end every session
 ```
 
-The status bar shows the session name on the left, then the windows as
-`index:name`, then a clock: `[dev] 1:editor  2:build      14:23:11`.
+The status bar shows the session name on the left, then the windows, then the
+date, clock and host on the right — powerline blocks, laid out like tmux's nord
+theme: ` dev  1 ❯ editor   2 ❯ build *      2026-05-11 ❮ 14:23  localhost `.
+Set `status-powerline off` if your font is not a patched one.
 
 `Alt+D` detaches: the server keeps running with every pane alive, and the client restores your terminal and prints `[detached from NAME]`. `Alt+Shift+Q` quits, which shuts the session down and kills its panes.
 

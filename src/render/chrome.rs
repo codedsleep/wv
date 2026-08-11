@@ -23,6 +23,23 @@ const AGENT_MARK: char = '\u{25cf}';
 const DEBUG_FG: Color = Color::Black;
 const DEBUG_BG: Color = Color::White;
 
+/// The powerline separators, in the order a segment uses them: the solid
+/// wedge that closes a left-aligned segment, the hairline inside one, and the
+/// two facing the other way for the right-hand block.
+///
+/// These are private-use codepoints, so they are only glyphs at all if the
+/// terminal is running a patched font. `status-powerline off` swaps in the
+/// plain forms below.
+const SEP_RIGHT: char = '\u{e0b0}';
+const SEP_RIGHT_THIN: char = '\u{e0b1}';
+const SEP_LEFT: char = '\u{e0b2}';
+const SEP_LEFT_THIN: char = '\u{e0b3}';
+const PLAIN_THIN_RIGHT: char = '>';
+const PLAIN_THIN_LEFT: char = '|';
+
+const DATE_FORMAT: &str = "%Y-%m-%d";
+const TIME_FORMAT: &str = "%H:%M";
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct DebugOverlay {
     pub fps: f64,
@@ -46,6 +63,22 @@ pub struct WorkspaceIndicator {
     pub name: String,
     pub is_current: bool,
     pub pane_count: usize,
+    /// tmux's `#F`: `*` current, `-` last, `Z` zoomed.
+    pub flags: String,
+}
+
+/// Everything the status bar draws, gathered by whoever knows the session.
+pub struct StatusBar<'a> {
+    /// What sits in the leftmost segment: normally the session name, and a
+    /// message or an open prompt while either is up.
+    pub left: &'a str,
+    pub workspaces: &'a [WorkspaceIndicator],
+    pub agents: &'a [AgentIndicator],
+    /// The host, as tmux's `#H` shows it.
+    pub host: &'a str,
+    pub now: chrono::DateTime<chrono::Local>,
+    /// Whether the separators can be the powerline glyphs.
+    pub powerline: bool,
 }
 
 pub fn draw_borders(
@@ -85,16 +118,11 @@ pub fn draw_borders(
 
 /// Draw the status bar.
 ///
-/// `status_left` is what sits at the far left in brackets: normally the
-/// session name, and a message or an open prompt while either is up.
-pub fn draw_status_bar(
-    surface: &mut Surface,
-    status_left: &str,
-    workspaces: &[WorkspaceIndicator],
-    agents: &[AgentIndicator],
-    now: chrono::DateTime<chrono::Local>,
-    theme: ThemeConfig,
-) {
+/// Laid out as tmux's nord theme lays it out: the session on the left, then a
+/// run of window segments, and a block of clock and host held against the
+/// right edge. Every boundary is a colour change with a wedge over it, so the
+/// bar reads as blocks rather than as a line of text.
+pub fn draw_status_bar(surface: &mut Surface, bar: &StatusBar<'_>, theme: ThemeConfig) {
     if surface.width == 0 || surface.height == 0 {
         return;
     }
@@ -104,62 +132,148 @@ pub fn draw_status_bar(
         surface.set(x, y, status_cell(' ', theme));
     }
 
-    let mut x: u16 = 0;
     let max_x = surface.width;
+    let left_end = left_run(bar, theme).draw(surface, 0, y, max_x);
 
-    let prefix = format!("[{status_left}] ");
-    x = write_status_text(
-        surface,
-        x,
-        y,
-        max_x,
-        &prefix,
-        theme.status_fg,
-        theme.status_bg,
-    );
-
-    for ws in workspaces {
-        if x >= max_x {
-            break;
+    // A narrow bar gives up the date and the host before it gives up the
+    // clock: the time is the part that is glanced at rather than read.
+    for run in [right_run(bar, theme, true), right_run(bar, theme, false)] {
+        let start = max_x.saturating_sub(run.width);
+        if start < left_end {
+            continue;
         }
-        // `1:build` — the number stays because `Alt+1` and `-t :1` still
-        // address it; the name is what makes a window recognisable.
-        let label = if ws.name.is_empty() {
-            format!(" {} ", ws.number)
-        } else {
-            format!(" {}:{} ", ws.number, ws.name)
-        };
+        run.draw(surface, start, y, max_x);
+        // Agents sit between the windows and that block, right-aligned against
+        // it: the bar's left end changes length as windows come and go, and an
+        // indicator that moves is one you have to read rather than glance at.
+        draw_agents(surface, y, left_end, start, bar.agents, theme);
+        break;
+    }
+}
+
+/// The session segment and the window segments, drawn from the left edge.
+fn left_run(bar: &StatusBar<'_>, theme: ThemeConfig) -> Run {
+    let mut run = Run::default();
+    run.push_str(
+        &format!(" {} ", bar.left),
+        theme.status_bg,
+        theme.status_session,
+    );
+    run.close_segment(bar, theme.status_session, theme);
+
+    let thin = if bar.powerline {
+        SEP_RIGHT_THIN
+    } else {
+        PLAIN_THIN_RIGHT
+    };
+    for ws in bar.workspaces {
         let (fg, bg) = if ws.is_current {
             (theme.status_bg, theme.accent)
         } else {
-            (theme.status_fg, theme.status_bg)
+            (theme.status_fg, theme.status_segment)
         };
-        x = write_status_text(surface, x, y, max_x, &label, fg, bg);
-        // Separator between workspaces.
-        x = write_status_text(surface, x, y, max_x, " ", theme.status_fg, theme.status_bg);
+        // The number stays because `Alt+1` and `-t :1` still address it; the
+        // name is what makes a window recognisable.
+        run.push_str(&format!(" {} {thin} {} {} ", ws.number, ws.name, ws.flags), fg, bg);
+        run.close_segment(bar, bg, theme);
+    }
+    run
+}
+
+/// The clock block, drawn against the right edge.
+///
+/// `full` carries the date and the host as well; without it only the clock is
+/// left, for a bar too narrow to hold the rest.
+fn right_run(bar: &StatusBar<'_>, theme: ThemeConfig, full: bool) -> Run {
+    let mut run = Run::default();
+    if bar.powerline {
+        run.push(SEP_LEFT, theme.status_segment, theme.status_bg);
     }
 
-    let clock = now.format("%H:%M:%S").to_string();
-    let clock_width = u16::try_from(UnicodeWidthStr::width(clock.as_str())).unwrap_or(u16::MAX);
-    if clock_width < max_x {
-        let clock_start = max_x - clock_width;
-        if clock_start >= x {
-            write_status_text(
-                surface,
-                clock_start,
-                y,
-                max_x,
-                &clock,
-                theme.status_fg,
-                theme.status_bg,
-            );
+    if full {
+        run.push_str(
+            &format!(" {} ", bar.now.format(DATE_FORMAT)),
+            theme.status_fg,
+            theme.status_segment,
+        );
+        run.push(
+            if bar.powerline {
+                SEP_LEFT_THIN
+            } else {
+                PLAIN_THIN_LEFT
+            },
+            theme.status_fg,
+            theme.status_segment,
+        );
+    }
+
+    run.push_str(
+        &format!(" {} ", bar.now.format(TIME_FORMAT)),
+        theme.status_fg,
+        theme.status_segment,
+    );
+
+    if full {
+        if bar.powerline {
+            run.push(SEP_LEFT, theme.accent, theme.status_segment);
         }
-
-        // Agents sit between the windows and the clock, right-aligned against
-        // it: the bar's left end changes length as windows come and go, and an
-        // indicator that moves is one you have to read rather than glance at.
-        draw_agents(surface, y, x, clock_start, agents, theme);
+        run.push_str(&format!(" {} ", bar.host), theme.status_bg, theme.accent);
     }
+    run
+}
+
+/// A run of status-bar cells, built before anything is drawn.
+///
+/// Built rather than written straight out because the right-hand block has to
+/// know its own width to sit against the right edge, and the agents in the
+/// middle have to know where that block starts.
+#[derive(Default)]
+struct Run {
+    cells: Vec<(char, Color, Color)>,
+    width: u16,
+}
+
+impl Run {
+    fn push(&mut self, ch: char, fg: Color, bg: Color) {
+        self.cells.push((ch, fg, bg));
+        self.width = self.width.saturating_add(char_step(ch));
+    }
+
+    fn push_str(&mut self, text: &str, fg: Color, bg: Color) {
+        for ch in text.chars() {
+            self.push(ch, fg, bg);
+        }
+    }
+
+    /// End a left-aligned segment coloured `bg`.
+    ///
+    /// The wedge is drawn over the bar's own background, not the next
+    /// segment's, which is what leaves the thin dark notch between two
+    /// segments of the same colour.
+    fn close_segment(&mut self, bar: &StatusBar<'_>, bg: Color, theme: ThemeConfig) {
+        if bar.powerline {
+            self.push(SEP_RIGHT, bg, theme.status_bg);
+        } else {
+            self.push(' ', theme.status_fg, theme.status_bg);
+        }
+    }
+
+    /// Returns where the run ended, clipped at `max_x`.
+    fn draw(&self, surface: &mut Surface, start_x: u16, y: u16, max_x: u16) -> u16 {
+        let mut x = start_x;
+        for &(ch, fg, bg) in &self.cells {
+            if x >= max_x {
+                break;
+            }
+            surface.set(x, y, Cell::new(ch, fg, bg, CellAttrs::empty()));
+            x = x.saturating_add(char_step(ch));
+        }
+        x
+    }
+}
+
+fn char_step(ch: char) -> u16 {
+    u16::try_from(UnicodeWidthChar::width(ch).unwrap_or(1).max(1)).unwrap_or(1)
 }
 
 /// The agent indicators, right-aligned into `[left, right)`.
@@ -363,8 +477,9 @@ mod tests {
 
     use super::{
         draw_borders, draw_debug_overlay, draw_status_bar, truncate_title, DebugOverlay,
-        AGENT_MARK,
+        AGENT_MARK, PLAIN_THIN_LEFT, SEP_LEFT, SEP_LEFT_THIN, SEP_RIGHT, SEP_RIGHT_THIN,
     };
+    use crate::term::cell::Cell;
     use crate::agent::AgentState;
     use crate::anim::timeline::Timeline;
     use crate::backend::PaneId;
@@ -379,6 +494,8 @@ mod tests {
         border_unfocused: Color::DarkGrey,
         status_fg: Color::White,
         status_bg: Color::DarkBlue,
+        status_segment: Color::DarkBlue,
+        status_session: Color::DarkBlue,
         accent: Color::Red,
         agent_working: Color::Green,
         agent_waiting: Color::Yellow,
@@ -470,37 +587,73 @@ mod tests {
             .expect("test time exists")
     }
 
+    fn workspace(number: u8, name: &str, is_current: bool) -> super::WorkspaceIndicator {
+        super::WorkspaceIndicator {
+            number,
+            name: name.to_owned(),
+            is_current,
+            pane_count: 1,
+            flags: if is_current { "*" } else { "" }.to_owned(),
+        }
+    }
+
+    fn status_bar<'a>(
+        left: &'a str,
+        workspaces: &'a [super::WorkspaceIndicator],
+        agents: &'a [super::AgentIndicator],
+    ) -> super::StatusBar<'a> {
+        super::StatusBar {
+            left,
+            workspaces,
+            agents,
+            host: "testhost",
+            now: test_time(),
+            powerline: true,
+        }
+    }
+
+    /// The cell at a character offset into the bottom row.
+    ///
+    /// Character offsets, not byte ones: every separator is three bytes wide
+    /// and one cell.
+    fn cell_at(surface: &Surface, offset: usize) -> &Cell {
+        surface
+            .get(u16::try_from(offset).expect("fits"), surface.height - 1)
+            .expect("cell exists")
+    }
+
+    fn char_index(row: &str, needle: &str) -> usize {
+        let cells: Vec<char> = row.chars().collect();
+        let needle: Vec<char> = needle.chars().collect();
+        let text: String = needle.iter().collect();
+        cells
+            .windows(needle.len())
+            .position(|window| window == needle.as_slice())
+            .unwrap_or_else(|| panic!("`{text}` is on the bar: {row}"))
+    }
+
     #[test]
     fn agents_are_right_aligned_against_the_clock_and_coloured_by_state() {
-        let mut surface = Surface::new(60, 4);
+        let mut surface = Surface::new(100, 4);
         let agents = [
             agent(1, "claude", AgentState::Working),
             agent(2, "claude", AgentState::Waiting),
             agent(1, "codex", AgentState::Idle),
         ];
 
-        draw_status_bar(&mut surface, "s", &[], &agents, test_time(), TEST_THEME);
+        draw_status_bar(&mut surface, &status_bar("s", &[], &agents), TEST_THEME);
 
         let bottom = bottom_row(&surface);
         // Two claudes side by side, each numbered within its own kind.
         assert!(bottom.contains("1:claude"), "{bottom}");
         assert!(bottom.contains("2:claude"), "{bottom}");
         assert!(bottom.contains("1:codex"), "{bottom}");
-        // Right up against the clock, which keeps the far right.
-        assert!(bottom.ends_with("14:23:11"), "{bottom}");
+        // Right up against the clock block, which keeps the far right.
+        assert!(bottom.ends_with(" testhost "), "{bottom}");
 
-        // Cell positions, not byte offsets: the mark is three bytes wide but
-        // one cell.
-        let cells: Vec<char> = bottom.chars().collect();
         let colour_of = |needle: &str| {
-            let needle: Vec<char> = needle.chars().collect();
-            let at = cells
-                .windows(needle.len())
-                .position(|window| window == needle.as_slice())
-                .expect("label is on the bar");
-            // The mark sits two cells before the window number.
-            let x = u16::try_from(at - 2).expect("fits");
-            surface.get(x, surface.height - 1).expect("cell exists")
+            // The mark sits two cells before the agent's number.
+            cell_at(&surface, char_index(&bottom, needle) - 2)
         };
         assert_eq!(colour_of("1:claude").ch, AGENT_MARK);
         assert_eq!(colour_of("1:claude").fg, TEST_THEME.agent_working);
@@ -517,10 +670,7 @@ mod tests {
 
         draw_status_bar(
             &mut surface,
-            "a-long-session-name",
-            &[],
-            &agents,
-            test_time(),
+            &status_bar("a-long-session-name", &[], &agents),
             TEST_THEME,
         );
 
@@ -530,11 +680,108 @@ mod tests {
 
     #[test]
     fn no_agents_leaves_the_bar_as_it_was() {
-        let mut surface = Surface::new(60, 4);
+        let mut surface = Surface::new(100, 4);
 
-        draw_status_bar(&mut surface, "s", &[], &[], test_time(), TEST_THEME);
+        draw_status_bar(&mut surface, &status_bar("s", &[], &[]), TEST_THEME);
 
         assert!(!bottom_row(&surface).contains(AGENT_MARK));
+    }
+
+    /// The session, the windows and the host each get their own block, and the
+    /// wedge between two blocks carries the colour of the one it closes.
+    #[test]
+    fn draw_status_bar_builds_powerline_segments() {
+        let mut surface = Surface::new(100, 4);
+        let workspaces = [workspace(1, "edit", true), workspace(2, "build", false)];
+
+        draw_status_bar(
+            &mut surface,
+            &status_bar("dev", &workspaces, &[]),
+            TEST_THEME,
+        );
+
+        let bottom = bottom_row(&surface);
+        assert!(bottom.starts_with(" dev "), "{bottom}");
+        assert!(
+            bottom.contains(&format!("1 {SEP_RIGHT_THIN} edit *")),
+            "{bottom}"
+        );
+        assert!(
+            bottom.contains(&format!("2 {SEP_RIGHT_THIN} build")),
+            "{bottom}"
+        );
+        assert!(bottom.contains("2026-05-11"), "{bottom}");
+        assert!(bottom.ends_with(" testhost "), "{bottom}");
+
+        // The session sits on its own colour, and the wedge after it is that
+        // colour over the bar's background.
+        let session = cell_at(&surface, char_index(&bottom, "dev"));
+        assert_eq!(session.bg, TEST_THEME.status_session);
+        assert_eq!(session.fg, TEST_THEME.status_bg);
+        let wedge = cell_at(&surface, char_index(&bottom, &SEP_RIGHT.to_string()));
+        assert_eq!(wedge.fg, TEST_THEME.status_session);
+        assert_eq!(wedge.bg, TEST_THEME.status_bg);
+
+        // The current window takes the accent; the others stay quiet.
+        assert_eq!(
+            cell_at(&surface, char_index(&bottom, "edit")).bg,
+            TEST_THEME.accent
+        );
+        assert_eq!(
+            cell_at(&surface, char_index(&bottom, "build")).bg,
+            TEST_THEME.status_segment
+        );
+        assert_eq!(
+            cell_at(&surface, char_index(&bottom, "testhost")).bg,
+            TEST_THEME.accent
+        );
+    }
+
+    /// The wedges are private-use codepoints, so a terminal without a patched
+    /// font would draw a row of tofu. Turning them off has to leave the bar
+    /// readable, not just glyph-free.
+    #[test]
+    fn powerline_off_falls_back_to_plain_separators() {
+        let mut surface = Surface::new(100, 4);
+        let workspaces = [workspace(1, "edit", true)];
+        let mut bar = status_bar("dev", &workspaces, &[]);
+        bar.powerline = false;
+
+        draw_status_bar(&mut surface, &bar, TEST_THEME);
+
+        let bottom = bottom_row(&surface);
+        for glyph in [SEP_RIGHT, SEP_RIGHT_THIN, SEP_LEFT, SEP_LEFT_THIN] {
+            assert!(!bottom.contains(glyph), "{bottom}");
+        }
+        assert!(bottom.contains("1 > edit *"), "{bottom}");
+        assert!(
+            bottom.contains(&format!("2026-05-11 {PLAIN_THIN_LEFT} 14:23")),
+            "{bottom}"
+        );
+        // The colours still separate the blocks.
+        assert_eq!(
+            cell_at(&surface, char_index(&bottom, "edit")).bg,
+            TEST_THEME.accent
+        );
+    }
+
+    /// A bar with no room for the whole right-hand block keeps the clock: the
+    /// time is the part you glance at, the date and host the parts you know.
+    #[test]
+    fn a_narrow_bar_keeps_the_clock_and_drops_the_date_and_host() {
+        let mut surface = Surface::new(48, 4);
+        let workspaces = [workspace(1, "build", true)];
+
+        draw_status_bar(
+            &mut surface,
+            &status_bar("dev", &workspaces, &[]),
+            TEST_THEME,
+        );
+
+        let bottom = bottom_row(&surface);
+        assert!(bottom.ends_with(" 14:23 "), "{bottom}");
+        assert!(!bottom.contains("2026-05-11"), "{bottom}");
+        assert!(!bottom.contains("testhost"), "{bottom}");
     }
 
     #[test]
@@ -578,48 +825,6 @@ mod tests {
     fn truncate_title_is_width_aware() {
         assert_eq!(truncate_title("abcdef", 4), "abc…");
         assert_eq!(truncate_title("界界界界", 5), "界界…");
-    }
-
-    #[test]
-    fn draw_status_bar_highlights_current_workspace() {
-        let mut surface = Surface::new(48, 4);
-        let now = chrono::Local
-            .with_ymd_and_hms(2026, 5, 11, 14, 23, 11)
-            .single()
-            .expect("test time exists");
-        let workspaces = [
-            super::WorkspaceIndicator {
-                number: 1,
-                name: String::new(),
-                is_current: true,
-                pane_count: 2,
-            },
-            super::WorkspaceIndicator {
-                number: 3,
-                name: "build".to_owned(),
-                is_current: false,
-                pane_count: 1,
-            },
-        ];
-
-        draw_status_bar(&mut surface, "NORMAL", &workspaces, &[], now, TEST_THEME);
-
-        let bottom: String = (0..surface.width)
-            .map(|x| surface.get(x, surface.height - 1).expect("cell exists").ch)
-            .collect();
-        assert!(bottom.starts_with("[NORMAL] "));
-        // A named window shows its name; an unnamed one is just its number.
-        assert!(bottom.contains("3:build"), "{bottom}");
-        assert!(bottom.contains(" 1 "));
-        assert!(bottom.contains("14:23:11"));
-
-        // Find the cell rendering the current workspace digit '1' and verify
-        // its background uses the accent color.
-        let one_idx = bottom.find(" 1 ").expect("workspace 1 present") + 1;
-        let cell = surface
-            .get(u16::try_from(one_idx).expect("fits"), surface.height - 1)
-            .expect("cell exists");
-        assert_eq!(cell.bg, Color::Red);
     }
 
     #[test]
