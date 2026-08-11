@@ -3555,7 +3555,9 @@ impl App {
 
         self.front = Surface::new(cols, rows);
         self.back = Surface::new(cols, rows);
-        self.recompute_layout();
+        // Every window, because the loop below resizes every pane in the
+        // session and reads each one's rect out of its own window's tree.
+        self.recompute_every_layout();
 
         // Every pane gets the size of its own slot in the new layout. Handing
         // them all the terminal size instead leaves each one drawing a screen
@@ -3756,15 +3758,38 @@ impl App {
         let root_rect = self.root_rect();
         let zoomed = self.current().zoomed;
         if let Some(root) = self.current_mut().root.as_mut() {
-            root.compute_layout(root_rect);
+            Self::lay_out(root, root_rect, zoomed);
+        }
+    }
 
-            // A zoomed pane is laid out normally and then stretched over the
-            // whole window. Leaving the rest of the tree at its real geometry
-            // is what lets unzooming animate straight back.
-            if let Some(zoomed) = zoomed {
-                if let Some(Node::Leaf { rect_target, .. }) = root.find_leaf_mut(zoomed) {
-                    *rect_target = root_rect;
-                }
+    /// Lay out every window, not just the one on screen.
+    ///
+    /// Windows all share the same screen area, so a terminal resize changes the
+    /// geometry of the hidden ones too — and `resize_to` hands every pane in
+    /// the session whatever rect its own window's tree claims. Leaving the
+    /// hidden trees at the old size tells those panes they are still the size
+    /// they were before you attached, so a full-screen program two windows over
+    /// draws itself for a terminal you are not using any more and stays that
+    /// way until something makes it repaint.
+    fn recompute_every_layout(&mut self) {
+        let root_rect = self.root_rect();
+        for workspace in &mut self.workspaces {
+            let zoomed = workspace.zoomed;
+            if let Some(root) = workspace.root.as_mut() {
+                Self::lay_out(root, root_rect, zoomed);
+            }
+        }
+    }
+
+    fn lay_out(root: &mut Node, root_rect: Rect, zoomed: Option<PaneId>) {
+        root.compute_layout(root_rect);
+
+        // A zoomed pane is laid out normally and then stretched over the whole
+        // window. Leaving the rest of the tree at its real geometry is what
+        // lets unzooming animate straight back.
+        if let Some(zoomed) = zoomed {
+            if let Some(Node::Leaf { rect_target, .. }) = root.find_leaf_mut(zoomed) {
+                *rect_target = root_rect;
             }
         }
     }
@@ -4844,6 +4869,42 @@ mod tests {
         }
         for pane in &app.panes {
             assert_eq!(pane.size(), (48, 27), "emulator grid follows the PTY");
+        }
+    }
+
+    /// A layout script builds every window before anyone attaches, so the
+    /// windows you are not looking at are the ones that were sized against the
+    /// provisional 80x24. If attaching only re-lays the current one, a
+    /// full-screen program two windows over is told it still has the old slot
+    /// and draws itself for a terminal nobody is using.
+    #[tokio::test]
+    async fn a_host_resize_reaches_panes_in_windows_that_are_not_on_screen() {
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        // Window 4, split in two, then back to window 1 — the shape a layout
+        // script leaves behind.
+        app.execute(command("new-window -t :4")).await.expect("new window");
+        app.execute(command("split-window -h")).await.expect("split");
+        app.execute(command("select-window -t :1")).await.expect("back to 1");
+        let background: Vec<PaneId> = app.workspaces[3].leaf_panes();
+        assert_eq!(background.len(), 2, "window 4 has both panes");
+        handle.clear_resized();
+
+        app.resize_to(300, 74).await;
+
+        // 300 wide, status bar takes a row: two 150x73 slots, 148x71 inside.
+        for pane in background {
+            assert!(
+                handle.resized().contains(&(pane, 148, 71)),
+                "background pane {pane:?} kept its old size: {:?}",
+                handle.resized()
+            );
+            assert_eq!(
+                app.pane(pane).expect("pane exists").size(),
+                (148, 71),
+                "emulator grid follows the PTY for hidden windows too"
+            );
         }
     }
 
