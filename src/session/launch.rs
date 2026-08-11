@@ -101,16 +101,19 @@ pub async fn run_server(args: &Args) -> anyhow::Result<()> {
 
     let server = SessionServer::bind(&name)?;
     tracing::info!("session {name} listening on {}", server.path().display());
-    let (session_rx, _socket_guard) = server.start();
+    let (session_rx, socket_guard) = server.start();
 
     // Size is provisional until a client attaches and reports its terminal.
     // The app is told its own name so a target like `-t other:1` is refused
-    // rather than quietly applied here.
+    // rather than quietly applied here, and where it is listening so
+    // `rename-session` can move the socket.
     let app = App::new(80, 24, args)
         .with_session_name(name.clone())
+        .with_session_socket(socket_guard.path())
         .into_session(session_rx);
     app.run().await?;
     tracing::info!("session {name} shut down");
+    drop(socket_guard);
 
     Ok(())
 }

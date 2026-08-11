@@ -139,6 +139,8 @@ pub enum Command {
     WaitFor { channel: String, action: WaitAction },
     /// Redraw every attached client from scratch.
     RefreshClient,
+    /// Give this session a new name.
+    RenameSession { target: Target, name: String },
     /// Close a pane, or every pane except it.
     KillPane {
         target: Target,
@@ -347,6 +349,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "if-shell",
     "wait-for",
     "refresh-client",
+    "rename-session",
 ];
 
 /// The pre-target weave names, still accepted.
@@ -399,6 +402,7 @@ impl Command {
                 target: parse_target_only(name, rest, TargetKind::Window)?,
             }),
             "rename-window" | "renamew" => parse_rename_window(name, rest),
+            "rename-session" | "rename" => parse_rename_session(name, rest),
 
             "resize-pane" | "resizep" => parse_resize_pane(name, rest),
             "swap-pane" | "swapp" => parse_swap_pane(name, rest),
@@ -1579,6 +1583,41 @@ fn parse_new_window(name: &str, args: &[String]) -> Result<Command, CommandError
     })
 }
 
+fn parse_rename_session(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut target = None;
+    let mut new_name = None;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-t" => target = Some(next_target(name, &mut args, "-t", TargetKind::Session)?),
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                if new_name.replace(other.to_owned()).is_some() {
+                    return Err(CommandError::UnexpectedArgument {
+                        command: name.to_owned(),
+                        argument: other.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    let new_name = new_name.ok_or_else(|| CommandError::MissingValue {
+        flag: "a new session name".to_owned(),
+    })?;
+
+    Ok(Command::RenameSession {
+        target: target.unwrap_or_default(),
+        name: new_name,
+    })
+}
+
 fn parse_rename_window(name: &str, args: &[String]) -> Result<Command, CommandError> {
     let mut target = None;
     let mut new_name = None;
@@ -2356,6 +2395,21 @@ mod tests {
     fn switch_client_is_not_planned() {
         let error = Command::parse_str("switch-client -t other").expect_err("no other session");
         assert!(error.to_string().contains("not planned"), "{error}");
+    }
+
+    #[test]
+    fn rename_session_takes_a_name() {
+        assert_eq!(
+            parse("rename-session dev"),
+            Command::RenameSession {
+                target: Target::current(),
+                name: "dev".to_owned(),
+            }
+        );
+        assert!(matches!(
+            Command::parse_str("rename-session"),
+            Err(CommandError::MissingValue { .. })
+        ));
     }
 
     #[test]

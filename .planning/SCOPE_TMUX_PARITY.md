@@ -176,7 +176,10 @@ nothing: a silently empty field in a listing is worse than a failed command.
 - `pane_current_command` is the pane's own process, not its foreground job.
 - `list-sessions` as a *command* describes the session it runs in; `wv ls`
   lists them all. A session server does not know about its neighbours.
-- `rename-session` is won't-do: the socket is named after the session.
+- ~~`rename-session` is won't-do: the socket is named after the session.~~
+  **Reversed 2026-08-11.** The reasoning was wrong: an established Unix socket
+  connection survives its path changing, so renaming moves the file and leaves
+  every attached client untouched. Implemented.
 
 # PR 7 — Prefix key, bindings, options, tmux config — **SHIPPED**
 

@@ -282,6 +282,8 @@ pub struct App {
     /// This session's name, so a target naming another session is rejected
     /// rather than silently applied here.
     session_name: Option<String>,
+    /// Where this session is listening, so `rename-session` can move it.
+    session_socket: Option<crate::session::server::SocketPath>,
     resize_mode: ResizeMode,
     backend: BoxedBackend,
     output_rx: mpsc::Receiver<(PaneId, Bytes)>,
@@ -688,6 +690,7 @@ impl App {
             pane_numbers,
             next_pane_number,
             session_name: None,
+            session_socket: None,
             resize_mode: ResizeMode::Normal,
             backend: backend_parts.backend,
             output_rx: backend_parts.output_rx,
@@ -726,6 +729,15 @@ impl App {
     /// Name this session, so targets naming a session can be checked.
     pub fn with_session_name(mut self, name: impl Into<String>) -> Self {
         self.session_name = Some(name.into());
+        self
+    }
+
+    /// Tell the session where it is listening, so it can rename itself.
+    pub fn with_session_socket(
+        mut self,
+        socket: crate::session::server::SocketPath,
+    ) -> Self {
+        self.session_socket = Some(socket);
         self
     }
 
@@ -1434,6 +1446,10 @@ impl App {
                 self.detach_for_command(target.as_deref(), all).await;
             }
             Command::RefreshClient => self.force_full_repaint(),
+            Command::RenameSession { target, name } => {
+                self.check_session(&target)?;
+                self.rename_session(&name)?;
+            }
             Command::KillSession { target } => {
                 self.check_session(&target)?;
                 self.exit = ExitState::Quit;
@@ -2271,6 +2287,60 @@ impl App {
             let _ = waiter.send(CommandResult::empty());
         }
         tracing::debug!("signalled `{channel}`, releasing {count} waiter(s)");
+    }
+
+    /// Give this session a new name, moving its socket to match.
+    ///
+    /// Renaming moves the listening socket, which established connections do
+    /// not care about: a Unix socket connection survives its path changing, so
+    /// every attached client keeps rendering through the rename. Only new
+    /// connections use the new name.
+    fn rename_session(&mut self, name: &str) -> Result<(), ExecuteError> {
+        crate::session::paths::validate_session_name(name)
+            .map_err(|error| Rejected::new(error.to_string()))?;
+
+        // Already called that: nothing to move, and nothing to complain about
+        // either — a script that sets a name unconditionally should not fail
+        // the second time it runs.
+        if self.session_name.as_deref() == Some(name) {
+            return Ok(());
+        }
+
+        let Some(socket) = self.session_socket.clone() else {
+            return Err(Rejected::new(
+                "this weave is not running as a session, so it has no name".to_owned(),
+            )
+            .into());
+        };
+
+        let destination = crate::session::paths::socket_path(name)
+            .map_err(|error| Rejected::new(error.to_string()))?;
+        if crate::session::paths::is_socket_live(&destination) {
+            return Err(Rejected::new(format!(
+                "a weave session named `{name}` is already running"
+            ))
+            .into());
+        }
+
+        let current = socket.get();
+        std::fs::rename(&current, &destination).map_err(|error| {
+            Rejected::new(format!(
+                "failed to move the session socket to {}: {error}",
+                destination.display()
+            ))
+        })?;
+
+        // The guard unlinks whatever the socket is called now, so it has to
+        // learn the new path or shutdown would leave the renamed one behind.
+        socket.set(destination);
+        let previous = self.session_name.replace(name.to_owned());
+        tracing::info!(
+            "session renamed from {} to {name}",
+            previous.as_deref().unwrap_or("(unnamed)")
+        );
+        self.dirty = true;
+
+        Ok(())
     }
 
     /// Put a message on the status line for a while.
@@ -3345,6 +3415,7 @@ impl App {
             pane_numbers: std::iter::once((pane_id, 1)).collect(),
             next_pane_number: 2,
             session_name: None,
+            session_socket: None,
             resize_mode: ResizeMode::Normal,
             backend,
             output_rx,
@@ -3626,6 +3697,7 @@ mod tests {
     use crate::backend::{PaneBackend, PaneCommand, PaneId};
     use crate::command::Command;
     use crate::layout::geometry::{FRect, Split};
+    use crate::command::Target;
     use crate::session::protocol::{CommandResult, ServerToClient};
     use tokio::sync::mpsc;
     use crate::layout::tree::Node;
@@ -4786,6 +4858,54 @@ mod tests {
             .expect("refresh succeeds");
 
         assert!(app.clients[0].needs_full_repaint);
+    }
+
+    #[tokio::test]
+    async fn rename_session_needs_a_session_to_rename() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        let result = app
+            .execute_request(command("rename-session newname"))
+            .await
+            .expect("the request completes");
+
+        assert!(!result.is_ok(), "a local weave has no session name to change");
+    }
+
+    #[tokio::test]
+    async fn rename_session_rejects_a_name_the_socket_layer_would_refuse() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.session_name = Some("dev".to_owned());
+
+        for bad in ["with space", "slash/name", ""] {
+            let result = app
+                .execute_request(Command::RenameSession {
+                    target: Target::current(),
+                    name: bad.to_owned(),
+                })
+                .await
+                .expect("the request completes");
+            assert!(!result.is_ok(), "`{bad}` should be refused");
+        }
+    }
+
+    /// Renaming to the name it already has is a no-op, not an error: a script
+    /// that sets a name unconditionally should not fail on the second run.
+    #[tokio::test]
+    async fn renaming_to_the_current_name_is_a_no_op() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.session_name = Some("dev".to_owned());
+
+        let result = app
+            .execute_request(command("rename-session dev"))
+            .await
+            .expect("the request completes");
+
+        assert!(result.is_ok());
+        assert_eq!(app.session_name.as_deref(), Some("dev"));
     }
 
     /// A waiting caller gets the command's output, not just "it ran".
