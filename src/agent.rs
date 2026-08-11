@@ -5,9 +5,15 @@
 //! `Working` while it is producing output, `Waiting` when it has stopped at a
 //! question, and `Idle` when it has stopped and wants nothing.
 //!
-//! The signal is the pane's own output, which weave already sees every byte
-//! of. Nothing is asked of the agent, so this works for any tool that prints
-//! while it thinks — which is all of them.
+//! The signal is the pane's own screen, which weave already renders. Nothing
+//! is asked of the agent, so this works for any tool that prints while it
+//! thinks — which is all of them.
+//!
+//! Specifically the screen, not the bytes behind it. An agent's PTY never
+//! really goes quiet: idle Claude Code writes eight bytes a second to blink
+//! its cursor and idle Codex around fifty, so "has it produced output lately"
+//! answers yes forever and no agent is ever seen to stop. What those bytes do
+//! not do is change any text on screen, so that is what gets watched instead.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -36,7 +42,7 @@ pub struct AgentTracker {
 }
 
 impl AgentTracker {
-    /// Record that a pane just produced output.
+    /// Record that a pane's screen just changed.
     pub fn note_output(&mut self, pane: PaneId, at: Instant) {
         self.last_output.insert(pane, at);
     }
