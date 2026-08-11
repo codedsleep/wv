@@ -278,8 +278,32 @@ The right end holds the date, the clock and the host — tmux's `#H`. A bar too
 narrow for all three keeps the clock and drops the rest: the time is the part
 you glance at, the date and the host the parts you already know.
 
+A message and an open `command-prompt` take the leftmost block, and take
+tmux's `message-style` with it — the block changes colour rather than just its
+text, so a three-second notice does not read as a renamed session.
+
 `status-left`, `status-right` and `status-style` are still accepted as options
 but inert: the bar is not format-driven.
+
+## Colours
+
+The `nord` preset is the palette `nordtheme/tmux` resolves to, so weave beside
+tmux is the same bar twice:
+
+| What | tmux | nord |
+|---|---|---|
+| The bar | `status-style bg=black` | `#3b4252` |
+| A window you are not in | `bg=brightblack` | `#4c566a` |
+| The session block | `bg=blue` | `#81a1c1` |
+| The current window, the host | `bg=cyan` | `#88c0d0` |
+| Active pane border | `pane-active-border-style fg=blue` | `#81a1c1` |
+| Other pane borders | `pane-border-style fg=brightblack` | `#4c566a` |
+| A message or prompt | `message-style bg=brightblack,fg=cyan` | on `#4c566a` |
+
+The border takes blue rather than cyan on purpose: cyan is what marks the
+current window, and one accent doing two jobs is one fewer thing the eye can
+rely on. `pane-border-style` and `pane-active-border-style` are not read from
+a `.tmux.conf` — set `border_focused` and `border_unfocused` under `[theme]`.
 
 ### Without a patched font
 

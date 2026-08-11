@@ -1572,6 +1572,12 @@ impl App {
     /// Returns an owned string: the caller needs it alive while it holds a
     /// mutable borrow of the back surface, and one short allocation per frame
     /// is nothing beside the per-pane surfaces the compositor already builds.
+    /// Whether the leftmost block is showing something other than the session
+    /// name, so the bar can give it tmux's `message-style` instead.
+    fn status_left_is_notice(&self) -> bool {
+        self.prompt.is_some() || self.message.is_some()
+    }
+
     fn status_left(&self) -> String {
         if let Some(prompt) = self.prompt.as_ref() {
             return prompt.render();
@@ -3602,10 +3608,12 @@ impl App {
             let indicators = self.workspace_indicators();
             let agents = self.agent_indicators.clone();
             let status_left = self.status_left();
+            let left_is_notice = self.status_left_is_notice();
             chrome::draw_status_bar(
                 &mut self.back,
                 &chrome::StatusBar {
                     left: &status_left,
+                    left_is_notice,
                     workspaces: &indicators,
                     agents: &agents,
                     host: hostname(),
@@ -5856,6 +5864,7 @@ mod tests {
             &mut back,
             &crate::render::chrome::StatusBar {
                 left: &app.status_left(),
+                left_is_notice: app.status_left_is_notice(),
                 workspaces: &indicators,
                 agents: &agents,
                 host: super::hostname(),

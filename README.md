@@ -110,8 +110,8 @@ target_fps   = 160
 [theme]
 preset = "nord"   # or "tokyonight"
 # Per-key overrides win over the preset:
-# border_focused   = "#88c0d0"
-# border_unfocused = "#3b4252"
+# border_focused   = "#81a1c1"   # active pane border
+# border_unfocused = "#4c566a"
 # status_fg        = "#e5e9f0"
 # status_bg        = "#3b4252"   # the bar itself
 # status_segment   = "#4c566a"   # the quiet blocks: other windows, the clock
