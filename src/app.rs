@@ -28,6 +28,7 @@ use crate::input::keymap::{format_key, Binding, Keymap, PREFIX_TABLE, ROOT_TABLE
 use crate::input::keys::parse_binding_key;
 use crate::layout::geometry::{Direction, FRect, Rect, Split};
 use crate::layout::tree::{self, Node};
+use crate::render::compositor::CursorPlacement;
 use crate::render::diff::{ColorMode, DiffRenderer};
 use crate::render::{chrome, compositor};
 use crate::session::protocol::{ClientToServer, CommandResult, ExitReason, ServerToClient};
@@ -189,6 +190,26 @@ fn expand_format(template: &str, vars: &Variables) -> Result<String, Rejected> {
     expand_format_impl(template, vars).map_err(|error| Rejected::new(error.to_string()))
 }
 
+/// Write the escape sequences that put the terminal cursor where this frame
+/// wants it, or hide it when the frame wants none.
+///
+/// This runs after the diff, which leaves the physical cursor wherever its
+/// last run of text ended.
+fn queue_cursor<W: std::io::Write>(
+    out: &mut W,
+    cursor: Option<CursorPlacement>,
+) -> std::io::Result<()> {
+    let Some(CursorPlacement { x, y }) = cursor else {
+        return crossterm::queue!(out, crossterm::cursor::Hide);
+    };
+
+    crossterm::queue!(
+        out,
+        crossterm::cursor::MoveTo(x, y),
+        crossterm::cursor::Show
+    )
+}
+
 /// One terminal watching the session.
 ///
 /// Each client keeps its own `front` surface and `DiffRenderer`: a diff frame
@@ -205,6 +226,9 @@ struct AttachedClient {
     /// Set on attach and on resize: the next frame must redraw every cell,
     /// because what this terminal is showing is no longer known.
     needs_full_repaint: bool,
+    /// Where this terminal's cursor was left by the last frame it was sent, so
+    /// a frame is not sent purely to repeat a placement it already has.
+    cursor: Option<CursorPlacement>,
 }
 
 impl AttachedClient {
@@ -231,6 +255,7 @@ impl AttachedClient {
             diff,
             buf: Vec::new(),
             needs_full_repaint: true,
+            cursor: None,
         }
     }
 }
@@ -328,6 +353,9 @@ impl From<anyhow::Error> for ExecuteError {
 pub struct App {
     front: Surface,
     back: Surface,
+    /// Where the last composed frame put the terminal cursor, shared by the
+    /// local screen and every client so they agree on the placement.
+    cursor: Option<CursorPlacement>,
     panes: Vec<Pane>,
     workspaces: Vec<Workspace>,
     current_workspace: usize,
@@ -760,6 +788,7 @@ impl App {
         Self {
             front: Surface::new(width, height),
             back: Surface::new(width, height),
+            cursor: None,
             panes: initial_panes
                 .into_iter()
                 .map(|pane| Pane::new(pane, width, height))
@@ -2001,6 +2030,7 @@ impl App {
     /// Send this frame to every client, each diffed against its own screen.
     fn flush_clients(&mut self) -> anyhow::Result<()> {
         let back = &self.back;
+        let cursor = self.cursor;
 
         for client in &mut self.clients {
             client.buf.clear();
@@ -2016,6 +2046,16 @@ impl App {
             }
 
             client.diff.flush(&client.front, back, &mut client.buf)?;
+
+            // Painting moves the cursor, so any frame that painted has to put
+            // it back. A frame that painted nothing only needs it when the
+            // placement itself changed — otherwise this would send every
+            // client a frame on every tick.
+            if !client.buf.is_empty() || client.cursor != cursor {
+                queue_cursor(&mut client.buf, cursor)?;
+                client.cursor = cursor;
+            }
+
             if !client.buf.is_empty() {
                 let frame = ServerToClient::Frame(std::mem::take(&mut client.buf));
                 // A send failure means the client is gone; `ClientGone` will
@@ -3168,10 +3208,11 @@ impl App {
         literal: bool,
     ) -> Result<(), ExecuteError> {
         let mut bytes = Vec::new();
+        let flags = self.keyboard_flags(pane);
 
         for key in keys {
             match (literal, crate::input::keys::parse_key_name(key)) {
-                (false, Some(event)) => match crate::input::encode(&event) {
+                (false, Some(event)) => match crate::input::encode_with(&event, flags) {
                     Some(encoded) => bytes.extend(encoded),
                     None => {
                         return Err(Rejected::new(format!(
@@ -3483,7 +3524,11 @@ impl App {
             return Ok(());
         };
 
-        if let Some(bytes) = input::encode(&key) {
+        // Encoded against what the focused pane's program asked for, so a
+        // program that negotiated the kitty keyboard protocol gets the keys it
+        // negotiated and one that did not is unaffected.
+        let flags = self.keyboard_flags(focused);
+        if let Some(bytes) = input::encode_with(&key, flags) {
             if let Err(error) = self.backend.write(focused, &bytes).await {
                 tracing::warn!("failed to write input to pane: {error:#}");
             }
@@ -3631,13 +3676,27 @@ impl App {
             let debug_overlay = self.debug_overlay();
             chrome::draw_debug_overlay(&mut self.back, debug_overlay);
         }
+        let cursor = compositor::focused_cursor(
+            root,
+            &self.panes,
+            focused,
+            compositor::ComposeOptions {
+                pane_titles: self.pane_titles,
+                zoomed: self.workspaces[self.current_workspace].zoomed,
+            },
+        );
+
         if self.sink.is_attached() {
             // Running locally: one screen, and the buffers can be swapped
             // rather than copied.
             self.diff.flush(&self.front, &self.back, &mut self.sink)?;
+            // After the diff, always: it left the cursor at the end of the
+            // last run it painted.
+            queue_cursor(&mut self.sink, cursor)?;
             self.sink.flush()?;
             std::mem::swap(&mut self.front, &mut self.back);
         }
+        self.cursor = cursor;
         self.flush_clients()?;
 
         self.back.clear();
@@ -3865,6 +3924,12 @@ impl App {
         self.panes.iter_mut().find(|pane| pane.id() == id)
     }
 
+    /// The kitty keyboard flags a pane's program negotiated, or none if the
+    /// pane is gone.
+    fn keyboard_flags(&self, id: PaneId) -> u8 {
+        self.pane(id).map_or(0, Pane::keyboard_flags)
+    }
+
     fn remove_pane(&mut self, id: PaneId) {
         self.panes.retain(|pane| pane.id() != id);
         self.agents.forget(id);
@@ -3947,6 +4012,7 @@ impl App {
         Self {
             front: Surface::new(width, height),
             back: Surface::new(width, height),
+            cursor: None,
             panes: vec![Pane::new(pane_id, width, height)],
             workspaces,
             current_workspace: 0,

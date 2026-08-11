@@ -9,10 +9,17 @@
 //! prompt.
 //!
 //! Only queries weave can answer truthfully are intercepted. Probes for
-//! features it does not implement (kitty keyboard, XTVERSION, XTGETTCAP, OSC
-//! background color) are deliberately left unanswered: silence is how a
-//! terminal says "unsupported", and the DA1 fence is what tells the program no
-//! more answers are coming.
+//! features it does not implement (XTVERSION, XTGETTCAP, OSC background color)
+//! are deliberately left unanswered: silence is how a terminal says
+//! "unsupported", and the DA1 fence is what tells the program no more answers
+//! are coming.
+//!
+//! The kitty keyboard protocol is the exception that is answered rather than
+//! ignored. Programs use it to tell ESC apart from the start of an escape
+//! sequence, and a program told "unsupported" falls back to timing guesses —
+//! which is what makes vim-style modes in a pane feel unreliable. The requests
+//! are per-pane state rather than one-shot answers, so they get their own
+//! segment kind and are tracked by [`crate::term::pane::Pane`].
 
 /// A query weave answers on a pane's behalf.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +42,26 @@ pub enum Segment {
     /// A query to answer. Its bytes are consumed, not forwarded: they carry no
     /// display meaning, and answering is the whole point.
     Query(Query),
+    /// A kitty keyboard protocol request, changing or reporting the flags this
+    /// pane's program wants its keys encoded with.
+    Keyboard(KeyboardRequest),
+}
+
+/// A pane's kitty keyboard protocol request.
+///
+/// The protocol is a stack of flag sets: a program pushes what it wants on
+/// entry and pops it on exit, so a nested program cannot leave the outer one
+/// with settings it never asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyboardRequest {
+    /// `CSI ? u` — report the flags currently in effect.
+    Report,
+    /// `CSI > flags u` — push a new flag set.
+    Push(u8),
+    /// `CSI < number u` — pop that many flag sets.
+    Pop(u16),
+    /// `CSI = flags ; mode u` — change the flags already on top of the stack.
+    Set { flags: u8, mode: u8 },
 }
 
 /// Longest incomplete escape sequence held while waiting for the rest of it.
@@ -55,6 +82,8 @@ pub struct QueryScanner {
 enum Parsed {
     /// A query, and how many bytes it occupies.
     Query(Query, usize),
+    /// A kitty keyboard request, and how many bytes it occupies.
+    Keyboard(KeyboardRequest, usize),
     /// A sequence the emulator does not implement, the bytes to feed it in
     /// place of the original, and how many bytes the original occupies.
     Rewritten(Vec<u8>, usize),
@@ -84,6 +113,12 @@ impl QueryScanner {
                 Parsed::Query(query, length) => {
                     push_data(&mut segments, &buf[data_start..index]);
                     segments.push(Segment::Query(query));
+                    index += length;
+                    data_start = index;
+                }
+                Parsed::Keyboard(request, length) => {
+                    push_data(&mut segments, &buf[data_start..index]);
+                    segments.push(Segment::Keyboard(request));
                     index += length;
                     data_start = index;
                 }
@@ -147,6 +182,13 @@ fn parse_csi(buf: &[u8]) -> Parsed {
                 (b">" | b">0", b'c') => Parsed::Query(Query::SecondaryDeviceAttributes, length),
                 (b"5", b'n') => Parsed::Query(Query::DeviceStatus, length),
                 (b"6", b'n') => Parsed::Query(Query::CursorPosition, length),
+                (params, b'u') => match parse_keyboard_request(params) {
+                    Some(request) => Parsed::Keyboard(request, length),
+                    // A bare `CSI number u` is the protocol's *key* encoding,
+                    // not a request. Nothing sends one upstream, so it is left
+                    // alone rather than guessed at.
+                    None => Parsed::Other(length),
+                },
                 // HVP is CUP under another name — same parameters, same
                 // effect — but `vt100` implements only CUP and drops HVP on
                 // the floor. A program that positions with HVP then paints its
@@ -167,6 +209,61 @@ fn parse_csi(buf: &[u8]) -> Parsed {
     }
 
     Parsed::Incomplete
+}
+
+/// Read the parameter bytes of a `CSI ... u` as a keyboard protocol request.
+///
+/// Returns `None` for anything that is not one of the four request forms,
+/// including the bare numeric form that encodes a key rather than asking for
+/// anything.
+fn parse_keyboard_request(params: &[u8]) -> Option<KeyboardRequest> {
+    let (marker, rest) = params.split_first()?;
+
+    match marker {
+        b'?' if rest.is_empty() => Some(KeyboardRequest::Report),
+        // A push with no number pushes an empty flag set, which is how a
+        // program says "no enhancements, and remember what was here".
+        b'>' => Some(KeyboardRequest::Push(parse_byte_param(rest, 0))),
+        // Popping defaults to one level, not zero: `CSI < u` is the common
+        // spelling of "undo my push".
+        b'<' => Some(KeyboardRequest::Pop(parse_param(rest).unwrap_or(1))),
+        b'=' => {
+            let mut parts = rest.split(|byte| *byte == b';');
+            let flags = parse_byte_param(parts.next().unwrap_or_default(), 0);
+            let mode = parse_byte_param(parts.next().unwrap_or_default(), 1);
+            Some(KeyboardRequest::Set { flags, mode })
+        }
+        _ => None,
+    }
+}
+
+/// Parse a parameter that has to fit in a byte, as the flag and mode ones do.
+///
+/// Absent or out of range both fall back to `default`: every flag the protocol
+/// defines fits in a byte, so a larger number is not a flag set weave could
+/// honour even in part.
+fn parse_byte_param(bytes: &[u8], default: u8) -> u8 {
+    parse_param(bytes)
+        .and_then(|value| u8::try_from(value).ok())
+        .unwrap_or(default)
+}
+
+/// Parse one CSI parameter, saturating rather than wrapping on a long run of
+/// digits. An empty parameter is absent, which the caller turns into a default.
+fn parse_param(bytes: &[u8]) -> Option<u16> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    Some(
+        bytes
+            .iter()
+            .fold(0u16, |value, byte| {
+                value
+                    .saturating_mul(10)
+                    .saturating_add(u16::from(byte - b'0'))
+            }),
+    )
 }
 
 /// Whether a CSI's parameter bytes are a plain numeric list.
@@ -219,9 +316,14 @@ pub fn reply(query: Query, row: u16, col: u16) -> Vec<u8> {
     }
 }
 
+/// The answer to `CSI ? u`: the flags currently in effect for that pane.
+pub fn keyboard_reply(flags: u8) -> Vec<u8> {
+    format!("\x1b[?{flags}u").into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{reply, Query, QueryScanner, Segment};
+    use super::{reply, KeyboardRequest, Query, QueryScanner, Segment};
 
     fn data(bytes: &[u8]) -> Segment {
         Segment::Data(bytes.to_vec())
@@ -282,10 +384,11 @@ mod tests {
         );
     }
 
-    /// The exact burst fish sends after its greeting: feature probes it does
-    /// not need answered, fenced by the DA1 that it blocks on.
+    /// The exact burst fish sends after its greeting: feature probes fenced by
+    /// the DA1 it blocks on. The keyboard probe that opens it is answered too;
+    /// the rest are not, and reach the emulator untouched.
     #[test]
-    fn only_the_da1_fence_is_answered_in_a_shell_probe_burst() {
+    fn a_shell_probe_burst_answers_the_da1_fence_and_the_keyboard_probe() {
         let mut scanner = QueryScanner::default();
         let burst = b"\x1b[?u\x1b[>0q\x1b]11;?\x1b\\\x1b[?1049h\x1bP+q696e646e\x1b\\\x1b[?1049l\x1b[0c";
 
@@ -295,21 +398,74 @@ mod tests {
             .iter()
             .filter_map(|segment| match segment {
                 Segment::Query(query) => Some(*query),
-                Segment::Data(_) => None,
+                _ => None,
             })
             .collect();
         assert_eq!(queries, vec![Query::PrimaryDeviceAttributes]);
 
-        // Everything else still reaches the emulator, in order.
+        let keyboard: Vec<_> = segments
+            .iter()
+            .filter_map(|segment| match segment {
+                Segment::Keyboard(request) => Some(*request),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keyboard, vec![KeyboardRequest::Report]);
+
+        // Everything else still reaches the emulator, in order: the burst
+        // without the four leading bytes of the keyboard probe and the four
+        // trailing ones of the DA1.
         let forwarded: Vec<u8> = segments
             .iter()
             .filter_map(|segment| match segment {
                 Segment::Data(bytes) => Some(bytes.clone()),
-                Segment::Query(_) => None,
+                _ => None,
             })
             .flatten()
             .collect();
-        assert_eq!(forwarded, &burst[..burst.len() - 4]);
+        assert_eq!(forwarded, &burst[4..burst.len() - 4]);
+    }
+
+    #[test]
+    fn keyboard_requests_are_parsed_in_all_four_forms() {
+        let mut scanner = QueryScanner::default();
+
+        assert_eq!(
+            scanner.feed(b"\x1b[?u\x1b[>5u\x1b[<2u\x1b[=3;2u"),
+            vec![
+                Segment::Keyboard(KeyboardRequest::Report),
+                Segment::Keyboard(KeyboardRequest::Push(5)),
+                Segment::Keyboard(KeyboardRequest::Pop(2)),
+                Segment::Keyboard(KeyboardRequest::Set { flags: 3, mode: 2 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn keyboard_requests_default_their_omitted_parameters() {
+        let mut scanner = QueryScanner::default();
+
+        assert_eq!(
+            scanner.feed(b"\x1b[>u\x1b[<u\x1b[=4u"),
+            vec![
+                // A push with no flags is a push of none.
+                Segment::Keyboard(KeyboardRequest::Push(0)),
+                // A pop with no count pops one level, not zero.
+                Segment::Keyboard(KeyboardRequest::Pop(1)),
+                // A set with no mode replaces the flags outright.
+                Segment::Keyboard(KeyboardRequest::Set { flags: 4, mode: 1 }),
+            ]
+        );
+    }
+
+    /// `CSI number u` is how the protocol encodes a *key*, not a request about
+    /// it. Nothing sends one to a terminal, and treating it as a request would
+    /// swallow a byte sequence that belongs to the emulator.
+    #[test]
+    fn a_bare_numeric_csi_u_is_not_a_keyboard_request() {
+        let mut scanner = QueryScanner::default();
+
+        assert_eq!(scanner.feed(b"\x1b[27u"), vec![data(b"\x1b[27u")]);
     }
 
     /// `vt100` implements CUP but not HVP, so HVP has to arrive as CUP or the

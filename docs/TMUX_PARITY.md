@@ -194,6 +194,41 @@ neighbour in that direction the way a tiling window manager does. tmux has no
 equivalent key; the underlying command is `swap-pane -t {left-of}`, aliased as
 `move-left` and friends.
 
+### Modified keys and the kitty keyboard protocol
+
+The encoding every terminal has always used cannot express most modified keys.
+There is no byte sequence for `Shift+Enter`, and `Esc` is the same `\x1b` byte
+that starts every escape sequence, so a program has to tell them apart by
+timing — which is what makes vim-style modes in a pane feel unreliable.
+
+Weave handles this the way tmux does with `extended-keys on` and
+`extended-keys-format csi-u`, except that it is the default and there is no
+option to set:
+
+- A pane's program can negotiate the kitty keyboard protocol (`CSI > flags u`
+  and friends). Weave tracks the flag stack per pane, answers `CSI ? u` with
+  what is in effect, and encodes that pane's keys accordingly. A program that
+  asks for nothing is unaffected.
+- Modified keys with no legacy encoding — `Shift+Enter`, `Ctrl+Tab`,
+  `Alt+Backspace` — go out in the protocol's `CSI code ; modifiers u` form
+  whether or not the pane asked. The alternative is dropping the modifier and
+  delivering a keypress that was never made.
+- Modified keys that *do* have a legacy encoding keep it: `Ctrl+Up` is
+  `CSI 1;5A`, and unmodified keys are byte-for-byte what they always were.
+
+Weave asks its own terminal for `DISAMBIGUATE_ESCAPE_CODES` on attach and pops
+it on exit, so `Esc` arrives unambiguously from the outside too. A terminal
+that does not support the protocol is left alone.
+
+### The cursor
+
+The composed frame is a grid of cells and carries no cursor of its own, so
+after each flush weave puts the terminal's real cursor on the focused pane's
+own cursor, mapped through that pane's current rectangle. It tracks the pane
+through a resize tween rather than jumping at the end, and it is hidden when
+the focused pane's program hides it, when the focused pane is behind a zoomed
+one, or when its cursor falls outside the rectangle it is drawn in.
+
 ### Prompts
 
 A rename needs a name, and a keybinding cannot supply one, so both rename keys
