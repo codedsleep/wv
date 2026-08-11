@@ -71,9 +71,13 @@ pub fn draw_borders(
     }
 }
 
+/// Draw the status bar.
+///
+/// `status_left` is what sits at the far left in brackets: normally the
+/// session name, and a message or an open prompt while either is up.
 pub fn draw_status_bar(
     surface: &mut Surface,
-    mode_label: &str,
+    status_left: &str,
     workspaces: &[WorkspaceIndicator],
     now: chrono::DateTime<chrono::Local>,
     theme: ThemeConfig,
@@ -90,7 +94,7 @@ pub fn draw_status_bar(
     let mut x: u16 = 0;
     let max_x = surface.width;
 
-    let prefix = format!("[{mode_label}] ");
+    let prefix = format!("[{status_left}] ");
     x = write_status_text(
         surface,
         x,

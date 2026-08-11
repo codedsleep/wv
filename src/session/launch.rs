@@ -112,7 +112,15 @@ pub async fn run_server(args: &Args) -> anyhow::Result<()> {
         .with_session_socket(socket_guard.path())
         .into_session(session_rx);
     app.run().await?;
-    tracing::info!("session {name} shut down");
+    // The socket path is the only thing that tracks a rename, so read the name
+    // back from it: `name` is what the session was called at startup, which is
+    // wrong in the log if it was renamed since.
+    let final_name = socket_guard
+        .path()
+        .get()
+        .file_stem()
+        .map_or_else(|| name.clone(), |stem| stem.to_string_lossy().into_owned());
+    tracing::info!("session {final_name} shut down");
     drop(socket_guard);
 
     Ok(())
