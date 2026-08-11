@@ -3823,9 +3823,17 @@ impl App {
         self.pane_numbers.remove(&id);
     }
 
+    /// Push a size to the pane's PTY.
+    ///
+    /// Clamped to a cell for the same reason the emulator is: a pane can be
+    /// squeezed until its content area is nothing, and a process told it has
+    /// zero rows draws as if it had no screen at all.
     async fn resize_pane(&mut self, pane: PaneId, cols: u16, rows: u16) -> anyhow::Result<()> {
         debug_assert!(self.is_safe_to_resize(pane));
-        self.backend.resize(pane, cols, rows).await
+        let floor = crate::term::pane::MIN_GRID;
+        self.backend
+            .resize(pane, cols.max(floor), rows.max(floor))
+            .await
     }
 
     /// Resize a pane to fit a window it was just placed in.
