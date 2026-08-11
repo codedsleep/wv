@@ -375,6 +375,10 @@ pub const ALIAS_NAMES: &[&str] = &[
     "focus-right",
     "focus-up",
     "focus-down",
+    "move-left",
+    "move-right",
+    "move-up",
+    "move-down",
     "close",
     "detach",
     "quit",
@@ -406,6 +410,13 @@ impl Command {
             "focus-right" => parse_select_pane(name, rest, Some(Direction::Right)),
             "focus-up" => parse_select_pane(name, rest, Some(Direction::Up)),
             "focus-down" => parse_select_pane(name, rest, Some(Direction::Down)),
+
+            // Move the focused pane itself, trading places with the neighbour
+            // in that direction. `swap-pane -t {left-of}` spelled short.
+            "move-left" => Ok(swap_toward(Direction::Left)),
+            "move-right" => Ok(swap_toward(Direction::Right)),
+            "move-up" => Ok(swap_toward(Direction::Up)),
+            "move-down" => Ok(swap_toward(Direction::Down)),
 
             "select-window" | "selectw" => parse_select_window(name, rest, None),
             "next-window" | "nextw" => Ok(relative_window(WindowRef::Next)),
@@ -806,6 +817,16 @@ fn parse_swap_pane(name: &str, args: &[String]) -> Result<Command, CommandError>
         target: target.unwrap_or_default(),
         keep_focus,
     })
+}
+
+/// `move-left` and friends: swap the current pane with its neighbour.
+pub fn swap_toward(direction: Direction) -> Command {
+    Command::SwapPane {
+        source: Target::current(),
+        target: relative_pane(PaneRef::DirectionOf(direction)),
+        // Focus rides along with the pane that moved.
+        keep_focus: false,
+    }
 }
 
 fn relative_pane(pane: PaneRef) -> Target {

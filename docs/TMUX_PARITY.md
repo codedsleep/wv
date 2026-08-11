@@ -34,6 +34,7 @@ means the current one.
 | `+` `-` `{next}` `{previous}` | yes | Walks layout order, wrapping |
 | `!` `{last}` | yes | Previously focused pane, or previous window |
 | `{top}` `{bottom}` `{left}` `{right}` | yes | Extreme pane by geometry |
+| `{left-of}` `{right-of}` `{up-of}` `{down-of}` | yes | Nearest neighbour of the current pane in that direction |
 | `:N` window index | yes | One-based; maps to workspaces 1–9 |
 | `{start}` `{end}` | yes | Lowest/highest occupied workspace |
 | `:name` window name | yes | Automatic from the pane title, or set by `rename-window` |
@@ -187,6 +188,11 @@ session, digits select windows, arrows move focus and `C-`arrows resize
 
 `Alt+R` renames the current window and `Alt+Shift+R` the session, without a
 prefix.
+
+`Alt+Shift+H`/`J`/`K`/`L` move the focused pane itself, swapping it with the
+neighbour in that direction the way a tiling window manager does. tmux has no
+equivalent key; the underlying command is `swap-pane -t {left-of}`, aliased as
+`move-left` and friends.
 
 ### Prompts
 

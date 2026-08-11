@@ -20,6 +20,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::layout::geometry::Direction;
+
 /// What a bare, unpunctuated target token means for a given command.
 ///
 /// `wv kill-pane -t 2` means pane 2, while `wv select-window -t 2` means
@@ -75,6 +77,10 @@ pub enum PaneRef {
     Last,
     /// `{top}`, `{bottom}`, `{left}`, `{right}` — extreme pane by geometry.
     Extreme(Extreme),
+    /// `{left-of}`, `{right-of}`, `{up-of}`, `{down-of}` — the nearest pane in
+    /// that direction from the current one, the same neighbour `select-pane
+    /// -L`-style focus movement would land on.
+    DirectionOf(Direction),
 }
 
 /// Geometric extremes addressable as `{top}`, `{bottom}`, `{left}`, `{right}`.
@@ -252,6 +258,10 @@ fn parse_pane(value: &str) -> Result<PaneRef, TargetError> {
             "bottom" => Ok(PaneRef::Extreme(Extreme::Bottom)),
             "left" => Ok(PaneRef::Extreme(Extreme::Left)),
             "right" => Ok(PaneRef::Extreme(Extreme::Right)),
+            "left-of" => Ok(PaneRef::DirectionOf(Direction::Left)),
+            "right-of" => Ok(PaneRef::DirectionOf(Direction::Right)),
+            "up-of" => Ok(PaneRef::DirectionOf(Direction::Up)),
+            "down-of" => Ok(PaneRef::DirectionOf(Direction::Down)),
             other => Err(TargetError::Token(other.to_owned())),
         };
     }
@@ -297,7 +307,7 @@ fn parse_number(value: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Extreme, PaneRef, Target, TargetError, TargetKind, WindowRef};
+    use super::{Direction, Extreme, PaneRef, Target, TargetError, TargetKind, WindowRef};
 
     fn pane(value: &str) -> Target {
         Target::parse(value, TargetKind::Pane).expect("target parses")
@@ -374,6 +384,14 @@ mod tests {
         assert_eq!(pane("!").pane, Some(PaneRef::Last));
         assert_eq!(pane("{last}").pane, Some(PaneRef::Last));
         assert_eq!(pane("{top}").pane, Some(PaneRef::Extreme(Extreme::Top)));
+        assert_eq!(
+            pane("{left-of}").pane,
+            Some(PaneRef::DirectionOf(Direction::Left))
+        );
+        assert_eq!(
+            pane("{down-of}").pane,
+            Some(PaneRef::DirectionOf(Direction::Down))
+        );
         assert_eq!(window("{end}").window, Some(WindowRef::End));
         assert_eq!(window("+").window, Some(WindowRef::Next));
     }

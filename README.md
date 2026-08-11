@@ -62,6 +62,7 @@ wv --debug
 | `Alt+Enter`               | Split horizontal             |
 | `Alt+V`                   | Split vertical               |
 | `Alt+H` / `J` / `K` / `L` | Focus left / down / up / right |
+| `Alt+Shift+H` / `J` / `K` / `L` | Move the focused pane left / down / up / right |
 | `Alt+R`                   | Rename the current window (prompts) |
 | `Alt+Shift+R`             | Rename the session (prompts) |
 | `Alt+Q`                   | Close focused pane           |
@@ -89,6 +90,10 @@ Bezier curves were tuned against [Hyprland's](https://wiki.hyprland.org/Configur
 "Alt+j"     = "focus-down"
 "Alt+k"     = "focus-up"
 "Alt+l"     = "focus-right"
+"Alt+H"     = "move-left"
+"Alt+J"     = "move-down"
+"Alt+K"     = "move-up"
+"Alt+L"     = "move-right"
 "Alt+v"     = "split-v"
 "Alt+Enter" = "split-h"
 "Alt+q"     = "close"
