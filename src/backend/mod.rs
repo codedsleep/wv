@@ -69,18 +69,23 @@ pub trait PaneBackend: Send {
         Ok(None)
     }
 
-    /// The name of the foreground job in a pane.
+    /// The commands running in a pane's foreground process group, leader first.
     ///
     /// This is what the pane is *running* — the agent, the build, the editor —
     /// as opposed to the shell that launched it, which is what
     /// `pane_process_name` reports. A pane sitting at a prompt reports the
-    /// shell, because the shell is then the foreground job. Default:
-    /// `Ok(None)`.
-    async fn pane_foreground_name(
+    /// shell, because the shell is then the foreground job.
+    ///
+    /// Several names rather than one because the group leader is not reliably
+    /// the command worth naming: a shell that does no job control keeps the
+    /// terminal for itself and runs the real job as a child in the same group.
+    /// The caller knows which names it cares about, so the whole group is
+    /// offered and it picks. Default: `Ok(Vec::new())`.
+    async fn pane_foreground_names(
         &mut self,
         _pane: PaneId,
-    ) -> Result<Option<String>, anyhow::Error> {
-        Ok(None)
+    ) -> Result<Vec<String>, anyhow::Error> {
+        Ok(Vec::new())
     }
 }
 
