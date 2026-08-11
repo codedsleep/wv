@@ -9,14 +9,6 @@ repository = "https://github.com/codedsleep/animated-term-tiling-rust"
 [workspace]
 members = ["."]
 
-[workspace.metadata.dist]
-cargo-dist-version = "0.25.0"
-ci = "github"
-installers = []
-targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
-hosting = "github"
-unix-archive = ".tar.xz"
-
 [[bin]]
 name = "wv"
 path = "src/main.rs"
@@ -54,7 +46,8 @@ harness = false
 name = "compose"
 harness = false
 
-# The profile that 'dist' will build with
+# Kept as a plain release-with-LTO profile for building distributable binaries
+# by hand: `cargo build --profile dist`. It no longer drives any pipeline.
 [profile.dist]
 inherits = "release"
 lto = "thin"

@@ -414,7 +414,10 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Rotate weave.log at 10MB; keep 3 archives
   - `WEAVE_LOG=debug` for verbose
   - **Accept:** log rotation observable
-- [x] **5.5 cargo-dist setup** — *Codex* — `Cargo.toml`, `.github/workflows/release.yml`
+- [~] **5.5 cargo-dist setup** — _removed (2026-08-11)_ — `Cargo.toml`, `.github/workflows/release.yml`
+  - The generated workflow targeted `ubuntu-20.04`, a runner image GitHub has
+    retired, so every run queued forever and no CI ever ran on this repo.
+    Removed rather than repaired; weave builds from source.
   - `cargo dist init` (one-time), targets `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`
   - Static-ish musl build optional; gnu acceptable for v0.1.0
   - On `git tag v*` push: builds release artifacts and creates a GitHub Release draft
@@ -438,7 +441,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - `git tag v0.1.0`, push tag, watch cargo-dist build, edit GitHub Release notes
   - **Accept:** release page is live with binaries for download
 
-**Phase 5 acceptance:** v0.1.0 is downloadable from GitHub Releases. CI is green. Themes work. CONTRIBUTING.md welcomes external contributors. Repo looks like one a stranger would clone.
+**Phase 5 acceptance:** ~~v0.1.0 is downloadable from GitHub Releases. CI is green.~~ (Superseded 2026-08-11: no release pipeline, no CI — weave builds from source.) Themes work. CONTRIBUTING.md welcomes external contributors. Repo looks like one a stranger would clone.
 
 - [ ] **5.99 commit & tag** — *Kimi* — `git tag v0.1.0`
 
@@ -455,7 +458,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 - **Scrollback:** punted to v1+
 - **`wv` as tmux CLI alias:** `wv ls`, `wv attach` ship in Phase 4 only
 - **Repo visibility:** private through Phase 2; public at end of Phase 3
-- **Distribution:** prebuilt binaries via GitHub Releases (cargo-dist), Phase 5
+- **Distribution:** ~~prebuilt binaries via GitHub Releases (cargo-dist), Phase 5~~ — removed 2026-08-11; build from source
 - **Testing:** unit tests + insta golden frames + criterion benches + a few real-PTY smoke tests
 - **License:** MIT OR Apache-2.0 (dual)
 
