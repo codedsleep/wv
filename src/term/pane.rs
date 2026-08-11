@@ -3,6 +3,7 @@
 use crossterm::style::Color as TermColor;
 
 use crate::backend::PaneId;
+use crate::layout::geometry::Rect;
 use crate::term::cell::{Cell, CellAttrs};
 use crate::term::query::{self, QueryScanner, Segment};
 use crate::term::surface::Surface;
@@ -59,6 +60,35 @@ impl Pane {
             None
         } else {
             Some(title)
+        }
+    }
+
+    /// Draw the pane's grid into `surface` at `rect`, clipped to it.
+    ///
+    /// The clip is what keeps a pane whose emulator grid is still the old size
+    /// — mid-tween, before the resize lands — from spilling over its
+    /// neighbours. Compared with rendering into a scratch surface and blitting,
+    /// this saves an allocation and a full copy of the grid on every frame.
+    pub fn blit_into(&self, surface: &mut Surface, rect: Rect) {
+        let (rows, cols) = self.screen().size();
+        let screen = self.screen();
+        let width = cols.min(rect.w);
+        let height = rows.min(rect.h);
+
+        for row in 0..height {
+            let Some(y) = rect.y.checked_add(row) else {
+                continue;
+            };
+
+            for col in 0..width {
+                let Some(x) = rect.x.checked_add(col) else {
+                    continue;
+                };
+
+                if let Some(cell) = screen.cell(row, col) {
+                    surface.set(x, y, map_cell(cell));
+                }
+            }
         }
     }
 
@@ -127,7 +157,14 @@ impl Pane {
 }
 
 fn map_cell(cell: &vt100::Cell) -> Cell {
-    let ch = cell.contents().chars().next().unwrap_or(' ');
+    // `vt100::Cell::contents` allocates a `String` on every call, blank cells
+    // included. Most of a screen is blank, and this runs once per cell per
+    // frame, so the empty case has to stay off the allocator.
+    let ch = if cell.has_contents() {
+        cell.contents().chars().next().unwrap_or(' ')
+    } else {
+        ' '
+    };
 
     Cell::new(
         ch,

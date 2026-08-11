@@ -63,9 +63,7 @@ fn compose_node(node: &Node, panes: &[Pane], back: &mut Surface) {
             };
 
             let content_rect = frect_to_covering_rect(*rect_current).content();
-            let mut clipped = Surface::new(content_rect.w, content_rect.h);
-            pane.cells_into(&mut clipped, 0, 0);
-            back.blit(&clipped, content_rect.x, content_rect.y);
+            pane.blit_into(back, content_rect);
             subcell::draw_edges(back, *rect_current, Color::Reset, Color::Reset);
         }
         Node::Internal { a, b, .. } => {
