@@ -180,6 +180,70 @@ mod tests {
         assert_eq!(surface.get(2, 1).expect("cell exists").ch, 'i');
     }
 
+    /// Two stacked panes must be separated by **one** border row, not two.
+    ///
+    /// The render snapshots build their trees with hardcoded rects and never
+    /// call `compute_layout`, so nothing else covers the divider the layout
+    /// actually produces.
+    #[test]
+    fn stacked_panes_share_one_divider_row() {
+        use crate::layout::geometry::Rect;
+
+        let root_rect = Rect {
+            x: 0,
+            y: 0,
+            w: 40,
+            h: 24,
+        };
+        let mut root = Node::Leaf {
+            pane: PaneId(1),
+            rect_current: FRect::from(root_rect),
+            rect_target: root_rect,
+        };
+        root.split_focused(PaneId(1), Split::Horizontal, PaneId(2));
+        root.compute_layout(root_rect);
+
+        let mut surface = Surface::new(40, 24);
+        compose(
+            Some(&root),
+            &[Pane::new(PaneId(1), 40, 24), Pane::new(PaneId(2), 40, 24)],
+            Some(PaneId(1)),
+            TEST_THEME,
+            &Timeline::new(),
+            &mut surface,
+            ComposeOptions {
+                pane_titles: false,
+                zoomed: None,
+            },
+        );
+
+        // Read column 0 down the middle of the screen and count the rows that
+        // are a border rather than pane content.
+        let border_rows: Vec<u16> = (0..24)
+            .filter(|&y| {
+                let ch = surface.get(0, y).expect("cell exists").ch;
+                matches!(ch, '├' | '└' | '┌' | '│' | '─')
+            })
+            .collect();
+
+        // Top edge, bottom edge, and exactly one divider between them.
+        let top = root.leaves();
+        assert_eq!(top.len(), 2);
+        let dividers: Vec<u16> = border_rows
+            .into_iter()
+            .filter(|&y| y != 0 && y != 23)
+            .filter(|&y| {
+                // A divider row is one drawn across, not the side walls.
+                surface.get(20, y).expect("cell exists").ch == '─'
+            })
+            .collect();
+        assert_eq!(
+            dividers.len(),
+            1,
+            "expected a single shared divider, got rows {dividers:?}"
+        );
+    }
+
     #[test]
     fn compose_blits_two_leaf_horizontal_split() {
         let mut surface = Surface::new(80, 24);
