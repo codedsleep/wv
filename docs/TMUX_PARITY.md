@@ -232,6 +232,24 @@ a silently empty field is worse than a failed command.
 job inside it. A pane whose shell is running vim reports the shell; a pane
 spawned as `split-window npm run dev` reports `npm`.
 
+## Pane titles
+
+A pane's OSC 0/2 title names the **window** it is in, which is what the status
+bar shows as `1:vim` and what `-t :vim` finds.
+
+Drawing that title on every pane's top border as well is off by default: it
+repeats what the pane's own contents already say, and at a few panes it is more
+noise than help. Turn it back on with either spelling:
+
+```toml
+[ui]
+pane_titles = true
+```
+
+```sh
+set -g pane-border-status on
+```
+
 ## The status bar
 
 ```

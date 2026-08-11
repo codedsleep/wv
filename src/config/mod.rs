@@ -260,7 +260,7 @@ impl Default for Config {
             ui: UiConfig {
                 border_color: Color::Cyan,
                 status_bar: true,
-                pane_titles: true,
+                pane_titles: false,
                 target_fps: DEFAULT_TARGET_FPS,
             },
             theme: ThemePreset::TokyoNight.theme(),
@@ -603,6 +603,25 @@ mod tests {
         assert!(error.contains("needs a running session"), "{error}");
     }
 
+    /// The option and the TOML key both reach the same setting, so someone who
+    /// wants titles back can turn them on either way.
+    #[test]
+    fn pane_border_status_turns_titles_back_on() {
+        let mut config = Config::default();
+        assert!(!config.ui.pane_titles);
+
+        config
+            .apply_conf_line(&[
+                "set-option".to_owned(),
+                "-g".to_owned(),
+                "pane-border-status".to_owned(),
+                "on".to_owned(),
+            ])
+            .expect("a live option");
+
+        assert!(config.ui.pane_titles);
+    }
+
     #[test]
     fn a_missing_config_file_is_not_an_error() {
         let mut config = Config::default();
@@ -622,7 +641,7 @@ mod tests {
         assert_eq!(config.keymap.command_for(&alt('q')), Some(command("close")));
         assert_eq!(config.ui.border_color, Color::Cyan);
         assert!(config.ui.status_bar);
-        assert!(config.ui.pane_titles);
+        assert!(!config.ui.pane_titles);
         assert_eq!(config.ui.target_fps, 160);
         assert_eq!(
             config.theme.border_focused,
@@ -671,18 +690,21 @@ mod tests {
     }
 
     #[test]
-    fn pane_titles_default_enabled_and_can_be_disabled() {
+    /// Off by default — a title over every pane is noise when the pane's own
+    /// content already says what it is — but still available to anyone who
+    /// wants it.
+    fn pane_titles_default_disabled_and_can_be_enabled() {
         let default = Config::from_toml_str("").expect("empty config parses");
-        let disabled = Config::from_toml_str(
+        let enabled = Config::from_toml_str(
             r"
             [ui]
-            pane_titles = false
+            pane_titles = true
             ",
         )
         .expect("pane titles config parses");
 
-        assert!(default.ui.pane_titles);
-        assert!(!disabled.ui.pane_titles);
+        assert!(!default.ui.pane_titles);
+        assert!(enabled.ui.pane_titles);
     }
 
     #[test]
