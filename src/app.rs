@@ -2837,12 +2837,18 @@ impl App {
 
     /// Move every pane one position around the window's layout.
     fn rotate_window(&mut self, reverse: bool) {
-        let panes = self.current().leaf_panes();
-        if panes.len() < 2 {
+        let Some(mut rotated) = self
+            .current()
+            .root
+            .as_ref()
+            .map(tree::Node::leaf_placements)
+        else {
+            return;
+        };
+        if rotated.len() < 2 {
             return;
         }
 
-        let mut rotated = panes.clone();
         if reverse {
             rotated.rotate_right(1);
         } else {
@@ -3451,6 +3457,12 @@ impl App {
             };
             let rect = rect.to_rect();
             self.resize_pane(*pane, rect.w, rect.h).await?;
+            // The PTY alone is not enough: the emulator keeps its own grid, and
+            // a stale grid reflows the pane's output to the width it used to
+            // have no matter how much room the finished layout gave it.
+            if let Some(p) = self.pane_mut(*pane) {
+                p.resize(rect.w, rect.h);
+            }
         }
 
         Ok(())
