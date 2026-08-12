@@ -91,6 +91,34 @@ impl DiffRenderer {
         back: &Surface,
         out: &mut W,
     ) -> io::Result<()> {
+        self.paint(Some(front), back, out)
+    }
+
+    /// Write every cell of `back`, for a screen whose contents are unknown.
+    ///
+    /// A terminal that has just resized, or that has only now started
+    /// watching, is showing something nobody has a record of. Clearing it and
+    /// diffing against a blank `front` looks like the same thing and is not:
+    /// `ESC[2J` fills the screen with the *current* background colour, so
+    /// every cell the diff then skips for being blank on both sides keeps
+    /// whatever colour the last frame happened to leave set — a band of status
+    /// bar behind an empty pane. Painting outright asks the screen for
+    /// nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O error raised while encoding crossterm commands or
+    /// writing the queued bytes to `out`.
+    pub fn repaint<W: Write>(&mut self, back: &Surface, out: &mut W) -> io::Result<()> {
+        self.paint(None, back, out)
+    }
+
+    fn paint<W: Write>(
+        &mut self,
+        front: Option<&Surface>,
+        back: &Surface,
+        out: &mut W,
+    ) -> io::Result<()> {
         self.queue.clear();
 
         if back.width == 0 {
@@ -100,18 +128,18 @@ impl DiffRenderer {
 
         let mut current_style = None;
         let mut index = 0;
-        // A `front` of another shape is not a record of this screen: its cell
-        // at a given index sits at a different column and row, so a pair that
-        // compares equal is not a column already showing the right thing. The
-        // only safe reading of it is that nothing on screen is known, which
-        // means painting every cell.
-        let stale_dimensions = front.width != back.width || front.height != back.height;
-        let len = if stale_dimensions {
-            back.cells.len()
-        } else {
+        // No `front` at all means the screen is unknown and every cell is
+        // painted. So does a `front` of another shape, which is not a record of
+        // this screen either: its cell at a given index sits at a different
+        // column and row, so a pair that compares equal is not a column already
+        // showing the right thing.
+        let comparable =
+            front.filter(|front| front.width == back.width && front.height == back.height);
+        let len = comparable.map_or(back.cells.len(), |front| {
             front.cells.len().min(back.cells.len())
-        };
-        let unchanged = |index: usize| !stale_dimensions && front.cells[index] == back.cells[index];
+        });
+        let unchanged =
+            |index: usize| comparable.is_some_and(|front| front.cells[index] == back.cells[index]);
 
         while index < len {
             if unchanged(index) {
@@ -410,6 +438,48 @@ mod tests {
 
         let text = String::from_utf8(out).expect("output is utf-8");
         assert!(text.contains('z'), "the new columns went unpainted: {text:?}");
+    }
+
+    /// A repaint is for a screen nobody has a record of, and a blank cell is
+    /// part of that screen. Leaving it out is what let `ESC[2J` decide its
+    /// colour — and the clear paints in whatever background the last frame set.
+    #[test]
+    fn repaint_paints_the_blank_cells_too() {
+        let mut back = Surface::new(4, 1);
+        let mut out = Vec::new();
+
+        back.set(0, 0, Cell::new('a', Color::Reset, Color::Reset, CellAttrs::empty()));
+
+        DiffRenderer::with_color_mode(ColorMode::Truecolor)
+            .repaint(&back, &mut out)
+            .expect("repaint should succeed");
+
+        let text = String::from_utf8(out).expect("output is utf-8");
+        assert!(text.contains("a   "), "the blank columns went unpainted: {text:?}");
+    }
+
+    /// And it starts from nothing known, so it does not skip cells that happen
+    /// to match the last frame.
+    #[test]
+    fn repaint_ignores_what_the_screen_was_showing() {
+        let mut back = Surface::new(3, 1);
+        let mut out = Vec::new();
+
+        for (index, ch) in "xyz".chars().enumerate() {
+            back.cells[index] = Cell::new(ch, Color::Reset, Color::Reset, CellAttrs::empty());
+        }
+
+        let mut renderer = DiffRenderer::with_color_mode(ColorMode::Truecolor);
+        renderer
+            .flush(&back.clone(), &back, &mut out)
+            .expect("flush should succeed");
+        assert!(out.is_empty(), "an unchanged frame paints nothing: {out:?}");
+
+        renderer
+            .repaint(&back, &mut out)
+            .expect("repaint should succeed");
+        let text = String::from_utf8(out).expect("output is utf-8");
+        assert!(text.contains("xyz"), "the row went unpainted: {text:?}");
     }
 
     #[test]

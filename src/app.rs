@@ -141,6 +141,10 @@ impl Workspace {
 const AGENT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[cfg(test)]
+#[path = "app/screen_replay.rs"]
+mod screen_replay;
+
+#[cfg(test)]
 const fn test_theme() -> ThemeConfig {
     ThemeConfig {
         border_focused: crossterm::style::Color::Cyan,
@@ -198,6 +202,25 @@ fn shell_program() -> String {
 /// fatal error: a malformed `-F` is the caller's typo, not a session failure.
 fn expand_format(template: &str, vars: &Variables) -> Result<String, Rejected> {
     expand_format_impl(template, vars).map_err(|error| Rejected::new(error.to_string()))
+}
+
+/// Blank a terminal that is about to be repainted in full.
+///
+/// The attribute reset comes first and is not decoration: `ESC[2J` fills the
+/// screen with the background colour currently set, and the last frame left
+/// that wherever its final run of text did — the status bar, usually. Clearing
+/// without it paints the whole terminal in status-bar colours, and every cell
+/// the repaint leaves blank keeps them.
+///
+/// The repaint that follows covers every cell of the frame; this is what
+/// blanks the rest of a terminal larger than the session.
+fn queue_screen_reset<W: std::io::Write>(out: &mut W) -> std::io::Result<()> {
+    crossterm::queue!(
+        out,
+        crossterm::style::SetAttribute(crossterm::style::Attribute::Reset),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::cursor::MoveTo(0, 0)
+    )
 }
 
 /// Write the escape sequences that put the terminal cursor where this frame
@@ -442,6 +465,10 @@ impl From<anyhow::Error> for ExecuteError {
 pub struct App {
     front: Surface,
     back: Surface,
+    /// Set when the local terminal is showing something no `front` describes —
+    /// it has just resized, or `refresh-client` asked. The next frame paints
+    /// every cell instead of diffing against a record that no longer holds.
+    needs_full_repaint: bool,
     /// Where the last composed frame put the terminal cursor, shared by the
     /// local screen and every client so they agree on the placement.
     cursor: Option<CursorPlacement>,
@@ -932,6 +959,7 @@ impl App {
 
         let mut app = Self {
             front: Surface::new(width, height),
+            needs_full_repaint: true,
             back: Surface::new(width, height),
             cursor: None,
             panes: initial_panes
@@ -2472,8 +2500,19 @@ impl App {
             return;
         };
 
+        // A terminal that changed size reflowed its own contents on the way,
+        // and no program is told how. Whatever this client is showing now, the
+        // record kept of it is not it — so the record goes, even if the
+        // session itself does not move because somebody smaller is watching
+        // too. Without this the diff finds nothing to paint and the reflowed
+        // screen stays on it.
+        let moved = client.cols != cols || client.rows != rows;
         client.cols = cols;
         client.rows = rows;
+        if moved {
+            client.needs_full_repaint = true;
+            self.dirty = true;
+        }
         self.renegotiate_size().await;
     }
 
@@ -2496,23 +2535,13 @@ impl App {
         self.resize_to(cols, rows).await;
     }
 
-    /// Force every client's next frame to redraw its whole screen.
+    /// Force every screen's next frame to redraw itself in full.
     fn force_full_repaint(&mut self) {
         self.front = Surface::new(self.back.width, self.back.height);
+        self.needs_full_repaint = true;
         for client in &mut self.clients {
             client.needs_full_repaint = true;
         }
-        // The local path clears its own terminal; a client is told to by the
-        // escape sequence its repaint starts with.
-        if !self.sink.is_attached() {
-            self.dirty = true;
-            return;
-        }
-        let _ = crossterm::queue!(
-            self.sink,
-            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-            crossterm::cursor::MoveTo(0, 0)
-        );
         self.dirty = true;
     }
 
@@ -2530,16 +2559,12 @@ impl App {
             client.buf.clear();
 
             if client.needs_full_repaint {
-                client.front = Surface::new(back.width, back.height);
-                let _ = crossterm::queue!(
-                    client.buf,
-                    crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                    crossterm::cursor::MoveTo(0, 0)
-                );
+                queue_screen_reset(&mut client.buf)?;
+                client.diff.repaint(back, &mut client.buf)?;
                 client.needs_full_repaint = false;
+            } else {
+                client.diff.flush(&client.front, back, &mut client.buf)?;
             }
-
-            client.diff.flush(&client.front, back, &mut client.buf)?;
 
             // Painting moves the cursor, so any frame that painted has to put
             // it back. A frame that painted nothing only needs it when the
@@ -4423,18 +4448,29 @@ impl App {
             },
         );
 
-        if self.sink.is_attached() {
-            // Running locally: one screen, and the buffers can be swapped
-            // rather than copied.
-            self.diff.flush(&self.front, &self.back, &mut self.sink)?;
+        let local = self.sink.is_attached();
+        if local {
+            if self.needs_full_repaint {
+                queue_screen_reset(&mut self.sink)?;
+                self.diff.repaint(&self.back, &mut self.sink)?;
+            } else {
+                self.diff.flush(&self.front, &self.back, &mut self.sink)?;
+            }
             // After the diff, always: it left the cursor at the end of the
             // last run it painted.
             queue_cursor(&mut self.sink, cursor)?;
             self.sink.flush()?;
-            std::mem::swap(&mut self.front, &mut self.back);
         }
         self.cursor = cursor;
+        // Before the swap below, which would hand every client the frame
+        // before this one as though it were this one.
         self.flush_clients()?;
+        self.needs_full_repaint = false;
+        if local {
+            // One screen locally, so the buffers can be swapped rather than
+            // copied.
+            std::mem::swap(&mut self.front, &mut self.back);
+        }
 
         self.back.clear();
         self.dirty = false;
@@ -4766,6 +4802,7 @@ impl App {
 
         Self {
             front: Surface::new(width, height),
+            needs_full_repaint: true,
             back: Surface::new(width, height),
             cursor: None,
             panes: vec![Pane::new(pane_id, width, height)],
