@@ -9,6 +9,7 @@ use crate::backend::PaneId;
 use crate::config::ThemeConfig;
 use crate::layout::geometry::Rect;
 use crate::layout::tree::Node;
+use crate::picker::{Filtered, Picker};
 use crate::term::cell::{Cell, CellAttrs};
 use crate::term::pane::Pane;
 use crate::term::surface::{self, Surface};
@@ -390,6 +391,259 @@ pub fn draw_debug_overlay(surface: &mut Surface, stats: DebugOverlay) {
     }
 }
 
+/// Draw the goto picker over the composed frame.
+///
+/// The box is centred and grows out of its own middle as the open tween runs,
+/// so it arrives from where it will end up rather than sliding in from an edge
+/// — the same thing the pane animations do. Everything is clipped to the box,
+/// and the box is clipped to the screen, so a terminal too small for the
+/// picker gets a smaller picker rather than a corrupted frame.
+pub fn draw_picker(surface: &mut Surface, picker: &Picker, theme: ThemeConfig) {
+    if surface.width < PICKER_MIN_WIDTH || surface.height < PICKER_MIN_HEIGHT {
+        return;
+    }
+
+    let progress = picker.progress();
+    if progress <= 0.0 {
+        return;
+    }
+
+    // Four lines of chrome around the rows: the top border, the query line,
+    // the rule under it, and the bottom border.
+    let rows_wanted = picker.match_count().max(1);
+    let full_height = (rows_wanted + 4).min(usize::from(surface.height));
+    let width = usize::from(surface.width)
+        .saturating_sub(4)
+        .clamp(PICKER_MIN_WIDTH.into(), PICKER_MAX_WIDTH);
+
+    // Height is what animates; the width is fixed so the text does not reflow
+    // on every frame of the open.
+    let height = scale(full_height, progress).max(PICKER_MIN_HEIGHT.into());
+    let Some(rect) = centered(surface, width, height) else {
+        return;
+    };
+
+    let border = theme.border_focused;
+    fill(surface, rect, theme.status_bg);
+    draw_rect_border(surface, rect, border);
+    draw_box_title(surface, rect, "goto", border);
+
+    // Mid-animation the box is too short for its contents; drawing the query
+    // line only once there is room for it and a row keeps the growth reading
+    // as a box opening rather than as text appearing and jumping.
+    if rect.h < 4 {
+        return;
+    }
+
+    let inner_x = rect.x + 1;
+    let inner_w = rect.w - 2;
+    let query_y = rect.y + 1;
+    draw_query_line(surface, inner_x, query_y, inner_w, picker, theme);
+
+    // The separator under the query, then the rows.
+    for x in inner_x..inner_x + inner_w {
+        surface.set(x, query_y + 1, border_cell('─', border));
+    }
+    surface.set(rect.x, query_y + 1, border_cell('├', border));
+    surface.set(rect.x + rect.w - 1, query_y + 1, border_cell('┤', border));
+
+    let first_row_y = query_y + 2;
+    let visible = usize::from(rect.y + rect.h - 1 - first_row_y);
+    if visible == 0 {
+        return;
+    }
+
+    if picker.match_count() == 0 {
+        write_status_text(
+            surface,
+            inner_x + 1,
+            first_row_y,
+            inner_x + inner_w,
+            "no match",
+            theme.status_segment,
+            theme.status_bg,
+        );
+        return;
+    }
+
+    // Scroll so the selection is always on screen, and keep it away from the
+    // edges while there is list on both sides of it.
+    let first = scroll_offset(picker.selected(), picker.match_count(), visible);
+    for (offset, matched) in picker.matches().skip(first).take(visible).enumerate() {
+        let index = first + offset;
+        let y = first_row_y + u16::try_from(offset).unwrap_or(0);
+        draw_picker_row(
+            surface,
+            inner_x,
+            y,
+            inner_w,
+            &matched,
+            index == picker.selected(),
+            theme,
+        );
+    }
+}
+
+/// The narrowest and shortest the box is allowed to be, and the widest it is
+/// allowed to grow — a picker spanning a wide monitor is harder to read, not
+/// easier, because the eye has to travel from label to count.
+const PICKER_MIN_WIDTH: u16 = 24;
+const PICKER_MIN_HEIGHT: u16 = 3;
+const PICKER_MAX_WIDTH: usize = 60;
+/// The marker in front of the selected row, and in front of a session row.
+const PICKER_SELECTED: &str = "\u{25b8} ";
+const PICKER_CURRENT: char = '*';
+
+fn draw_query_line(
+    surface: &mut Surface,
+    x: u16,
+    y: u16,
+    width: u16,
+    picker: &Picker,
+    theme: ThemeConfig,
+) {
+    let limit = x + width;
+    let mut at = write_status_text(surface, x + 1, y, limit, "> ", theme.accent, theme.status_bg);
+
+    // A block *at* the cursor rather than after it, the way the command prompt
+    // draws its own, so it sits over the character it would replace.
+    let mut query: Vec<char> = picker.query().chars().collect();
+    query.insert(picker.cursor().min(query.len()), '\u{2588}');
+    for ch in query {
+        if at >= limit {
+            break;
+        }
+        let cell = Cell::new(ch, theme.status_fg, theme.status_bg, CellAttrs::empty());
+        at = at.saturating_add(surface.set_char(at, y, cell, limit));
+    }
+}
+
+fn draw_picker_row(
+    surface: &mut Surface,
+    x: u16,
+    y: u16,
+    width: u16,
+    matched: &Filtered<'_>,
+    is_selected: bool,
+    theme: ThemeConfig,
+) {
+    let row = matched.row;
+    let bg = if is_selected {
+        theme.status_segment
+    } else {
+        theme.status_bg
+    };
+    let fg = if row.is_current {
+        theme.accent
+    } else {
+        theme.status_fg
+    };
+    let limit = x + width;
+
+    for at in x..limit {
+        surface.set(at, y, Cell::new(' ', fg, bg, CellAttrs::empty()));
+    }
+
+    let marker = if is_selected {
+        PICKER_SELECTED.to_owned()
+    } else if row.is_current {
+        format!("{PICKER_CURRENT} ")
+    } else {
+        "  ".to_owned()
+    };
+    let mut at = write_status_text(surface, x, y, limit, &marker, theme.accent, bg);
+
+    // The count is held against the right edge, so the label gets whatever is
+    // left — and loses its tail rather than the count if there is not enough.
+    let detail_width = u16::try_from(UnicodeWidthStr::width(row.detail.as_str())).unwrap_or(0);
+    let label_limit = limit.saturating_sub(detail_width + 1).max(at);
+
+    for (index, ch) in row.label.chars().enumerate() {
+        if at >= label_limit {
+            break;
+        }
+        let attrs = if matched.positions.contains(&index) {
+            CellAttrs::BOLD
+        } else {
+            CellAttrs::empty()
+        };
+        let cell = Cell::new(ch, fg, bg, attrs);
+        at = at.saturating_add(surface.set_char(at, y, cell, label_limit));
+    }
+
+    let detail_x = limit.saturating_sub(detail_width);
+    if detail_x > at {
+        write_status_text(
+            surface,
+            detail_x,
+            y,
+            limit,
+            &row.detail,
+            theme.status_segment,
+            bg,
+        );
+    }
+}
+
+/// Which match sits at the top of the visible window.
+///
+/// The selection is kept centred once the list is long enough to scroll, so
+/// there is always context above and below it, and pinned at the ends so the
+/// first and last rows can actually be reached.
+fn scroll_offset(selected: usize, total: usize, visible: usize) -> usize {
+    if total <= visible {
+        return 0;
+    }
+
+    selected
+        .saturating_sub(visible / 2)
+        .min(total - visible)
+}
+
+/// A rectangle of `width` × `height` in the middle of the surface.
+fn centered(surface: &Surface, width: usize, height: usize) -> Option<Rect> {
+    let w = u16::try_from(width).ok()?.min(surface.width);
+    let h = u16::try_from(height).ok()?.min(surface.height);
+    if w < PICKER_MIN_WIDTH || h < PICKER_MIN_HEIGHT {
+        return None;
+    }
+
+    Some(Rect {
+        x: (surface.width - w) / 2,
+        y: (surface.height - h) / 2,
+        w,
+        h,
+    })
+}
+
+fn fill(surface: &mut Surface, rect: Rect, bg: Color) {
+    for y in rect.y..rect.y.saturating_add(rect.h) {
+        for x in rect.x..rect.x.saturating_add(rect.w) {
+            surface.set(x, y, Cell::new(' ', Color::Reset, bg, CellAttrs::empty()));
+        }
+    }
+}
+
+/// A title sitting in the top border, as pane titles do.
+fn draw_box_title(surface: &mut Surface, rect: Rect, title: &str, color: Color) {
+    let overlay = format!("\u{2524} {title} \u{251c}");
+    let width = u16::try_from(UnicodeWidthStr::width(overlay.as_str())).unwrap_or(0);
+    if width + 4 > rect.w {
+        return;
+    }
+
+    let limit = rect.x + rect.w;
+    write_status_text(surface, rect.x + 2, rect.y, limit, &overlay, color, Color::Reset);
+}
+
+/// Scale a length by an eased 0…1, never rounding a visible box down to nothing.
+fn scale(length: usize, progress: f32) -> usize {
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let scaled = (length as f32 * progress).round() as usize;
+
+    scaled
+}
+
 pub fn leaf_count(tree: Option<&Node>) -> usize {
     tree.map_or(0, count_leaves)
 }
@@ -504,9 +758,11 @@ mod tests {
     use crossterm::style::Color;
 
     use super::{
-        draw_borders, draw_debug_overlay, draw_status_bar, truncate_title, DebugOverlay,
-        AGENT_MARK, PLAIN_THIN_LEFT, SEP_LEFT, SEP_LEFT_THIN, SEP_RIGHT, SEP_RIGHT_THIN,
+        draw_borders, draw_debug_overlay, draw_picker, draw_status_bar, scroll_offset,
+        truncate_title, DebugOverlay, AGENT_MARK, PLAIN_THIN_LEFT, SEP_LEFT, SEP_LEFT_THIN,
+        SEP_RIGHT, SEP_RIGHT_THIN,
     };
+    use crate::picker::{Picker, PickerRow, PICKER_TWEEN_DURATION};
     use crate::term::cell::{Cell, CellAttrs};
     use crate::agent::AgentState;
     use crate::anim::timeline::Timeline;
@@ -920,6 +1176,145 @@ mod tests {
         assert_eq!(top, "┌──┤ hello ├───┐");
     }
 
+    fn picker_rows() -> Vec<PickerRow> {
+        vec![
+            PickerRow::session("main".to_owned(), 2, true, true),
+            PickerRow::window("main".to_owned(), 1, "editor", 2, true, true),
+            PickerRow::window("main".to_owned(), 2, "dev-server", 1, false, true),
+        ]
+    }
+
+    /// Read the surface back as lines, for asserting on what was drawn.
+    fn lines(surface: &Surface) -> Vec<String> {
+        (0..surface.height)
+            .map(|y| {
+                (0..surface.width)
+                    .map(|x| surface.get(x, y).expect("cell exists").ch)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A picker that has finished opening.
+    fn opened(rows: Vec<PickerRow>) -> Picker {
+        let mut picker = Picker::new(rows);
+        picker.advance(PICKER_TWEEN_DURATION);
+        picker
+    }
+
+    #[test]
+    fn the_picker_draws_a_centred_box_with_every_row_in_it() {
+        let mut surface = Surface::new(40, 12);
+        draw_picker(&mut surface, &opened(picker_rows()), TEST_THEME);
+
+        let drawn = lines(&surface);
+        let top = drawn
+            .iter()
+            .position(|line| line.contains('┌'))
+            .expect("the box was drawn");
+        let bottom = drawn
+            .iter()
+            .rposition(|line| line.contains('└'))
+            .expect("the box is closed");
+
+        // Seven rows of box (two borders, query, rule, three rows) in twelve,
+        // so the clearance above and below can differ by the odd row and no
+        // more.
+        let below = drawn.len() - 1 - bottom;
+        assert!(
+            top.abs_diff(below) <= 1,
+            "the box is vertically centred: {top} above, {below} below"
+        );
+        // Char positions, not byte offsets: the box is drawn in box-drawing
+        // characters, every one of them three bytes wide.
+        let columns: Vec<char> = drawn[top].chars().collect();
+        let left = columns.iter().position(|ch| *ch == '┌').expect("a left edge");
+        let right = columns.iter().rposition(|ch| *ch == '┐').expect("a right edge");
+        assert_eq!(
+            left,
+            usize::from(surface.width) - 1 - right,
+            "and horizontally centred"
+        );
+
+        assert!(drawn[top].contains("goto"), "the box is titled: {}", drawn[top]);
+        let body = drawn.join("\n");
+        for label in ["main", "main:1 editor", "main:2 dev-server"] {
+            assert!(body.contains(label), "missing {label} in\n{body}");
+        }
+        for detail in ["2 windows", "2 panes", "1 pane"] {
+            assert!(body.contains(detail), "missing {detail} in\n{body}");
+        }
+    }
+
+    #[test]
+    fn the_picker_marks_the_selected_row() {
+        let mut surface = Surface::new(40, 12);
+        let picker = opened(picker_rows());
+        draw_picker(&mut surface, &picker, TEST_THEME);
+
+        let marked: Vec<String> = lines(&surface)
+            .into_iter()
+            .filter(|line| line.contains('\u{25b8}'))
+            .collect();
+        assert_eq!(marked.len(), 1, "exactly one row carries the marker");
+        assert!(
+            marked[0].contains("main:1 editor"),
+            "the window we are in: {}",
+            marked[0]
+        );
+    }
+
+    /// Mid-tween the box is short, and must still be a box rather than a row of
+    /// stray border characters.
+    #[test]
+    fn a_half_open_picker_is_still_a_closed_box() {
+        let mut surface = Surface::new(40, 12);
+        let mut picker = Picker::new(picker_rows());
+        picker.advance(PICKER_TWEEN_DURATION / 2);
+        draw_picker(&mut surface, &picker, TEST_THEME);
+
+        let drawn = lines(&surface);
+        let corners = drawn.iter().filter(|line| line.contains('┌')).count();
+        assert_eq!(corners, 1, "one top edge, wherever the tween has got to");
+        assert_eq!(drawn.iter().filter(|line| line.contains('└')).count(), 1);
+    }
+
+    /// A terminal too small for the box gets no box, not a corrupted frame.
+    #[test]
+    fn the_picker_gives_up_on_a_tiny_terminal() {
+        let mut surface = Surface::new(10, 3);
+        draw_picker(&mut surface, &opened(picker_rows()), TEST_THEME);
+
+        assert!(
+            lines(&surface).iter().all(|line| line.trim().is_empty()),
+            "nothing was drawn"
+        );
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_says_so() {
+        let mut surface = Surface::new(40, 12);
+        let mut picker = opened(picker_rows());
+        for ch in "zzz".chars() {
+            picker.insert(ch);
+        }
+        draw_picker(&mut surface, &picker, TEST_THEME);
+
+        assert!(lines(&surface).join("\n").contains("no match"));
+    }
+
+    #[test]
+    fn the_scroll_window_keeps_the_selection_visible() {
+        // Short enough list: no scrolling at all.
+        assert_eq!(scroll_offset(3, 4, 10), 0);
+        // Long list, selection at the top: still pinned to the start.
+        assert_eq!(scroll_offset(0, 20, 5), 0);
+        // In the middle: centred, so there is context either side.
+        assert_eq!(scroll_offset(10, 20, 5), 8);
+        // At the end: pinned, so the last row can be reached.
+        assert_eq!(scroll_offset(19, 20, 5), 15);
+    }
+
     #[test]
     fn truncate_title_is_width_aware() {
         assert_eq!(truncate_title("abcdef", 4), "abc…");
@@ -956,3 +1351,4 @@ mod tests {
         assert_eq!(cell.bg, Color::White);
     }
 }
+

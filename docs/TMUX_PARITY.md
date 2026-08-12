@@ -71,7 +71,8 @@ means the current one.
 | `kill-pane -a` | — | yes | |
 | `detach-client [-t id] [-a]` | `detach` | yes | No target detaches everyone |
 | `refresh-client` | — | yes | Forces a full repaint |
-| `switch-client` | — | no | A weave server hosts one session, so there is nowhere to switch |
+| `switch-client -t <session>[:<window>]` | — | yes | Hands the attached clients to another session's server; `-l`/`-n`/`-p` are not planned |
+| `choose-tree`, `choose-session`, `choose-window` | — | yes | All open the one goto picker (`Alt+;`); the filter line is how you narrow it |
 | `kill-session` | `quit` | yes | |
 | `resize-pane -L/-R/-U/-D [n]` | — | yes | Moves a border; which side the pane is on decides if it grows |
 | `resize-pane -x/-y` | — | yes | |

@@ -297,6 +297,8 @@ fn config_command_name(command: &Command) -> &'static str {
         Command::RefreshClient => "refresh-client",
         Command::RenameSession { .. } => "rename-session",
         Command::CommandPrompt { .. } => "command-prompt",
+        Command::ChooseTree => "choose-tree",
+        Command::SwitchClient { .. } => "switch-client",
         Command::KillSession { .. } => "kill-session",
         Command::DisplayMessage { .. } => "display-message",
         Command::SendKeys { .. } => "send-keys",

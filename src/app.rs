@@ -28,6 +28,7 @@ use crate::input::keymap::{format_key, Binding, Keymap, Leader, PREFIX_TABLE, RO
 use crate::input::keys::parse_binding_key;
 use crate::layout::geometry::{Direction, FRect, Rect, Split};
 use crate::layout::tree::{self, Node};
+use crate::picker::{Picker, PickerRow};
 use crate::render::compositor::CursorPlacement;
 use crate::render::diff::{ColorMode, DiffRenderer};
 use crate::render::{chrome, compositor};
@@ -63,6 +64,11 @@ const DEFAULT_PANE_FORMAT: &str =
 const DEFAULT_WINDOW_FORMAT: &str =
     "#{window_index}: #{window_name} [#{window_panes} panes]#{?window_active, (active),}";
 const DEFAULT_SESSION_FORMAT: &str = "#{session_name}: #{session_windows} windows";
+/// What the picker asks other sessions for.
+///
+/// Tab-separated because it is parsed, not read: window names may contain
+/// anything a shell title can, and a tab is the one character they will not.
+const PICKER_WINDOW_FORMAT: &str = "#{window_index}\t#{window_name}\t#{window_panes}";
 const OUTPUT_CHANNEL_CAPACITY: usize = 256;
 const EVENT_CHANNEL_CAPACITY: usize = 64;
 
@@ -316,6 +322,84 @@ impl Prompt {
     }
 }
 
+/// Every *other* live session's rows, asked for over their sockets.
+///
+/// A free function rather than a method because it awaits: holding a `&App`
+/// across an await would make `App::run`'s future non-`Send`, and the session
+/// server spawns it. It needs nothing from `App` but the name to skip anyway.
+///
+/// A session that will not answer is still listed, as a bare session row: one
+/// wedged socket must not blank out the rest of the picker, and being able to
+/// *see* the stuck session is how you go and deal with it.
+async fn remote_picker_rows(own_session: Option<String>) -> Vec<PickerRow> {
+    let sessions = match crate::session::paths::list_sessions() {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            tracing::warn!("could not list sessions for the picker: {error:#}");
+            return Vec::new();
+        }
+    };
+
+    let mut rows = Vec::new();
+    for entry in sessions {
+        if Some(&entry.name) == own_session.as_ref() {
+            continue;
+        }
+
+        let listing = crate::session::server::request(
+            &entry.path,
+            Command::List {
+                scope: ListScope::Windows {
+                    target: Target::current(),
+                },
+                format: Some(PICKER_WINDOW_FORMAT.to_owned()),
+            },
+        )
+        .await;
+
+        let windows = match listing {
+            Ok(CommandResult::Ok { output }) => parse_picker_windows(&output),
+            Ok(CommandResult::Error { message }) => {
+                tracing::warn!("session {} refused to list windows: {message}", entry.name);
+                Vec::new()
+            }
+            Err(error) => {
+                tracing::warn!("could not reach session {}: {error:#}", entry.name);
+                Vec::new()
+            }
+        };
+
+        rows.push(PickerRow::session(
+            entry.name.clone(),
+            windows.len(),
+            false,
+            false,
+        ));
+        rows.extend(windows.into_iter().map(|(index, name, panes)| {
+            PickerRow::window(entry.name.clone(), index, &name, panes, false, false)
+        }));
+    }
+
+    rows
+}
+
+/// Read a remote session's window listing back into rows.
+///
+/// A line the session did not format as expected is dropped rather than shown
+/// half-parsed: the picker would otherwise offer a row that jumps nowhere.
+fn parse_picker_windows(listing: &str) -> Vec<(u32, String, usize)> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let index = fields.next()?.trim().parse().ok()?;
+            let name = fields.next()?.to_owned();
+            let panes = fields.next()?.trim().parse().ok()?;
+            Some((index, name, panes))
+        })
+        .collect()
+}
+
 /// A message shown on the status line instead of returned to a caller.
 struct StatusMessage {
     text: String,
@@ -455,6 +539,11 @@ pub struct App {
     message: Option<StatusMessage>,
     /// An open `command-prompt`, if one is taking input.
     prompt: Option<Prompt>,
+    /// An open goto picker, if one is up.
+    ///
+    /// Session-global like `prompt`: every attached client sees the same
+    /// picker and follows the same jump.
+    picker: Option<Picker>,
     /// Callers parked on a `wait-for` channel, by channel name.
     ///
     /// A waiting request does not reply until someone signals it, so the reply
@@ -869,6 +958,7 @@ impl App {
             nested_env: crate::input::nesting::over_ssh(),
             message: None,
             prompt: None,
+            picker: None,
             wait_channels: HashMap::new(),
             key_table: ROOT_TABLE.to_owned(),
             theme: config.theme,
@@ -2018,6 +2108,26 @@ impl App {
             } => {
                 self.open_prompt(prompt, initial.as_deref(), template).await?;
             }
+            Command::ChooseTree => self.open_picker().await,
+            Command::SwitchClient { target } => {
+                let name = target
+                    .session
+                    .clone()
+                    .ok_or_else(|| Rejected::new("`switch-client` needs a session".to_owned()))?;
+                let window = match target.window {
+                    Some(WindowRef::Index(index)) => Some(index),
+                    None => None,
+                    // A window inside a session we are not running cannot be
+                    // resolved from here — only its index travels.
+                    Some(_) => {
+                        return Err(Rejected::new(
+                            "`switch-client` takes a window index, as in `-t other:2`".to_owned(),
+                        )
+                        .into())
+                    }
+                };
+                self.switch_clients(&name, window)?;
+            }
             Command::RenameSession { target, name } => {
                 self.check_session(&target)?;
                 self.rename_session(&name)?;
@@ -3026,6 +3136,154 @@ impl App {
         Ok(())
     }
 
+    /// Open the goto picker on every session and window we can see.
+    ///
+    /// Rows are gathered once, here, rather than on every keystroke: this one
+    /// is the only place that talks to other sessions, and it does so over
+    /// their sockets, which is a round trip per live session. Filtering
+    /// afterwards is pure local work.
+    async fn open_picker(&mut self) {
+        let mut rows = self.local_picker_rows();
+        rows.extend(remote_picker_rows(self.session_name.clone()).await);
+        self.picker = Some(Picker::new(rows));
+        self.dirty = true;
+    }
+
+    /// This session's own rows, straight out of memory.
+    fn local_picker_rows(&self) -> Vec<PickerRow> {
+        // A server always has a name; a bare `wv` has none, and calling it
+        // what the status bar calls it keeps the picker honest.
+        let session = self
+            .session_name
+            .clone()
+            .unwrap_or_else(|| "weave".to_owned());
+        let occupied = self.occupied_workspaces();
+
+        let mut rows = vec![PickerRow::session(session.clone(), occupied.len(), true, true)];
+        rows.extend(occupied.into_iter().map(|index| {
+            PickerRow::window(
+                session.clone(),
+                u32::try_from(index + 1).unwrap_or(u32::MAX),
+                &self.window_name(index),
+                self.workspaces[index].pane_count(),
+                index == self.current_workspace,
+                true,
+            )
+        }));
+
+        rows
+    }
+
+    /// Feed a key to the open picker.
+    ///
+    /// Modal in exactly the way the prompt is: while it is up nothing reaches
+    /// the pane behind it, so typing a filter cannot land in a shell. A picker
+    /// that is already folding shut is ignored rather than revived — the keys
+    /// pressed during those few frames belong to the pane.
+    async fn handle_picker_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+    ) -> anyhow::Result<bool> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let Some(picker) = self.picker.as_mut() else {
+            return Ok(false);
+        };
+        if picker.is_closing() {
+            return Ok(false);
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // Enter is the one key that acts on the session rather than on the
+        // picker, and acting needs `self` — so the row travels out of the
+        // borrow and is used once it has ended.
+        let mut chosen = None;
+
+        match key.code {
+            KeyCode::Enter => {
+                chosen = picker.selection().cloned();
+                picker.close();
+            }
+            // The three cancel keys the prompt takes, for the same reason.
+            KeyCode::Esc => picker.close(),
+            KeyCode::Char('c' | 'g') if ctrl => picker.close(),
+
+            KeyCode::Down | KeyCode::Tab => picker.move_selection(1),
+            KeyCode::Up | KeyCode::BackTab => picker.move_selection(-1),
+            KeyCode::Char('n' | 'j') if ctrl => picker.move_selection(1),
+            KeyCode::Char('p' | 'k') if ctrl => picker.move_selection(-1),
+
+            KeyCode::Char('u') if ctrl => picker.clear(),
+            KeyCode::Backspace => picker.backspace(),
+            KeyCode::Delete => picker.delete(),
+            KeyCode::Left => picker.cursor_left(),
+            KeyCode::Right => picker.cursor_right(),
+            KeyCode::Home => picker.cursor_home(),
+            KeyCode::End => picker.cursor_end(),
+            KeyCode::Char(ch) if !ctrl => picker.insert(ch),
+
+            // Swallowed rather than passed through: the picker is modal.
+            _ => {}
+        }
+
+        self.dirty = true;
+        if let Some(row) = chosen {
+            self.activate_picker_row(&row).await?;
+        }
+
+        Ok(true)
+    }
+
+    /// Go where a picked row points.
+    async fn activate_picker_row(&mut self, row: &PickerRow) -> anyhow::Result<()> {
+        if row.is_local {
+            // A session row for the session you are already in is just a way
+            // of saying "never mind".
+            let Some(window) = row.window else {
+                return Ok(());
+            };
+            let workspace = usize::try_from(window).unwrap_or(1).saturating_sub(1);
+            if let Err(error) = self.switch_workspace(workspace).await {
+                tracing::warn!("could not select window {window}: {error:#}");
+            }
+            return Ok(());
+        }
+
+        if let Err(rejected) = self.switch_clients(&row.session, row.window) {
+            self.show_message(rejected.0);
+        }
+
+        Ok(())
+    }
+
+    /// Hand every attached client to another session.
+    ///
+    /// Each one is dropped with a `SwitchSession` goodbye instead of a plain
+    /// `Detached`, which is the client's cue to reconnect elsewhere without
+    /// giving the terminal back. This session keeps running with nobody
+    /// watching, exactly as an ordinary detach leaves it.
+    fn switch_clients(&mut self, name: &str, window: Option<u32>) -> Result<(), Rejected> {
+        if Some(name) == self.session_name.as_deref() {
+            return Err(Rejected::new(format!("already in session `{name}`")));
+        }
+        if self.clients.is_empty() {
+            return Err(Rejected::new(
+                "switching sessions needs a client attached; run weave as a session with `wv`"
+                    .to_owned(),
+            ));
+        }
+
+        let farewell = ServerToClient::SwitchSession {
+            name: name.to_owned(),
+            window,
+        };
+        for id in self.clients.iter().map(|client| client.id).collect::<Vec<_>>() {
+            self.drop_client(id, Some(farewell.clone()));
+        }
+
+        Ok(())
+    }
+
     /// Feed a key to the open prompt.
     ///
     /// Returns whether the key was consumed — everything is, while a prompt is
@@ -3833,8 +4091,13 @@ impl App {
             return Ok(());
         }
 
-        // A prompt is modal: while one is open it takes every key, so typing a
-        // window name cannot leak into the shell behind it.
+        // Both of these are modal: while one is up it takes every key, so
+        // typing a filter or a window name cannot leak into the shell behind
+        // it. The picker comes first because it is the one drawn on top.
+        if self.handle_picker_key(key).await? {
+            return Ok(());
+        }
+
         if self.handle_prompt_key(key).await? {
             return Ok(());
         }
@@ -3997,6 +4260,12 @@ impl App {
                 self.theme,
             );
         }
+        // Over the panes and the status bar, under the debug HUD — the picker
+        // is the thing you are looking at while it is up, but the HUD is what
+        // you are debugging with.
+        if let Some(picker) = self.picker.as_ref() {
+            chrome::draw_picker(&mut self.back, picker, self.theme);
+        }
         self.last_dirty_cells = self.estimated_dirty_cells();
         if self.debug.is_enabled() {
             let debug_overlay = self.debug_overlay();
@@ -4056,6 +4325,19 @@ impl App {
 
         if !advance.changed_panes.is_empty() || !advance.completed_leaf_rects.is_empty() {
             self.dirty = true;
+        }
+
+        // The picker's open/close tween is its own, not the layout timeline's:
+        // it moves nothing on the tree, it only changes how much of a box is
+        // drawn. A closing picker is dropped once the box has folded away.
+        if let Some(picker) = self.picker.as_mut() {
+            if picker.advance(dt) {
+                self.dirty = true;
+            }
+            if picker.is_finished() {
+                self.picker = None;
+                self.dirty = true;
+            }
         }
 
         let completed_leaf_rects = advance.completed_leaf_rects;
@@ -4375,6 +4657,7 @@ impl App {
             nested_env: false,
             message: None,
             prompt: None,
+            picker: None,
             wait_channels: HashMap::new(),
             key_table: ROOT_TABLE.to_owned(),
             theme: test_theme(),
@@ -4670,8 +4953,9 @@ mod tests {
     use crate::session::sink::OutputSink;
 
     use super::{
-        frame_interval, validate_session_name, App, Args, AttachArgs, ExecArgs, ExitState,
-        LaunchArgs, Prompt, CLOSE_PANE_DURATION, FOCUS_BORDER_TWEEN_DURATION, MESSAGE_DURATION,
+        frame_interval, parse_picker_windows, validate_session_name, App, Args, AttachArgs,
+        ExecArgs, ExitState, LaunchArgs, Picker, PickerRow, Prompt, CLOSE_PANE_DURATION,
+        FOCUS_BORDER_TWEEN_DURATION, MESSAGE_DURATION,
         OPEN_NEW_PANE_DURATION,
     };
     use crate::anim::tween::Easing;
@@ -6892,6 +7176,194 @@ mod tests {
             handle.written_to(PaneId(1)).is_empty(),
             "a modal prompt must swallow every key"
         );
+    }
+
+    /// Open the picker on this session's rows alone.
+    ///
+    /// The real `open_picker` also scans the socket directory for other live
+    /// sessions, which is whatever the machine running the tests happens to
+    /// have. These tests are about the picker's behaviour, so they skip that
+    /// and hand it a list they control.
+    fn open_local_picker(app: &mut App) {
+        app.picker = Some(Picker::new(app.local_picker_rows()));
+    }
+
+    #[test]
+    fn a_remote_listing_becomes_rows_and_junk_is_dropped() {
+        let listing = "1\teditor\t2\n2\tdev-server\t1\nnonsense\n3\tno panes";
+
+        assert_eq!(
+            parse_picker_windows(listing),
+            vec![
+                (1, "editor".to_owned(), 2),
+                (2, "dev-server".to_owned(), 1),
+            ],
+            "a half-formatted line is dropped, not shown as a row that goes nowhere"
+        );
+    }
+
+    #[tokio::test]
+    async fn alt_semicolon_opens_the_picker() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.handle_input(Some(Ok(alt_key(';'))))
+            .await
+            .expect("input handled");
+
+        assert!(app.picker.is_some(), "Alt+; should open the picker");
+    }
+
+    #[tokio::test]
+    async fn the_picker_lists_this_sessions_windows() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.session_name = Some("dev".to_owned());
+        app.execute(command("new-window -d -n build"))
+            .await
+            .expect("new-window succeeds");
+
+        let rows = app.local_picker_rows();
+        let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+
+        assert_eq!(labels, vec!["dev", "dev:1 shell", "dev:2 build"]);
+        assert!(rows.iter().all(|row| row.is_local));
+        // The window you are in, not merely the session you are in.
+        let current: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.is_current && row.window.is_some())
+            .map(|row| row.label.as_str())
+            .collect();
+        assert_eq!(current, vec!["dev:1 shell"]);
+    }
+
+    /// The picker is modal — a filter must not leak into the shell behind it.
+    #[tokio::test]
+    async fn typing_into_the_picker_never_reaches_the_pane() {
+        use crossterm::event::KeyCode;
+
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        open_local_picker(&mut app);
+
+        for ch in "rm -rf /".chars() {
+            app.handle_input(Some(Ok(key(KeyCode::Char(ch)))))
+                .await
+                .expect("input handled");
+        }
+
+        assert!(
+            handle.written_to(PaneId(1)).is_empty(),
+            "a modal picker must swallow every key"
+        );
+    }
+
+    /// The everyday path: open, type enough to name a window, Enter.
+    #[tokio::test]
+    async fn enter_on_a_window_in_this_session_selects_it() {
+        use crossterm::event::KeyCode;
+
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.session_name = Some("dev".to_owned());
+        app.execute(command("new-window -d -n build"))
+            .await
+            .expect("new-window succeeds");
+        assert_eq!(app.current_workspace, 0, "still in window 1");
+
+        open_local_picker(&mut app);
+        for ch in "build".chars() {
+            app.handle_input(Some(Ok(key(KeyCode::Char(ch)))))
+                .await
+                .expect("input handled");
+        }
+        app.handle_input(Some(Ok(key(KeyCode::Enter))))
+            .await
+            .expect("input handled");
+
+        assert_eq!(app.current_workspace, 1, "the picked window");
+    }
+
+    #[tokio::test]
+    async fn escape_closes_the_picker_without_going_anywhere() {
+        use crossterm::event::KeyCode;
+
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.execute(command("new-window -d -n build"))
+            .await
+            .expect("new-window succeeds");
+        open_local_picker(&mut app);
+
+        for ch in "build".chars() {
+            app.handle_input(Some(Ok(key(KeyCode::Char(ch)))))
+                .await
+                .expect("input handled");
+        }
+        app.handle_input(Some(Ok(key(KeyCode::Esc))))
+            .await
+            .expect("input handled");
+
+        assert!(
+            app.picker.as_ref().expect("still folding shut").is_closing(),
+            "Escape starts the close rather than blinking it away"
+        );
+        // And once the tween lands it is gone.
+        app.advance_animations(crate::picker::PICKER_TWEEN_DURATION)
+            .await
+            .expect("animations advance");
+        assert!(app.picker.is_none());
+        assert_eq!(app.current_workspace, 0, "and nothing was selected");
+    }
+
+    /// Keys pressed in the few frames a picker takes to fold away belong to the
+    /// pane, not to the picker that is on its way out.
+    #[tokio::test]
+    async fn a_closing_picker_stops_swallowing_keys() {
+        use crossterm::event::KeyCode;
+
+        let (backend, handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        open_local_picker(&mut app);
+        app.handle_input(Some(Ok(key(KeyCode::Esc))))
+            .await
+            .expect("input handled");
+
+        app.handle_input(Some(Ok(key(KeyCode::Char('x')))))
+            .await
+            .expect("input handled");
+
+        assert_eq!(handle.written_to(PaneId(1)), b"x");
+    }
+
+    /// Without a client there is no terminal to hand anywhere, so the picker
+    /// says so rather than detaching the session from nobody.
+    #[tokio::test]
+    async fn switching_sessions_needs_a_client_attached() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.session_name = Some("dev".to_owned());
+
+        let row = PickerRow::window("other".to_owned(), 1, "shell", 1, false, false);
+        app.activate_picker_row(&row).await.expect("handled");
+
+        let message = app.message.as_ref().expect("a message was shown");
+        assert!(message.text.contains("needs a client"), "{}", message.text);
+    }
+
+    /// Switching to the session you are already in is a no-op with a word about
+    /// it, not a detach that lands you back where you started.
+    #[tokio::test]
+    async fn switching_to_the_current_session_is_refused() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.session_name = Some("dev".to_owned());
+
+        let error = app
+            .switch_clients("dev", None)
+            .expect_err("already there");
+
+        assert!(error.0.contains("already in session"), "{}", error.0);
     }
 
     #[tokio::test]

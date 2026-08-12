@@ -14,6 +14,7 @@ pub mod config;
 pub mod format;
 pub mod input;
 pub mod layout;
+pub mod picker;
 pub mod render;
 pub mod session;
 pub mod term;

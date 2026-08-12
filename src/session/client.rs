@@ -18,17 +18,21 @@ use tokio::sync::mpsc;
 use super::protocol::{
     read_frame, write_frame, write_hello, ClientToServer, ExitReason, ServerToClient,
 };
-use crate::term::TerminalGuard;
 
 /// How long `wv` waits for a freshly spawned server to bind its socket.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Why a client stopped rendering a session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientOutcome {
     /// The user detached; the session is still running.
     Detached,
+    /// The goto picker or `switch-client` sent this client somewhere else.
+    ///
+    /// Unlike every other outcome this one is not the end: the caller connects
+    /// to the named session and keeps going on the same terminal.
+    Switch { name: String, window: Option<u32> },
     /// The server ended the connection for the given reason.
     Exited(ExitReason),
     /// The connection dropped without a goodbye.
@@ -37,9 +41,12 @@ pub enum ClientOutcome {
 
 impl ClientOutcome {
     /// Message to print after the terminal has been restored.
-    pub fn message(self, session: &str) -> String {
+    pub fn message(&self, session: &str) -> String {
         match self {
             Self::Detached => format!("[detached from {session}]"),
+            // Printed only if the hop fails; a switch that lands says nothing,
+            // because nothing ended.
+            Self::Switch { name, .. } => format!("[could not switch to {name}]"),
             Self::Exited(reason) => format!("[{}]", reason.message()),
             Self::ConnectionLost => format!("[lost connection to {session}]"),
         }
@@ -67,8 +74,10 @@ pub async fn connect(path: &Path) -> anyhow::Result<UnixStream> {
 
 /// Attach to a session and render it until the user detaches or it ends.
 ///
-/// The terminal guard is dropped before returning, so the caller can print the
-/// outcome on a restored terminal.
+/// The caller owns the [`TerminalGuard`], and so owns raw mode and the
+/// alternate screen across a whole run of attachments. That is what makes
+/// switching sessions seamless: this returns, the caller connects to the next
+/// socket and calls it again, and the terminal is never handed back in between.
 pub async fn run(stream: UnixStream, name: &str) -> anyhow::Result<ClientOutcome> {
     let (cols, rows) = crossterm::terminal::size().context("failed to read terminal size")?;
     let truecolor = matches!(
@@ -93,7 +102,6 @@ pub async fn run(stream: UnixStream, name: &str) -> anyhow::Result<ClientOutcome
     .await
     .context("failed to send attach handshake")?;
 
-    let _guard = TerminalGuard::new()?;
     let mut events = EventStream::new();
     let mut stdout = std::io::stdout();
     tracing::info!("attached to session {name} at {cols}x{rows}");
@@ -131,6 +139,9 @@ pub async fn run(stream: UnixStream, name: &str) -> anyhow::Result<ClientOutcome
                             stdout.flush()?;
                         }
                         Some(Ok(ServerToClient::Detached)) => return Ok(ClientOutcome::Detached),
+                        Some(Ok(ServerToClient::SwitchSession { name, window })) => {
+                            return Ok(ClientOutcome::Switch { name, window });
+                        }
                         Some(Ok(ServerToClient::Exit(reason))) => {
                             return Ok(ClientOutcome::Exited(reason));
                         }
