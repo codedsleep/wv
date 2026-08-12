@@ -1816,13 +1816,36 @@ impl App {
         // For all surviving leaves, snap rect_current to rect_target and drop
         // any remaining tweens so layout is at rest.
         let pane_ids: Vec<PaneId> = self.workspaces[idx].leaf_panes();
-        for pane in pane_ids {
-            self.timeline.clear_pane_tweens(pane);
+        for pane in &pane_ids {
+            self.timeline.clear_pane_tweens(*pane);
         }
         self.timeline.clear_internal_ratio_tweens();
         if let Some(root) = self.workspaces[idx].root.as_mut() {
             snap_leaves_to_target(root);
         }
+
+        // Snapping puts the layout where the tween would have ended, so it owes
+        // the panes the resize that finishing one does. A pane spawned into a
+        // split starts at the size of the whole window and is only cut down to
+        // its slot when its open tween completes; clearing the tween instead
+        // means that never happens, and the program goes on drawing to a screen
+        // twice the width of the slot it is blitted into. Anything that centres
+        // itself then lands off the edge of the pane, or misses it entirely.
+        let previous = self.resize_mode;
+        self.resize_mode = ResizeMode::HostResize;
+        for pane in pane_ids {
+            let Some(rect) = self.leaf_rect_target(pane).map(Rect::content) else {
+                continue;
+            };
+            if let Some(p) = self.pane_mut(pane) {
+                p.resize(rect.w, rect.h);
+            }
+            if let Err(error) = self.resize_pane(pane, rect.w, rect.h).await {
+                tracing::warn!("failed to resize pane while settling layout: {error:#}");
+            }
+        }
+        self.resize_mode = previous;
+
         Ok(())
     }
 
@@ -4356,6 +4379,17 @@ impl App {
         self.recompute_every_layout();
         self.snap_hidden_layouts();
 
+        // An animation in flight is animating towards geometry that no longer
+        // exists: its end point was computed from the terminal size that just
+        // changed. Left alone it plays on, and when it completes it resizes
+        // every pane it touched back to the layout of the old terminal, undoing
+        // the resize below — borders sit at `rect_target` and so look right,
+        // while the content is blitted at a `rect_current` from before the
+        // resize. There is nothing to animate towards any more, so it settles.
+        if let Err(error) = self.snap_workspace_tweens(self.current_workspace).await {
+            tracing::warn!("failed to settle layout on resize: {error:#}");
+        }
+
         // Every pane gets the size of its own slot in the new layout. Handing
         // them all the terminal size instead leaves each one drawing a screen
         // far wider than the slot it is blitted into.
@@ -4537,6 +4571,13 @@ impl App {
             if self.current().closing.contains(pane) {
                 continue;
             }
+            // Where the animation actually put the pane, not where the tree
+            // says it belongs: a close is animating a survivor into room that
+            // is still occupied, and the tree only catches up once the closing
+            // pane is taken out of it, further down this same tick. A resize
+            // part-way through would strand this end point in the old geometry,
+            // which is why one settles the animation rather than leaving it to
+            // land.
             let Some(rect) = self.leaf_rect_current(*pane) else {
                 continue;
             };
@@ -8625,4 +8666,65 @@ mod tests {
         assert!(validate_session_name("foo/bar").is_err());
     }
 
+    /// Every pane's emulator must be the size of the slot it is blitted into.
+    ///
+    /// A pane wider than its slot is the one failure the composed frame cannot
+    /// show: what it draws is clipped to the slot, so a program that centres
+    /// itself lands off the right edge or misses the pane altogether, and
+    /// everything about the frame — borders, status bar, the other panes — is
+    /// still exactly right.
+    fn assert_panes_fill_their_slots(app: &App, when: &str) {
+        for id in app.pane_ids() {
+            let rect = app.leaf_rect_target(id).expect("leaf rect").content();
+            let size = app.pane(id).expect("pane").size();
+            assert_eq!(
+                size,
+                (rect.w, rect.h),
+                "{when}: pane %{} draws to a {size:?} screen but its slot is ({}, {})",
+                id.0,
+                rect.w,
+                rect.h
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_split_left_before_its_animation_finishes_still_sizes_its_panes() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.execute(command("new-window")).await.expect("new window");
+        app.execute(command("select-window -t 0"))
+            .await
+            .expect("select window");
+        app.execute(command("split-v")).await.expect("split succeeds");
+
+        // Away before the open tween lands. Settling the window it leaves
+        // behind drops that tween, and the resize it was going to apply has to
+        // come from somewhere.
+        app.execute(command("select-window -t 1"))
+            .await
+            .expect("select window");
+        app.advance_animations(OPEN_NEW_PANE_DURATION)
+            .await
+            .expect("animations advance");
+
+        assert_panes_fill_their_slots(&app, "after leaving a split mid-animation");
+    }
+
+    #[tokio::test]
+    async fn a_resize_during_a_split_animation_is_not_undone_when_it_lands() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.execute(command("split-v")).await.expect("split succeeds");
+
+        // The window manager tiles the terminal while the split is still
+        // animating: the tween is now aiming at a layout that no longer exists.
+        app.resize_to(120, 40).await;
+        assert_panes_fill_their_slots(&app, "immediately after the resize");
+
+        app.advance_animations(OPEN_NEW_PANE_DURATION)
+            .await
+            .expect("animations advance");
+        assert_panes_fill_their_slots(&app, "after the stale animation lands");
+    }
 }
