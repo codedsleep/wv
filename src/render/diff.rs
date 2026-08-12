@@ -10,7 +10,7 @@ use crossterm::style::{
 };
 
 use crate::term::cell::{Cell, CellAttrs};
-use crate::term::surface::Surface;
+use crate::term::surface::{self, Surface};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Style {
@@ -121,7 +121,24 @@ impl DiffRenderer {
                     && front.cells[index] != back.cells[index]
                     && Style::from_cell(back.cells[index], self.color_mode) == style
                 {
-                    run.push(back.cells[index].ch);
+                    let cell = back.cells[index];
+                    if cell.is_continuation() {
+                        // The right half of a wide character: printing the
+                        // glyph in front of it already moved the terminal's
+                        // cursor across this column, so anything printed here
+                        // would land a column further right than the surface
+                        // says, and take the rest of the row with it. A stray
+                        // continuation with no glyph in front of it — which
+                        // the surface tries not to keep — still needs the
+                        // column painted, so it gets a blank.
+                        if !covered_by_wide(back, index) {
+                            run.push(' ');
+                        }
+                        index += 1;
+                        continue;
+                    }
+
+                    run.push(cell.ch);
                     index += 1;
                 }
 
@@ -131,6 +148,16 @@ impl DiffRenderer {
 
         out.write_all(&self.queue)
     }
+}
+
+/// Whether the cell at `index` is the second column of a wide character, as
+/// opposed to a continuation left behind on its own.
+fn covered_by_wide(back: &Surface, index: usize) -> bool {
+    if back.width == 0 || index % usize::from(back.width) == 0 {
+        return false;
+    }
+
+    surface::char_width(back.cells[index - 1].ch) == 2
 }
 
 impl Default for DiffRenderer {
@@ -281,6 +308,55 @@ mod tests {
 
         assert!(out.starts_with(b"\x1b[1;1H"));
         assert!(out.windows(b"hello".len()).any(|window| window == b"hello"));
+    }
+
+    /// The terminal draws a wide glyph across two columns and leaves its cursor
+    /// past both. Printing anything for the second column — a blank, or the NUL
+    /// the continuation cell holds — puts the rest of the row one column right
+    /// of where the surface says it is.
+    #[test]
+    fn flush_prints_nothing_for_the_second_column_of_a_wide_character() {
+        let front = Surface::new(5, 1);
+        let mut back = Surface::new(5, 1);
+        let mut out = Vec::new();
+
+        let wide = Cell::new('\u{754c}', Color::Reset, Color::Reset, CellAttrs::empty());
+        back.set_char(0, 0, wide, 5);
+        back.set(2, 0, Cell::new('o', Color::Reset, Color::Reset, CellAttrs::empty()));
+        back.set(3, 0, Cell::new('k', Color::Reset, Color::Reset, CellAttrs::empty()));
+
+        DiffRenderer::with_color_mode(ColorMode::Truecolor)
+            .flush(&front, &back, &mut out)
+            .expect("flush should succeed");
+
+        let text = String::from_utf8(out).expect("output is utf-8");
+        assert!(!text.contains('\0'), "a NUL reached the terminal: {text:?}");
+        assert!(text.contains("\u{754c}ok"), "wide run not printed once: {text:?}");
+    }
+
+    /// A continuation with no glyph in front of it should not exist, but if one
+    /// ever does the column still has to be painted rather than left stale.
+    #[test]
+    fn flush_paints_a_blank_for_a_stray_continuation() {
+        let front = Surface::new(3, 1);
+        let mut back = Surface::new(3, 1);
+        let mut out = Vec::new();
+
+        back.cells[1] = Cell::new(
+            Cell::CONTINUATION,
+            Color::Reset,
+            Color::Reset,
+            CellAttrs::empty(),
+        );
+        back.cells[0] = Cell::new('a', Color::Reset, Color::Reset, CellAttrs::empty());
+
+        DiffRenderer::with_color_mode(ColorMode::Truecolor)
+            .flush(&front, &back, &mut out)
+            .expect("flush should succeed");
+
+        let text = String::from_utf8(out).expect("output is utf-8");
+        assert!(!text.contains('\0'), "a NUL reached the terminal: {text:?}");
+        assert!(text.contains("a "), "stray column not painted: {text:?}");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Borders, status bar, debug overlay.
 
 use crossterm::style::Color;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use crate::agent::AgentState;
 use crate::anim::timeline::Timeline;
@@ -11,7 +11,7 @@ use crate::layout::geometry::Rect;
 use crate::layout::tree::Node;
 use crate::term::cell::{Cell, CellAttrs};
 use crate::term::pane::Pane;
-use crate::term::surface::Surface;
+use crate::term::surface::{self, Surface};
 
 /// The dot beside an agent's name. Its colour carries the state.
 const AGENT_MARK: char = '\u{25cf}';
@@ -296,15 +296,14 @@ impl Run {
             if x >= max_x {
                 break;
             }
-            surface.set(x, y, cell);
-            x = x.saturating_add(char_step(cell.ch));
+            x = x.saturating_add(surface.set_char(x, y, cell, max_x));
         }
         x
     }
 }
 
 fn char_step(ch: char) -> u16 {
-    u16::try_from(UnicodeWidthChar::width(ch).unwrap_or(1).max(1)).unwrap_or(1)
+    surface::char_width(ch)
 }
 
 /// The agent indicators, right-aligned into `[left, right)`.
@@ -363,9 +362,8 @@ fn write_status_text(
         if x >= max_x {
             break;
         }
-        surface.set(x, y, Cell::new(ch, fg, bg, CellAttrs::empty()));
-        let step = u16::try_from(UnicodeWidthChar::width(ch).unwrap_or(1).max(1)).unwrap_or(1);
-        x = x.saturating_add(step);
+        let cell = Cell::new(ch, fg, bg, CellAttrs::empty());
+        x = x.saturating_add(surface.set_char(x, y, cell, max_x));
     }
     x
 }
@@ -379,7 +377,8 @@ pub fn draw_debug_overlay(surface: &mut Surface, stats: DebugOverlay) {
         "fps:{:.0} frame:{:.1}ms tweens:{} dirty:{}",
         stats.fps, stats.frame_ms, stats.tweens, stats.dirty_cells
     );
-    let surface_width = usize::from(surface.width);
+    let limit = surface.width;
+    let surface_width = usize::from(limit);
     let text_width = text.chars().count();
     let rendered_width = text_width.min(surface_width);
     let start = surface_width.saturating_sub(rendered_width);
@@ -387,7 +386,7 @@ pub fn draw_debug_overlay(surface: &mut Surface, stats: DebugOverlay) {
 
     for (offset, ch) in text.chars().skip(skip).enumerate() {
         let x = u16::try_from(start + offset).unwrap_or(u16::MAX);
-        surface.set(x, 0, debug_cell(ch));
+        surface.set_char(x, 0, debug_cell(ch), limit);
     }
 }
 
@@ -452,11 +451,9 @@ fn draw_pane_title(surface: &mut Surface, rect: Rect, title: Option<&str>, color
     let mut x = rect
         .x
         .saturating_add(u16::try_from(start_offset).unwrap_or(0));
+    let limit = rect.x.saturating_add(rect.w);
     for ch in overlay.chars() {
-        surface.set(x, rect.y, border_cell(ch, color));
-        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        let step = u16::try_from(width.max(1)).unwrap_or(1);
-        x = x.saturating_add(step);
+        x = x.saturating_add(surface.set_char(x, rect.y, border_cell(ch, color), limit));
     }
 }
 
@@ -475,7 +472,7 @@ fn truncate_title(title: &str, max_width: usize) -> String {
     let mut width = 0;
     let content_width = max_width - 1;
     for ch in title.chars() {
-        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        let char_width = usize::from(surface::char_width(ch));
         if width + char_width > content_width {
             break;
         }
