@@ -177,7 +177,7 @@ impl Pane {
                 };
 
                 if let Some(cell) = screen.cell(row, col) {
-                    surface.set(x, y, map_cell(cell));
+                    surface.set(x, y, map_cell(cell, col + 1 < width));
                 }
             }
         }
@@ -197,7 +197,7 @@ impl Pane {
                 };
 
                 if let Some(cell) = self.screen().cell(row, col) {
-                    surface.set(x, y, map_cell(cell));
+                    surface.set(x, y, map_cell(cell, col + 1 < cols));
                 }
             }
         }
@@ -247,14 +247,25 @@ impl Pane {
     }
 }
 
-fn map_cell(cell: &vt100::Cell) -> Cell {
+/// Map one emulator cell for drawing.
+///
+/// `room_for_wide` is whether the column to the right is still inside the
+/// pane. A wide character straddling the clip edge would spill its second half
+/// over the border and into the neighbouring pane, so it is drawn as a blank
+/// instead — the same as a character clipped away entirely.
+fn map_cell(cell: &vt100::Cell, room_for_wide: bool) -> Cell {
     // `vt100::Cell::contents` allocates a `String` on every call, blank cells
     // included. Most of a screen is blank, and this runs once per cell per
     // frame, so the empty case has to stay off the allocator.
-    let ch = if cell.has_contents() {
-        cell.contents().chars().next().unwrap_or(' ')
-    } else {
+    let ch = if cell.is_wide_continuation() {
+        // The emulator holds a wide character's second column as a cell with
+        // no contents. Drawn as a blank it would be one column too many, since
+        // the glyph in front of it already covers this one.
+        Cell::CONTINUATION
+    } else if !cell.has_contents() || (cell.is_wide() && !room_for_wide) {
         ' '
+    } else {
+        cell.contents().chars().next().unwrap_or(' ')
     };
 
     Cell::new(
@@ -290,6 +301,8 @@ mod tests {
 
     use super::Pane;
     use crate::backend::PaneId;
+    use crate::layout::geometry::Rect;
+    use crate::term::cell::Cell;
     use crate::term::surface::Surface;
 
     /// `split-window -l 10%` on a short window leaves the new pane smaller than
@@ -367,6 +380,39 @@ mod tests {
             assert_eq!(cell.ch, ch);
             assert_eq!(cell.fg, Color::AnsiValue(1));
         }
+    }
+
+    /// A wide character is two columns in the emulator too, and the second one
+    /// has no contents. Drawn as a blank it is one column too many, and every
+    /// cell after it on the row lands one to the right — which is the smear a
+    /// prompt full of nerd-font glyphs used to leave down the screen.
+    #[test]
+    fn a_wide_character_keeps_its_second_column() {
+        let mut pane = Pane::new(PaneId(1), 10, 2);
+        let mut surface = Surface::new(10, 2);
+
+        pane.process("\u{754c}ok".as_bytes());
+        pane.blit_into(&mut surface, Rect { x: 0, y: 0, w: 10, h: 2 });
+
+        assert_eq!(surface.get(0, 0).map(|cell| cell.ch), Some('\u{754c}'));
+        assert_eq!(
+            surface.get(1, 0).map(|cell| cell.ch),
+            Some(Cell::CONTINUATION)
+        );
+        assert_eq!(surface.get(2, 0).map(|cell| cell.ch), Some('o'));
+    }
+
+    /// Clipped to the pane's last column, the glyph's other half would land on
+    /// the border or in the pane next door.
+    #[test]
+    fn a_wide_character_clipped_by_the_pane_edge_is_blanked() {
+        let mut pane = Pane::new(PaneId(1), 10, 2);
+        let mut surface = Surface::new(10, 2);
+
+        pane.process("ab\u{754c}".as_bytes());
+        pane.blit_into(&mut surface, Rect { x: 0, y: 0, w: 3, h: 2 });
+
+        assert_eq!(surface.get(2, 0).map(|cell| cell.ch), Some(' '));
     }
 
     /// A shell holds its prompt until its DA1 probe is answered, so the pane
