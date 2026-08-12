@@ -415,12 +415,7 @@ Yes — run `wv` on the remote host and the session lives there, so a dropped co
 
 ## License
 
-Dual-licensed under either of:
-
-- [Apache License, Version 2.0](./LICENSE-APACHE)
-- [MIT license](./LICENSE-MIT)
-
-at your option.
+[GNU General Public License, version 3 or later](./LICENSE).
 
 ## Acknowledgements
 

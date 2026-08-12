@@ -82,7 +82,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - `cargo init --bin --name weave .` in repo root
   - Set binary name to `wv` via `[[bin]] name = "wv"`
   - Populate `[dependencies]` per stack table above
-  - Set `edition = "2021"`, `rust-version = "1.75"`, `license = "MIT OR Apache-2.0"`
+  - Set `edition = "2021"`, `rust-version = "1.75"`, `license = "GPL-3.0-or-later"`
   - **Accept:** `cargo build` succeeds; `cargo run` prints "weave starting" and exits 0
 - [x] **0.2 Crate-level lints** — *Codex* — `src/lib.rs` (or `src/main.rs`)
   - `#![forbid(unsafe_code)]`
@@ -431,9 +431,9 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
   - Install instructions: prebuilt binary (preferred), `cargo install --git ...`, build from source
   - Feature list, non-goals, FAQ (why not a tmux fork?)
   - **Accept:** README is the kind you'd star
-- [x] **5.8 LICENSE** — *Claude* — `LICENSE-MIT`, `LICENSE-APACHE`
-  - Dual MIT/Apache-2.0 (Rust standard)
-  - **Accept:** files exist, Cargo.toml `license = "MIT OR Apache-2.0"` matches
+- [x] **5.8 LICENSE** — *Claude* — `LICENSE`
+  - GNU GPL v3 or later
+  - **Accept:** files exist, Cargo.toml `license = "GPL-3.0-or-later"` matches
 - [x] **5.9 Issue templates** — *Claude* — `.github/ISSUE_TEMPLATE/`
   - bug.yml, feature.yml, terminal-compat.yml
   - **Accept:** templates render in the GitHub UI
@@ -460,7 +460,7 @@ Crate root: `#![forbid(unsafe_code)]`. Clippy: `pedantic` minus `module_name_rep
 - **Repo visibility:** private through Phase 2; public at end of Phase 3
 - **Distribution:** ~~prebuilt binaries via GitHub Releases (cargo-dist), Phase 5~~ — removed 2026-08-11; build from source
 - **Testing:** unit tests + insta golden frames + criterion benches + a few real-PTY smoke tests
-- **License:** MIT OR Apache-2.0 (dual)
+- **License:** GPL-3.0-or-later
 
 ---
 
