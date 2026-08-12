@@ -263,8 +263,11 @@ client joins or leaves.
 `refresh-client`, `wv attach -d`. `ExitReason::TakenOver` is no longer sent;
 the variant stays so a client can still explain an older server's message.
 
-**Won't do:** `switch-client` (a weave server hosts exactly one session, so
-there is nowhere to switch to).
+**Reversed:** `switch-client` was "won't do" on the grounds that a weave server
+hosts exactly one session. True, but it made the wrong conclusion: the client
+can move *between* servers. It now detaches and re-attaches in one step,
+holding the terminal guard across the hop, and the goto picker (`Alt+;`) is
+built on it.
 
 **Known gap:** client ids are connection ids, handed out in arrival order, and
 `wv exec` connections consume them too — so they are not predictable from a

@@ -115,6 +115,14 @@ impl Target {
         Self::default()
     }
 
+    /// A target naming one window of the current session by its index.
+    pub fn window(index: u32) -> Self {
+        Self {
+            window: Some(WindowRef::Index(index)),
+            ..Self::default()
+        }
+    }
+
     /// True when this target names nothing and so means the current pane.
     pub fn is_current(&self) -> bool {
         self.session.is_none() && self.window.is_none() && self.pane.is_none()

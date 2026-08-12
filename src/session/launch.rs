@@ -14,7 +14,8 @@ use super::paths::{self, SessionEntry};
 use super::protocol::CommandResult;
 use super::server::{self, SessionServer};
 use crate::app::{App, Args};
-use crate::command::Command;
+use crate::command::{Command, Target};
+use crate::term::TerminalGuard;
 
 /// Start a session (unless it is already running) and attach to it.
 pub async fn start_and_attach(args: &Args) -> anyhow::Result<()> {
@@ -79,12 +80,62 @@ pub async fn attach(session_name: Option<&str>, detach_others: bool) -> anyhow::
     attach_to(&session.name, &session.path).await
 }
 
+/// Attach, and keep attaching for as long as the session hands us on.
+///
+/// The terminal guard is taken once and held across every hop, so switching
+/// sessions never gives the terminal back to the shell — the next session's
+/// first frame is a full repaint and simply overwrites the last one's.
 async fn attach_to(name: &str, path: &Path) -> anyhow::Result<()> {
-    let stream = client::connect(path).await?;
-    let outcome = client::run(stream, name).await?;
+    let guard = TerminalGuard::new()?;
+    let mut name = name.to_owned();
+    let mut path = path.to_path_buf();
 
-    // The terminal guard is gone by now, so this lands on a restored screen.
-    println!("{}", outcome.message(name));
+    let (outcome, name) = loop {
+        let stream = client::connect(&path).await?;
+        let outcome = client::run(stream, &name).await?;
+
+        let ClientOutcome::Switch {
+            name: wanted,
+            window,
+        } = &outcome
+        else {
+            break (outcome, name);
+        };
+
+        // A session can die between being listed in the picker and being
+        // switched to. Report that rather than looping on a dead socket.
+        match paths::resolve_session(Some(wanted)) {
+            Ok(session) => {
+                if let Some(window) = window {
+                    // Told to the new server rather than carried in the
+                    // handshake: it is an ordinary command, and one that must
+                    // land before the first frame is composed.
+                    if let Err(error) = server::request(
+                        &session.path,
+                        Command::SelectWindow {
+                            target: Target::window(*window),
+                            create: false,
+                        },
+                    )
+                    .await
+                    {
+                        tracing::warn!("could not select window {window} in {wanted}: {error:#}");
+                    }
+                }
+                path = session.path;
+                name = session.name;
+            }
+            Err(error) => {
+                tracing::warn!("could not switch to {wanted}: {error:#}");
+                break (outcome, name);
+            }
+        }
+    };
+
+    // Restore the terminal before the message: it has to land on a real screen,
+    // not inside the alternate one.
+    drop(guard);
+    println!("{}", outcome.message(&name));
     if outcome == ClientOutcome::ConnectionLost {
         anyhow::bail!("session {name} ended unexpectedly; see the weave log for details");
     }

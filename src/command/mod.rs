@@ -155,6 +155,19 @@ pub enum Command {
         /// The command to run, with `%%` standing in for the typed text.
         template: String,
     },
+    /// Open the goto picker: every session and window, fuzzy-filtered.
+    ///
+    /// tmux's `choose-tree` and its two narrower spellings all land here —
+    /// weave has one picker, and the filter line is how you narrow it.
+    ChooseTree,
+    /// Hand this session's clients to another session.
+    ///
+    /// The clients detach and immediately re-attach to the named session, so
+    /// the terminal never comes back to a shell in between.
+    SwitchClient {
+        /// The session to move to, and optionally the window inside it.
+        target: Target,
+    },
     /// Close a pane, or every pane except it.
     KillPane {
         target: Target,
@@ -365,6 +378,8 @@ pub const COMMAND_NAMES: &[&str] = &[
     "refresh-client",
     "rename-session",
     "command-prompt",
+    "choose-tree",
+    "switch-client",
 ];
 
 /// The pre-target weave names, still accepted.
@@ -474,11 +489,15 @@ impl Command {
                 Ok(Self::RefreshClient)
             }
 
-            "switch-client" | "switchc" => Err(unsupported(
-                name,
-                "switch-client",
-                "not planned: a weave server hosts exactly one session, so there is nothing to switch to",
-            )),
+            // One picker, three tmux spellings. `choose-session` and
+            // `choose-window` are not narrower modes here — the filter line is
+            // how you narrow the list — but muscle memory should still work.
+            "choose-tree" | "choose-session" | "choose-window" | "choose" => {
+                reject_extra_args(name, rest)?;
+                Ok(Self::ChooseTree)
+            }
+
+            "switch-client" | "switchc" => parse_switch_client(name, rest),
 
             "kill-session" | "quit" => Ok(Self::KillSession {
                 target: parse_target_only(name, rest, TargetKind::Session)?,
@@ -1913,6 +1932,69 @@ fn reject_extra_args(name: &str, args: &[String]) -> Result<(), CommandError> {
     }
 }
 
+/// `switch-client -t other` / `-t other:2`.
+///
+/// The bare token names a *session*, not a window — switching is a
+/// session-level move, and `-t other` has to mean the session called `other`
+/// even though every other command would read it as a window. So the target is
+/// parsed the usual way, for the validation, and then the bare window it comes
+/// back with is read back as the session name.
+fn parse_switch_client(name: &str, args: &[String]) -> Result<Command, CommandError> {
+    let mut value = None;
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-t" => value = Some(next_target(name, &mut args, "-t", TargetKind::Session)?),
+            "-l" | "-n" | "-p" => {
+                return Err(unsupported(
+                    name,
+                    arg,
+                    "not planned: weave has no client-side session history to step through",
+                ))
+            }
+            other if is_flag(other) => {
+                return Err(CommandError::UnknownFlag {
+                    command: name.to_owned(),
+                    flag: other.to_owned(),
+                });
+            }
+            other => {
+                return Err(CommandError::UnexpectedArgument {
+                    command: name.to_owned(),
+                    argument: other.to_owned(),
+                });
+            }
+        }
+    }
+
+    let mut target = value.ok_or_else(|| CommandError::MissingValue {
+        flag: "a session to switch to (-t)".to_owned(),
+    })?;
+
+    if target.session.is_none() {
+        let session = match target.window.take() {
+            Some(WindowRef::Name(session)) => session,
+            // `-t 2` is a session called `2`, not window 2 of nowhere.
+            Some(WindowRef::Index(index)) => index.to_string(),
+            _ => {
+                return Err(CommandError::MissingValue {
+                    flag: "a session to switch to (-t)".to_owned(),
+                })
+            }
+        };
+        crate::session::paths::validate_session_name(&session).map_err(|_| {
+            CommandError::Target {
+                command: name.to_owned(),
+                source: TargetError::SessionName(session.clone()),
+            }
+        })?;
+        target.session = Some(session);
+    }
+
+    Ok(Command::SwitchClient { target })
+}
+
 fn next_target<'a, I>(
     command: &str,
     args: &mut I,
@@ -2472,11 +2554,42 @@ mod tests {
         assert!(all);
     }
 
-    /// One weave server hosts one session, so there is nowhere to switch to.
+    /// A weave server hosts one session, so switching means handing the client
+    /// to another server — which is what the goto picker does for you.
     #[test]
-    fn switch_client_is_not_planned() {
-        let error = Command::parse_str("switch-client -t other").expect_err("no other session");
-        assert!(error.to_string().contains("not planned"), "{error}");
+    fn switch_client_names_the_session_to_move_to() {
+        assert_eq!(
+            parse("switch-client -t other"),
+            Command::SwitchClient {
+                target: Target {
+                    session: Some("other".to_owned()),
+                    window: None,
+                    pane: None,
+                },
+            }
+        );
+        // A window inside it, so the picker can jump straight to a row.
+        let Command::SwitchClient { target } = parse("switch-client -t other:2") else {
+            panic!("expected a switch");
+        };
+        assert_eq!(target.session.as_deref(), Some("other"));
+        assert_eq!(target.window, Some(WindowRef::Index(2)));
+    }
+
+    /// Without a session there is nothing to switch to, and detaching by
+    /// accident would be a nasty surprise.
+    #[test]
+    fn switch_client_needs_a_target() {
+        let error = Command::parse_str("switch-client").expect_err("no session named");
+        assert!(error.to_string().contains("session to switch to"), "{error}");
+    }
+
+    /// tmux's three choose-* spellings all open weave's one picker.
+    #[test]
+    fn every_choose_spelling_opens_the_picker() {
+        for line in ["choose-tree", "choose-session", "choose-window", "choose"] {
+            assert_eq!(parse(line), Command::ChooseTree, "{line}");
+        }
     }
 
     #[test]

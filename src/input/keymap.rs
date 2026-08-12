@@ -253,6 +253,10 @@ impl Keymap {
             );
         }
         self.set_binding(alt_char('q'), kill_pane());
+        // The goto picker. `;` because it is under the right hand and free of
+        // any tmux or readline meaning, and because reaching another session
+        // should cost one chord, not a detach and a re-attach.
+        self.set_binding(alt_char(';'), Command::ChooseTree);
         self.set_binding(alt_char('d'), Command::DetachClient { target: None, all: false });
         self.set_binding(alt_char('v'), split(Split::Vertical));
         // Some terminals fold Shift into the uppercase char and drop the SHIFT
@@ -329,6 +333,9 @@ impl Keymap {
         bind('p', relative_window(WindowRef::Previous));
         bind('l', relative_window(WindowRef::Last));
         bind('o', select_pane(PaneRef::Next));
+        // tmux's two choose-* keys, both opening weave's one picker.
+        bind('s', Command::ChooseTree);
+        bind('w', Command::ChooseTree);
         bind('}', swap_pane(PaneRef::Next));
         bind('{', swap_pane(PaneRef::Previous));
 
@@ -877,6 +884,36 @@ mod tests {
             Some(command("split-v"))
         );
         assert_eq!(keymap.command_for(&ctrl_alt(KeyCode::Char('v'))), None);
+    }
+
+    /// The goto picker, on the chord and on both of tmux's choose-* keys — and
+    /// it relocates when nested like every other root chord.
+    #[test]
+    fn the_picker_is_bound_to_alt_semicolon_and_follows_the_leader() {
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.command_for(&alt(KeyCode::Char(';'))),
+            Some(Command::ChooseTree)
+        );
+        for ch in ['s', 'w'] {
+            assert_eq!(
+                keymap
+                    .lookup(PREFIX_TABLE, &KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                    .map(|binding| binding.command.clone()),
+                Some(Command::ChooseTree),
+                "C-b {ch}"
+            );
+        }
+
+        keymap.set_leader(Leader::CtrlAlt);
+
+        assert_eq!(keymap.command_for(&alt(KeyCode::Char(';'))), None);
+        assert_eq!(
+            keymap.command_for(&ctrl_alt(KeyCode::Char(';'))),
+            Some(Command::ChooseTree),
+            "over SSH the picker is Ctrl+Alt+; so the outer weave keeps Alt+;"
+        );
     }
 
     /// A binding the user added moves with the built-in ones — nesting must not

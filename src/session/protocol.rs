@@ -34,7 +34,7 @@ const LENGTH_PREFIX_BYTES: usize = 4;
 /// several changes, and none of them touched this number, so two builds with
 /// incompatible command encodings both claimed to speak v2. See
 /// [`command_shape_tripwire`] below, which makes the omission a compile error.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Fails to compile when [`Command`] changes shape, as a reminder to bump
 /// [`PROTOCOL_VERSION`].
@@ -78,6 +78,8 @@ fn command_shape_tripwire(command: &Command) {
         | Command::IfShell { .. }
         | Command::WaitFor { .. }
         | Command::RefreshClient
+        | Command::ChooseTree
+        | Command::SwitchClient { .. }
         | Command::CommandPrompt { .. } => {}
     }
 }
@@ -125,6 +127,16 @@ pub enum ServerToClient {
     Frame(Vec<u8>),
     /// The server honored a detach; the session keeps running.
     Detached,
+    /// Go and attach to a different session instead.
+    ///
+    /// Sent instead of `Detached` when the goto picker or `switch-client`
+    /// names another session. The client reconnects without giving the
+    /// terminal back, so the user never sees the shell in between.
+    SwitchSession {
+        name: String,
+        /// The window to select once attached, if the picker named one.
+        window: Option<u32>,
+    },
     /// The connection is over for the stated reason.
     Exit(ExitReason),
     /// A non-fatal server-side error worth surfacing to the user.

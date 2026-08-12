@@ -64,6 +64,7 @@ wv --debug
 | `Alt+V`                   | Split vertical               |
 | `Alt+H` / `J` / `K` / `L` | Focus left / down / up / right |
 | `Alt+Shift+H` / `J` / `K` / `L` | Move the focused pane left / down / up / right |
+| `Alt+;`                   | Goto picker: every session and window, fuzzy-filtered |
 | `Alt+R`                   | Rename the current window (prompts) |
 | `Alt+Shift+R`             | Rename the session (prompts) |
 | `Alt+Q`                   | Close focused pane           |
@@ -93,6 +94,7 @@ well does not match.
 | `Alt+V`          | `Ctrl+Alt+V`           |
 | `Alt+H`/`J`/`K`/`L` | `Ctrl+Alt+H`/`J`/`K`/`L` |
 | `Alt+1` … `Alt+9`| `Ctrl+Alt+1` … `Ctrl+Alt+9` |
+| `Alt+;`          | `Ctrl+Alt+;`           |
 | `C-b` (prefix)   | `C-a` (`nested-prefix`)|
 
 Detection is per-terminal and dynamic: the client tells the server whether its
@@ -282,6 +284,40 @@ date, clock and host on the right — powerline blocks, laid out like tmux's nor
 theme: ` dev  1 ❯ editor   2 ❯ build *      2026-05-11 ❮ 14:23  localhost `.
 Set `status-powerline off` if your font is not a patched one.
 
+### The goto picker
+
+`Alt+;` opens the goto picker: every window in this session and in every other
+live one, in a single fuzzy-filtered list. Type to narrow it, `Enter` to go.
+
+```
+┌─┤ goto ├─────────────────────────────────────────────────┐
+│ > dev                                                    │
+├──────────────────────────────────────────────────────────┤
+│* main                                         2 windows  │
+│▸ main:1 editor                                  2 panes  │
+│  main:2 dev-server                               1 pane  │
+│  scratch                                       1 window  │
+│  scratch:1 shell                                 1 pane  │
+└──────────────────────────────────────────────────────────┘
+```
+
+`↑`/`↓` (or `C-p`/`C-n`, or `Tab`) move; `C-u` clears the filter; `Esc`, `C-c`
+or `C-g` closes it without going anywhere. The list is gathered once when the
+picker opens, so filtering costs nothing.
+
+Picking a window in the session you are already in is an ordinary window
+change, animated like `Alt+2`. Picking one in *another* session hands your
+client over: it detaches from this server and attaches to that one without ever
+giving the terminal back, so there is no flash of shell in between. That is
+also what `switch-client -t other` and `switch-client -t other:2` do, and what
+tmux's `choose-tree`, `choose-session` and `choose-window` all map onto —
+weave has one picker, and the filter line is how you narrow it. `C-b s` and
+`C-b w` open it too.
+
+A session that will not answer over its socket is still listed, as a bare
+session row with no windows under it: one wedged session must not blank out the
+rest of the picker.
+
 `Alt+D` detaches: the server keeps running with every pane alive, and the client restores your terminal and prints `[detached from NAME]`. `Alt+Shift+Q` quits, which shuts the session down and kills its panes.
 
 Sockets live in `$XDG_RUNTIME_DIR/weave/<name>.sock` (falling back to a private directory under `/tmp`). A socket whose server has gone away is unlinked automatically, so a name is never stuck.
@@ -415,7 +451,16 @@ Yes — run `wv` on the remote host and the session lives there, so a dropped co
 
 ## License
 
-[GNU General Public License, version 3 or later](./LICENSE).
+Copyright (C) 2026 weave contributors.
+
+weave is free software: you can redistribute it and/or modify it under the terms
+of the [GNU General Public License](./LICENSE) as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+PURPOSE. See the GNU General Public License for more details.
 
 ## Acknowledgements
 
