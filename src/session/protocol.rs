@@ -34,7 +34,7 @@ const LENGTH_PREFIX_BYTES: usize = 4;
 /// several changes, and none of them touched this number, so two builds with
 /// incompatible command encodings both claimed to speak v2. See
 /// [`command_shape_tripwire`] below, which makes the omission a compile error.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Fails to compile when [`Command`] changes shape, as a reminder to bump
 /// [`PROTOCOL_VERSION`].
@@ -121,12 +121,27 @@ pub enum ClientToServer {
 }
 
 /// Message sent from the session server to its attached client.
+///
+/// **Append new variants; never insert one.** bincode encodes a variant as its
+/// ordinal, so inserting in the middle shifts every variant below it and two
+/// builds disagree about what the same byte means. That matters most for
+/// [`Self::Error`]: a server on the far side of a version gap uses it to
+/// explain the mismatch, and a client that cannot decode that message reports
+/// a decode failure instead of the sentence written to be read at exactly that
+/// moment. Appending keeps the older variants where the other side expects
+/// them, so the explanation survives the gap that produced it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServerToClient {
     /// Rendered terminal output to write to stdout verbatim.
     Frame(Vec<u8>),
     /// The server honored a detach; the session keeps running.
     Detached,
+    /// The connection is over for the stated reason.
+    Exit(ExitReason),
+    /// A non-fatal server-side error worth surfacing to the user.
+    Error(String),
+    /// The outcome of a [`ClientToServer::Request`], tagged with its id.
+    Reply { id: u64, result: CommandResult },
     /// Go and attach to a different session instead.
     ///
     /// Sent instead of `Detached` when the goto picker or `switch-client`
@@ -137,12 +152,6 @@ pub enum ServerToClient {
         /// The window to select once attached, if the picker named one.
         window: Option<u32>,
     },
-    /// The connection is over for the stated reason.
-    Exit(ExitReason),
-    /// A non-fatal server-side error worth surfacing to the user.
-    Error(String),
-    /// The outcome of a [`ClientToServer::Request`], tagged with its id.
-    Reply { id: u64, result: CommandResult },
 }
 
 /// What running a command produced.
@@ -308,6 +317,44 @@ mod tests {
         ExitReason, ServerToClient, MAX_FRAME_BYTES, PROTOCOL_VERSION,
     };
     use crate::command::{Command, Target, WindowRef};
+
+    /// The variant ordinals are the wire format, so they are pinned here.
+    ///
+    /// bincode writes a variant as its position in the enum. Inserting one in
+    /// the middle silently renumbers everything below it, and the first
+    /// casualty is `Error` — the variant a server uses to explain a version
+    /// mismatch to a client that is, by definition, running a different build.
+    /// If this test fails, you inserted where you should have appended.
+    #[test]
+    fn server_variant_ordinals_are_stable() {
+        for (expected, message) in [
+            (0u8, ServerToClient::Frame(Vec::new())),
+            (1, ServerToClient::Detached),
+            (2, ServerToClient::Exit(ExitReason::Quit)),
+            (3, ServerToClient::Error(String::new())),
+            (
+                4,
+                ServerToClient::Reply {
+                    id: 0,
+                    result: super::CommandResult::empty(),
+                },
+            ),
+            (
+                5,
+                ServerToClient::SwitchSession {
+                    name: String::new(),
+                    window: None,
+                },
+            ),
+        ] {
+            let framed = encode(&message).expect("encodes");
+            // Four bytes of length prefix, then the variant ordinal.
+            assert_eq!(
+                framed[4], expected,
+                "{message:?} must stay at ordinal {expected}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn round_trips_client_messages() {
