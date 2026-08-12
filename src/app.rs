@@ -1970,6 +1970,24 @@ impl App {
         Ok(())
     }
 
+    /// Run a command and surface a rejection as an `Err`.
+    ///
+    /// `execute` deliberately swallows a rejection — a keybinding that asks for
+    /// something impossible should report to the status line, not tear the
+    /// session down. That is wrong for a test, where a command silently
+    /// declining to run turns an assertion into a tautology, so tests that mean
+    /// "this command runs" say so through here.
+    #[cfg(test)]
+    pub async fn execute_now_for_test(&mut self, cmd: Command) -> anyhow::Result<String> {
+        match self.execute_now(cmd).await {
+            Ok(output) => Ok(output),
+            Err(ExecuteError::Fatal(error)) => Err(error),
+            Err(ExecuteError::Rejected(message)) => {
+                Err(anyhow::anyhow!("command rejected: {message}"))
+            }
+        }
+    }
+
     /// Run a command from a keybinding, where nobody is waiting for an answer.
     ///
     /// A command the session cannot carry out — a target naming a pane that
