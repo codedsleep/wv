@@ -34,7 +34,7 @@ const LENGTH_PREFIX_BYTES: usize = 4;
 /// several changes, and none of them touched this number, so two builds with
 /// incompatible command encodings both claimed to speak v2. See
 /// [`command_shape_tripwire`] below, which makes the omission a compile error.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Fails to compile when [`Command`] changes shape, as a reminder to bump
 /// [`PROTOCOL_VERSION`].
@@ -93,6 +93,14 @@ pub enum ClientToServer {
         cols: u16,
         rows: u16,
         truecolor: bool,
+        /// Whether this terminal is on the far side of an SSH connection, and
+        /// so probably inside another weave. The server uses it to decide
+        /// where the leader modifier lives; see [`crate::input::nesting`].
+        ///
+        /// It has to come from the client: the server may have been started
+        /// long ago, in a different login, from an environment that says
+        /// nothing about the terminal now attached to it.
+        nested: bool,
     },
     /// A terminal input event, forwarded verbatim from the client's `EventStream`.
     Input(Event),
@@ -300,6 +308,7 @@ mod tests {
                 cols: 120,
                 rows: 40,
                 truecolor: true,
+                nested: false,
             },
             ClientToServer::Input(Event::Key(KeyEvent::new(
                 KeyCode::Char('v'),

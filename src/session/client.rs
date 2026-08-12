@@ -75,6 +75,9 @@ pub async fn run(stream: UnixStream, name: &str) -> anyhow::Result<ClientOutcome
         std::env::var("COLORTERM").as_deref(),
         Ok("truecolor" | "24bit")
     );
+    // Read here rather than in the server: this process is the one holding the
+    // terminal, so its environment is the one that describes it.
+    let nested = crate::input::nesting::over_ssh();
 
     let (mut read_half, mut write_half) = stream.into_split();
     write_hello(&mut write_half).await?;
@@ -84,6 +87,7 @@ pub async fn run(stream: UnixStream, name: &str) -> anyhow::Result<ClientOutcome
             cols,
             rows,
             truecolor,
+            nested,
         },
     )
     .await

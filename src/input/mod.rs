@@ -14,6 +14,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 pub mod keymap;
 pub mod keys;
+pub mod nesting;
 
 /// Kitty keyboard flag bit 1: report keys unambiguously, ESC included.
 ///
@@ -132,6 +133,24 @@ fn encode_char(ch: char, modifiers: KeyModifiers, disambiguate: bool) -> Vec<u8>
         return csi_u(u32::from(ch.to_ascii_lowercase()), encode_modifiers(modifiers));
     }
 
+    // Ctrl+Alt, which is what a nested weave's leader is made of. The legacy
+    // encoding has one expression for it — the meta prefix in front of the
+    // control byte, as xterm sends it — and that only covers the letters,
+    // because the control byte is what carries the Ctrl and only letters have
+    // one. Anything else takes the `CSI u` form, on the rule this module
+    // already follows for Enter, Tab and Backspace: a modifier the legacy
+    // encoding cannot express is worth a sequence rather than a key the user
+    // did not press.
+    if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if !ch.is_ascii_alphabetic() {
+            return csi_u(u32::from(ch), encode_modifiers(modifiers));
+        }
+
+        let mut bytes = vec![0x1b];
+        bytes.extend(encode_ctrl_char(ch));
+        return bytes;
+    }
+
     if modifiers.contains(KeyModifiers::CONTROL) {
         return encode_ctrl_char(ch);
     }
@@ -209,6 +228,55 @@ mod tests {
         assert_eq!(
             encode(&key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
             Some(vec![0x01])
+        );
+    }
+
+    /// A nested weave's leader is `Ctrl+Alt`, and the pane it is running in is
+    /// how those chords reach it. Dropping the Alt here — which is what
+    /// sending the bare control byte does — hands the inner session `C-h` when
+    /// the user pressed `C-M-h`, and it matches nothing.
+    #[test]
+    fn ctrl_alt_letters_keep_the_meta_prefix() {
+        assert_eq!(
+            encode(&key(
+                KeyCode::Char('h'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            Some(vec![0x1b, 0x08])
+        );
+        assert_eq!(
+            encode(&key(
+                KeyCode::Char('V'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            Some(vec![0x1b, 0x16]),
+            "control folds the case, as it does without the Alt"
+        );
+    }
+
+    /// There is no control byte for a digit, so the legacy encoding cannot say
+    /// `C-M-1` at all. The `CSI u` form can, and sending the bare `1` — which
+    /// is what the encoder used to do — types a character nobody pressed.
+    #[test]
+    fn ctrl_alt_digits_take_the_csi_u_form() {
+        assert_eq!(
+            encode(&key(
+                KeyCode::Char('1'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            Some(b"\x1b[49;7u".to_vec())
+        );
+    }
+
+    /// Enter already took this route, and still does: `C-M-Enter` splits.
+    #[test]
+    fn ctrl_alt_enter_takes_the_csi_u_form() {
+        assert_eq!(
+            encode(&key(
+                KeyCode::Enter,
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            Some(b"\x1b[13;7u".to_vec())
         );
     }
 

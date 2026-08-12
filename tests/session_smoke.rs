@@ -159,6 +159,7 @@ async fn attach(socket: &std::path::Path, cols: u16, rows: u16) -> anyhow::Resul
             cols,
             rows,
             truecolor: true,
+            nested: false,
         },
     )
     .await?;

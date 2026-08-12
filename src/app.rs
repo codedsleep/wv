@@ -24,7 +24,7 @@ use crate::command::{
 use crate::config::{Config, Options, ThemeConfig};
 use crate::format::{expand as expand_format_impl, Variables};
 use crate::input;
-use crate::input::keymap::{format_key, Binding, Keymap, PREFIX_TABLE, ROOT_TABLE};
+use crate::input::keymap::{format_key, Binding, Keymap, Leader, PREFIX_TABLE, ROOT_TABLE};
 use crate::input::keys::parse_binding_key;
 use crate::layout::geometry::{Direction, FRect, Rect, Split};
 use crate::layout::tree::{self, Node};
@@ -219,6 +219,9 @@ struct AttachedClient {
     id: u64,
     cols: u16,
     rows: u16,
+    /// Whether this terminal is reached over SSH, and so cannot see Alt chords
+    /// through the weave it is probably running inside.
+    nested: bool,
     frames: mpsc::UnboundedSender<ServerToClient>,
     front: Surface,
     diff: DiffRenderer,
@@ -237,6 +240,7 @@ impl AttachedClient {
         cols: u16,
         rows: u16,
         truecolor: bool,
+        nested: bool,
         frames: mpsc::UnboundedSender<ServerToClient>,
     ) -> Self {
         let mut diff = DiffRenderer::new();
@@ -250,6 +254,7 @@ impl AttachedClient {
             id,
             cols,
             rows,
+            nested,
             frames,
             front: Surface::new(cols, rows),
             diff,
@@ -350,6 +355,10 @@ impl From<anyhow::Error> for ExecuteError {
     }
 }
 
+// The bools are independent switches on unrelated things — the status bar,
+// pane titles, whether a repaint is owed, whether the terminal is remote.
+// Grouping them into a struct would only add a name to type.
+#[allow(clippy::struct_excessive_bools)]
 pub struct App {
     front: Surface,
     back: Surface,
@@ -435,6 +444,13 @@ pub struct App {
     timeline: Timeline,
     keymap: Keymap,
     options: Options,
+    /// Whether the environment this session was *started* in was reached over
+    /// SSH.
+    ///
+    /// Only consulted while nothing is attached — an attached client reports
+    /// its own terminal, which is the authority. It matters at startup, so the
+    /// keymap is already nested before the first client's handshake lands.
+    nested_env: bool,
     /// A message to show on the status line, and how long it has been up.
     message: Option<StatusMessage>,
     /// An open `command-prompt`, if one is taking input.
@@ -815,7 +831,7 @@ impl App {
             closing: HashSet::new(),
         };
 
-        Self {
+        let mut app = Self {
             front: Surface::new(width, height),
             back: Surface::new(width, height),
             cursor: None,
@@ -850,6 +866,7 @@ impl App {
             timeline: Timeline::new(),
             keymap: config.keymap,
             options: config.options,
+            nested_env: crate::input::nesting::over_ssh(),
             message: None,
             prompt: None,
             wait_channels: HashMap::new(),
@@ -863,7 +880,14 @@ impl App {
             last_dirty_cells: 0,
             dirty: true,
             exit: ExitState::Running,
-        }
+        };
+
+        // The config decided which keys are bound; this decides which modifier
+        // they hang off, and has to run after the config so a `bind -n M-s` in
+        // it moves along with the built-in chords.
+        app.refresh_nesting();
+
+        app
     }
 
     fn current(&self) -> &Workspace {
@@ -2159,11 +2183,13 @@ impl App {
         cols: u16,
         rows: u16,
         truecolor: bool,
+        nested: bool,
         frames: mpsc::UnboundedSender<ServerToClient>,
     ) {
         self.clients
-            .push(AttachedClient::new(id, cols, rows, truecolor, frames));
+            .push(AttachedClient::new(id, cols, rows, truecolor, nested, frames));
         self.renegotiate_size().await;
+        self.refresh_nesting();
 
         // A joining client sees a settled layout, not the tail of whatever
         // animation happened to be in flight.
@@ -2184,8 +2210,78 @@ impl App {
         if let Some(farewell) = farewell {
             let _ = client.frames.send(farewell);
         }
+        // The terminal that needed the nested bindings may have just left.
+        self.refresh_nesting();
 
         true
+    }
+
+    /// Whether weave's own chords should hang off Ctrl+Alt rather than Alt.
+    ///
+    /// `nested-keys auto` asks the terminals: if *any* attached one is remote,
+    /// the whole session goes nested. That is the union that works for
+    /// everybody — a local terminal sends Ctrl+Alt chords perfectly well, while
+    /// a remote one cannot receive Alt chords at all, since the weave it is
+    /// running inside eats them first.
+    fn wants_nested_keys(&self) -> bool {
+        match self.options.get("nested-keys") {
+            Some("on") => true,
+            Some("off") => false,
+            // `auto`, and anything unparseable, which the option registry has
+            // already ruled out.
+            _ => {
+                if self.clients.is_empty() {
+                    self.nested_env
+                } else {
+                    self.clients.iter().any(|client| client.nested)
+                }
+            }
+        }
+    }
+
+    /// Put the leader and the prefix where the current nesting says they go.
+    ///
+    /// Called whenever an input to that decision moves: a client attaching or
+    /// leaving, and `set-option` on any of the options involved.
+    fn refresh_nesting(&mut self) {
+        let leader = if self.wants_nested_keys() {
+            Leader::CtrlAlt
+        } else {
+            Leader::Alt
+        };
+
+        if self.keymap.set_leader(leader) {
+            tracing::info!("leader moved to {}", leader.name());
+            // Worth saying out loud: every chord the user knows just changed
+            // its modifier, and nothing else on screen would show it.
+            self.show_message(format!("nested: leader is now {}", leader.name()));
+        }
+        self.refresh_prefix();
+    }
+
+    /// Recompute the prefix keys from the options and the current nesting.
+    ///
+    /// `C-b` is no use nested — the outer weave is bound to it and takes it
+    /// first — so `nested-prefix` stands in while nested. Setting it empty
+    /// keeps `prefix` either way, for a user who has already moved the outer
+    /// one out of the way.
+    fn refresh_prefix(&mut self) {
+        let nested_prefix = self
+            .options
+            .get("nested-prefix")
+            .filter(|value| !value.is_empty());
+
+        let names: Vec<&str> = match nested_prefix {
+            Some(nested) if self.keymap.leader() == Leader::CtrlAlt => vec![nested],
+            _ => ["prefix", "prefix2"]
+                .into_iter()
+                .filter_map(|option| self.options.get(option))
+                .filter(|value| !value.is_empty())
+                .collect(),
+        };
+
+        let keys: Vec<_> = names.into_iter().filter_map(parse_binding_key).collect();
+        self.keymap.set_prefix(&keys);
     }
 
     /// Detach clients, optionally all but one.
@@ -2303,10 +2399,12 @@ impl App {
                 cols,
                 rows,
                 truecolor,
+                nested,
                 frames,
             } => {
-                tracing::info!("client {id} attached at {cols}x{rows}");
-                self.attach_client(id, cols, rows, truecolor, frames).await;
+                tracing::info!("client {id} attached at {cols}x{rows} (nested: {nested})");
+                self.attach_client(id, cols, rows, truecolor, nested, frames)
+                    .await;
             }
             SessionEvent::Message(ClientToServer::Attach { .. }) => {
                 tracing::warn!("ignoring a second attach on an established connection");
@@ -2627,15 +2725,8 @@ impl App {
     /// Push an option's new value into the state that reads it.
     fn apply_live_option(&mut self, name: &str) {
         match name {
-            "prefix" | "prefix2" => {
-                let keys = ["prefix", "prefix2"]
-                    .into_iter()
-                    .filter_map(|option| self.options.get(option))
-                    .filter(|value| !value.is_empty())
-                    .filter_map(parse_binding_key)
-                    .collect::<Vec<_>>();
-                self.keymap.set_prefix(&keys);
-            }
+            "prefix" | "prefix2" | "nested-prefix" => self.refresh_prefix(),
+            "nested-keys" => self.refresh_nesting(),
             "status" => self.status_bar = self.options.flag("status"),
             "pane-border-status" => self.pane_titles = self.options.flag("pane-border-status"),
             "target-fps" => {
@@ -4279,6 +4370,9 @@ impl App {
             timeline: Timeline::new(),
             keymap: Keymap::default(),
             options: Options::default(),
+            // A test's keymap must not depend on whether the test runner was
+            // started over SSH; the nesting tests set this themselves.
+            nested_env: false,
             message: None,
             prompt: None,
             wait_channels: HashMap::new(),
@@ -4583,6 +4677,8 @@ mod tests {
     use crate::anim::tween::Easing;
     use crate::backend::{PaneBackend, PaneCommand, PaneId};
     use crate::command::Command;
+    use crate::input::keymap::Leader;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use crate::layout::geometry::{FRect, Split};
     use crate::command::Target;
     use crate::session::protocol::{CommandResult, ServerToClient};
@@ -5165,7 +5261,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
 
         let pane = app.pane_ids()[0];
         look_away_from(&mut app, pane).await;
@@ -5198,7 +5294,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
 
         let pane = app.pane_ids()[0];
         app.agents.set_foreground(pane, Some("claude".to_owned()));
@@ -5226,7 +5322,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
 
         let pane = app.pane_ids()[0];
         app.agents.set_foreground(pane, Some("claude".to_owned()));
@@ -5260,7 +5356,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
 
         let pane = app.pane_ids()[0];
         look_away_from(&mut app, pane).await;
@@ -5299,7 +5395,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
 
         let pane = app.pane_ids()[0];
         look_away_from(&mut app, pane).await;
@@ -5339,7 +5435,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
 
         let pane = app.pane_ids()[0];
         look_away_from(&mut app, pane).await;
@@ -5371,7 +5467,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
 
         let pane = app.pane_ids()[0];
         app.agents.set_foreground(pane, Some("claude".to_owned()));
@@ -5399,7 +5495,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
 
         let pane = app.pane_ids()[0];
         app.agents.set_foreground(pane, Some("claude".to_owned()));
@@ -5421,7 +5517,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
 
         let pane = app.pane_ids()[0];
         look_away_from(&mut app, pane).await;
@@ -5452,7 +5548,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
 
         let pane = app.pane_ids()[0];
         app.agents.set_foreground(pane, Some("claude".to_owned()));
@@ -5486,7 +5582,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
 
         let pane = app.pane_ids()[0];
         look_away_from(&mut app, pane).await;
@@ -5519,7 +5615,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
 
         let pane = app.pane_ids()[0];
         look_away_from(&mut app, pane).await;
@@ -5549,7 +5645,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
 
         let pane = app.pane_ids()[0];
         app.agents.set_foreground(pane, Some("claude".to_owned()));
@@ -5567,7 +5663,7 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         app.sink = OutputSink::Null;
         let (frames, mut rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
         app.execute(command("set-option agent-bell off"))
             .await
             .expect("option set");
@@ -6412,11 +6508,11 @@ mod tests {
         let mut app = App::with_backend_for_test(backend, 100, 40, PaneId(1));
 
         let (big, _big_rx) = client_channel();
-        app.attach_client(1, 100, 40, true, big).await;
+        app.attach_client(1, 100, 40, true, false, big).await;
         assert_eq!((app.back.width, app.back.height), (100, 40));
 
         let (small, _small_rx) = client_channel();
-        app.attach_client(2, 60, 20, true, small).await;
+        app.attach_client(2, 60, 20, true, false, small).await;
         assert_eq!(
             (app.back.width, app.back.height),
             (60, 20),
@@ -6437,8 +6533,8 @@ mod tests {
 
         let (first, mut first_rx) = client_channel();
         let (second, _second_rx) = client_channel();
-        app.attach_client(1, 80, 24, true, first).await;
-        app.attach_client(2, 80, 24, true, second).await;
+        app.attach_client(1, 80, 24, true, false, first).await;
+        app.attach_client(2, 80, 24, true, false, second).await;
 
         assert_eq!(app.clients.len(), 2);
         // The first client was not sent a goodbye.
@@ -6458,8 +6554,8 @@ mod tests {
 
         let (first, mut first_rx) = client_channel();
         let (second, mut second_rx) = client_channel();
-        app.attach_client(1, 80, 24, true, first).await;
-        app.attach_client(2, 80, 24, true, second).await;
+        app.attach_client(1, 80, 24, true, false, first).await;
+        app.attach_client(2, 80, 24, true, false, second).await;
 
         app.tick(Duration::from_millis(16))
             .await
@@ -6482,8 +6578,8 @@ mod tests {
 
         let (first, _first_rx) = client_channel();
         let (second, mut second_rx) = client_channel();
-        app.attach_client(1, 80, 24, true, first).await;
-        app.attach_client(2, 80, 24, true, second).await;
+        app.attach_client(1, 80, 24, true, false, first).await;
+        app.attach_client(2, 80, 24, true, false, second).await;
 
         app.execute(command("detach-client -t 2"))
             .await
@@ -6506,7 +6602,7 @@ mod tests {
 
         for id in 1..=3 {
             let (frames, _rx) = client_channel();
-            app.attach_client(id, 80, 24, true, frames).await;
+            app.attach_client(id, 80, 24, true, false, frames).await;
         }
 
         app.execute(command("detach-client -a -t 2"))
@@ -6517,12 +6613,152 @@ mod tests {
         assert_eq!(app.clients[0].id, 2);
     }
 
+    /// A terminal on the far side of SSH is almost certainly inside another
+    /// weave, which would eat every Alt chord before this session saw it.
+    #[tokio::test]
+    async fn a_client_over_ssh_moves_the_leader_to_ctrl_alt() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        assert_eq!(app.keymap.leader(), Leader::Alt);
+
+        let (frames, _rx) = client_channel();
+        app.attach_client(1, 80, 24, true, true, frames).await;
+
+        assert_eq!(app.keymap.leader(), Leader::CtrlAlt);
+        assert_eq!(
+            app.keymap.command_for(&KeyEvent::new(
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            Some(command("split-v"))
+        );
+        assert_eq!(
+            app.keymap
+                .command_for(&KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            None,
+            "C-v is the pane's, and stays the pane's"
+        );
+    }
+
+    /// Detaching the remote terminal hands Alt back to the local one.
+    #[tokio::test]
+    async fn the_leader_returns_to_alt_when_the_ssh_client_leaves() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        let (frames, _rx) = client_channel();
+        app.attach_client(7, 80, 24, true, true, frames).await;
+        assert_eq!(app.keymap.leader(), Leader::CtrlAlt);
+
+        app.execute(command("detach-client -t 7"))
+            .await
+            .expect("detach succeeds");
+
+        assert_eq!(app.keymap.leader(), Leader::Alt);
+        assert_eq!(
+            app.keymap
+                .command_for(&KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT)),
+            Some(command("split-v"))
+        );
+    }
+
+    /// One remote terminal is enough. Ctrl reaches every client; Alt would
+    /// reach only the local ones, so the union is what the session runs.
+    #[tokio::test]
+    async fn one_nested_client_among_several_nests_the_session() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        let (local, _local_rx) = client_channel();
+        let (remote, _remote_rx) = client_channel();
+        app.attach_client(1, 80, 24, true, false, local).await;
+        assert_eq!(app.keymap.leader(), Leader::Alt);
+        app.attach_client(2, 80, 24, true, true, remote).await;
+
+        assert_eq!(app.keymap.leader(), Leader::CtrlAlt);
+    }
+
+    #[tokio::test]
+    async fn nested_keys_off_pins_the_leader_to_alt() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.execute(command("set-option -g nested-keys off"))
+            .await
+            .expect("nested-keys is an option");
+
+        let (frames, _rx) = client_channel();
+        app.attach_client(1, 80, 24, true, true, frames).await;
+
+        assert_eq!(app.keymap.leader(), Leader::Alt);
+    }
+
+    /// `on` is for the nesting the SSH check cannot see — weave inside weave on
+    /// one machine.
+    #[tokio::test]
+    async fn nested_keys_on_moves_the_leader_with_no_ssh_client() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        app.execute(command("set-option -g nested-keys on"))
+            .await
+            .expect("nested-keys is an option");
+
+        assert_eq!(app.keymap.leader(), Leader::CtrlAlt);
+    }
+
+    /// `C-b` is the outer weave's prefix and never arrives, so the nested
+    /// session listens on `nested-prefix` instead.
+    #[tokio::test]
+    async fn nesting_moves_the_prefix_off_the_outer_weaves_key() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
+        assert!(app.keymap.is_prefix(&ctrl('b')));
+
+        app.execute(command("set-option -g nested-keys on"))
+            .await
+            .expect("nested-keys is an option");
+
+        assert!(app.keymap.is_prefix(&ctrl('a')));
+        assert!(!app.keymap.is_prefix(&ctrl('b')));
+
+        app.execute(command("set-option -g nested-keys off"))
+            .await
+            .expect("nested-keys is an option");
+        assert!(app.keymap.is_prefix(&ctrl('b')));
+    }
+
+    /// An empty `nested-prefix` is how a user who has already moved the outer
+    /// weave's prefix keeps their own on both sides.
+    #[tokio::test]
+    async fn an_empty_nested_prefix_keeps_the_ordinary_one() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+
+        // Built by hand: the test helper splits on whitespace, so there is no
+        // way to spell an empty argument in a command line here.
+        app.execute(Command::SetOption {
+            name: "nested-prefix".to_owned(),
+            value: String::new(),
+            unset: false,
+        })
+        .await
+        .expect("nested-prefix is an option");
+        app.execute(command("set-option -g nested-keys on"))
+            .await
+            .expect("nested-keys is an option");
+
+        assert!(app
+            .keymap
+            .is_prefix(&KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)));
+    }
+
     #[tokio::test]
     async fn refresh_client_repaints_everyone() {
         let (backend, _handle) = mock_backend(PaneId(2));
         let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
         let (frames, _rx) = client_channel();
-        app.attach_client(1, 80, 24, true, frames).await;
+        app.attach_client(1, 80, 24, true, false, frames).await;
         app.tick(Duration::from_millis(16)).await.expect("a frame");
         assert!(!app.clients[0].needs_full_repaint);
 

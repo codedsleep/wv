@@ -70,6 +70,55 @@ wv --debug
 | `Alt+D`                   | Detach, leaving the session running |
 | `Alt+Shift+Q`             | Quit                         |
 
+### Nested weave
+
+Two weaves in one key stream cannot both own `Alt`: the outer one matches the
+chord and the inner one never sees the key — the trap a nested tmux falls into
+with its prefix. So a weave that detects it is the inner one moves its leader
+from `Alt` to `Ctrl+Alt`, and its prefix from `C-b` to `C-a`. Every chord keeps
+its letter: `Alt+V` becomes `Ctrl+Alt+V`, `Alt+Shift+H` becomes
+`Ctrl+Alt+Shift+H`. The outer session keeps the `Alt` chords it always had, and
+the status line says when the move happens.
+
+`Ctrl+Alt` rather than plain `Ctrl` because `Ctrl` is not weave's to take:
+`C-d`, `C-h`, `C-l`, `C-r`, `C-v` and `C-q` all belong to the shell in the
+pane, and a nested session that ate them would cost you your shell to save its
+own keys. Nothing sends `Ctrl+Alt`, so it is free, and the outer weave passes
+it through — its root table holds bare `Alt`, which a key carrying `Ctrl` as
+well does not match.
+
+| Local            | Nested                 |
+|------------------|------------------------|
+| `Alt+Enter`      | `Ctrl+Alt+Enter`       |
+| `Alt+V`          | `Ctrl+Alt+V`           |
+| `Alt+H`/`J`/`K`/`L` | `Ctrl+Alt+H`/`J`/`K`/`L` |
+| `Alt+1` … `Alt+9`| `Ctrl+Alt+1` … `Ctrl+Alt+9` |
+| `C-b` (prefix)   | `C-a` (`nested-prefix`)|
+
+Detection is per-terminal and dynamic: the client tells the server whether its
+terminal is on the far side of an SSH connection, so `ssh box` then `wv` is
+nested, and detaching and reattaching locally puts `Alt` back. With several
+terminals watching one session, one remote client is enough to nest it —
+`Ctrl+Alt` reaches everyone, `Alt` would reach only the local ones.
+
+```sh
+set -g nested-keys auto   # default: nested when the attached terminal is remote
+set -g nested-keys on     # always, for weave inside weave on one machine
+set -g nested-keys off    # never; keep Alt no matter what
+set -g nested-prefix C-a  # the prefix to use while nested; empty keeps `prefix`
+```
+
+Bindings you added yourself move too — a `bind -n M-s` answers to `C-M-s` while
+nested — since the rule is by modifier: every root binding carrying the
+leader's. One bound to something else, a bare `C-t`, stays where you put it.
+
+The one requirement is that your terminal can *send* `Ctrl+Alt` chords. Letters
+survive any terminal (they go as the meta prefix plus a control byte), but
+`Ctrl+Alt+1` and `Ctrl+Alt+Enter` need the kitty keyboard protocol — as
+`Ctrl+1` would, with or without weave. weave negotiates it with the pane it is
+nested inside, so the inner hop is covered; it is the outermost terminal that
+has to support it. kitty, foot, ghostty, WezTerm and recent Alacritty do.
+
 ## Animation
 
 `wv` interpolates every topology change at the monitor's refresh rate (160 Hz target by default, configurable via `[ui] target_fps`):

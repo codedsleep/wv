@@ -172,7 +172,7 @@ costs you that line and nothing else.
 
 - **live** — weave reads it: `prefix`, `prefix2`, `status`,
   `pane-border-status`, `repeat-time`, `default-shell`, `automatic-rename`,
-  `target-fps`, `status-powerline`.
+  `target-fps`, `status-powerline`, `nested-keys`, `nested-prefix`.
 - **inert** — a real tmux option weave stores so `show-options` round-trips,
   but nothing reads. Setting one logs *why*: `history-limit` does nothing
   because there is no scrollback, `base-index` because windows are fixed slots.
@@ -193,6 +193,35 @@ prefix.
 neighbour in that direction the way a tiling window manager does. tmux has no
 equivalent key; the underlying command is `swap-pane -t {left-of}`, aliased as
 `move-left` and friends.
+
+### Nesting
+
+tmux nested in tmux needs the inner session's prefix moved by hand, or `C-b`
+pressed twice to send one through. weave does the equivalent automatically and
+for its whole leader: an inner session moves every root-table chord from `Alt`
+to `Ctrl+Alt` and its prefix from `C-b` to `nested-prefix` (`C-a`).
+
+`Ctrl+Alt` and not plain `Ctrl`, because `C-d`, `C-h`, `C-l`, `C-r`, `C-v` and
+`C-q` belong to the program in the pane. A nested leader has to be a modifier
+combination nothing else sends, and `Ctrl+Alt` is the one left.
+
+"Inner" is decided by the attached client, which reports whether its terminal
+is reached over SSH — weave sets no marker in a pane's environment, so there is
+nothing that says "you are inside another weave" directly, and SSH is the shape
+nesting takes in practice. `nested-keys on`/`off` overrides the guess; `on` is
+what a local weave-inside-weave needs.
+
+The move is by modifier, not by binding, so a user's own `bind -n M-s` becomes
+`C-M-s` while nested, and a `C-t` stays put in both directions because it
+carries no `Alt` either way.
+
+Getting a `Ctrl+Alt` chord *into* a nested session is the encoder's job. The
+legacy encoding expresses it for letters only, as the meta prefix in front of
+the control byte (`C-M-h` → `ESC 0x08`), which is what xterm sends and what
+crossterm parses back. Everything else — digits especially — takes the
+`CSI u` form, on the same rule this file's key encoding already follows for
+`Enter`, `Tab` and `Backspace`: a modifier the legacy encoding cannot express
+is worth a sequence rather than a key the user did not press.
 
 ### Modified keys and the kitty keyboard protocol
 

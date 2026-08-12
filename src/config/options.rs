@@ -19,6 +19,8 @@ pub enum OptionKind {
     Number,
     String,
     Key,
+    /// One of a fixed set of words, stored lowercased.
+    Choice(&'static [&'static str]),
 }
 
 /// Whether weave actually reads an option.
@@ -38,6 +40,9 @@ pub struct OptionSpec {
     pub default: &'static str,
 }
 
+/// What `nested-keys` accepts.
+pub const NESTED_KEYS_VALUES: &[&str] = &["auto", "on", "off"];
+
 /// Every option weave will accept.
 pub const OPTIONS: &[OptionSpec] = &[
     // --- live ---
@@ -52,6 +57,24 @@ pub const OPTIONS: &[OptionSpec] = &[
         kind: OptionKind::Key,
         status: OptionStatus::Live,
         default: "",
+    },
+    // Whether weave's own chords hang off Ctrl instead of Alt, so a weave
+    // inside another weave can still be driven. `auto` looks at whether the
+    // attached terminal is on the far side of an SSH connection.
+    OptionSpec {
+        name: "nested-keys",
+        kind: OptionKind::Choice(NESTED_KEYS_VALUES),
+        status: OptionStatus::Live,
+        default: "auto",
+    },
+    // The prefix key to use while nested. The usual `C-b` is no good there:
+    // the outer weave is bound to it and consumes it first. Set it empty to
+    // keep `prefix` even when nested.
+    OptionSpec {
+        name: "nested-prefix",
+        kind: OptionKind::Key,
+        status: OptionStatus::Live,
+        default: "C-a",
     },
     OptionSpec {
         name: "status",
@@ -262,7 +285,7 @@ pub enum OptionError {
     BadValue {
         name: String,
         value: String,
-        expected: &'static str,
+        expected: String,
     },
 }
 
@@ -317,13 +340,21 @@ impl Options {
 
 /// Check a value against its option's kind, normalising as tmux does.
 fn normalize(spec: &'static OptionSpec, value: &str) -> Result<String, OptionError> {
-    let bad = |expected| OptionError::BadValue {
+    let bad = |expected: &str| OptionError::BadValue {
         name: spec.name.to_owned(),
         value: value.to_owned(),
-        expected,
+        expected: expected.to_owned(),
     };
 
     match spec.kind {
+        OptionKind::Choice(allowed) => {
+            let lowered = value.to_ascii_lowercase();
+            if allowed.contains(&lowered.as_str()) {
+                Ok(lowered)
+            } else {
+                Err(bad(&list_words(allowed)))
+            }
+        }
         OptionKind::Flag => match value {
             // tmux accepts several spellings for each; store one.
             "on" | "yes" | "1" | "true" => Ok("on".to_owned()),
@@ -335,6 +366,15 @@ fn normalize(spec: &'static OptionSpec, value: &str) -> Result<String, OptionErr
             .map(|number| number.to_string())
             .map_err(|_| bad("a number")),
         OptionKind::String | OptionKind::Key => Ok(value.to_owned()),
+    }
+}
+
+/// `["auto", "on", "off"]` → `auto, on or off`, for the error message.
+fn list_words(words: &[&str]) -> String {
+    match words {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
     }
 }
 
@@ -366,9 +406,24 @@ mod tests {
             OptionError::BadValue {
                 name: "status".to_owned(),
                 value: "maybe".to_owned(),
-                expected: "on or off",
+                expected: "on or off".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn nested_keys_takes_auto_on_or_off_and_says_so() {
+        let mut options = Options::default();
+
+        assert_eq!(options.get("nested-keys"), Some("auto"));
+        options.set("nested-keys", "ON").expect("a listed value");
+        assert_eq!(options.get("nested-keys"), Some("on"));
+
+        let error = options
+            .set("nested-keys", "sometimes")
+            .expect_err("not a listed value")
+            .to_string();
+        assert!(error.contains("auto, on or off"), "{error}");
     }
 
     #[test]

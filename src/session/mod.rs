@@ -32,6 +32,9 @@ pub enum SessionEvent {
         cols: u16,
         rows: u16,
         truecolor: bool,
+        /// Whether this terminal is reached over SSH, and so wants the nested
+        /// keybindings.
+        nested: bool,
         frames: UnboundedSender<ServerToClient>,
     },
     /// A message from the attached client.

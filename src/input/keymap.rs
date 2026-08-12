@@ -10,6 +10,10 @@
 //!   bindings live here, so `C-b %` splits.
 //!
 //! A key in no table reaches the pane, which is what makes typing work.
+//!
+//! The modifier the root chords hang off is not fixed: see [`Leader`], which a
+//! weave running inside another one moves to `Ctrl+Alt` so the outer instance
+//! stops swallowing its keys.
 
 use std::collections::HashMap;
 
@@ -23,6 +27,44 @@ use crate::layout::geometry::{Direction, Split};
 pub const ROOT_TABLE: &str = "root";
 /// The table consulted immediately after the prefix key.
 pub const PREFIX_TABLE: &str = "prefix";
+
+/// The modifier weave's own chords hang off.
+///
+/// Normally `Alt`. A weave running inside another one — over SSH, almost
+/// always — cannot use it: the outer instance matches `Alt+v` in its own root
+/// table and the key never reaches the inner session.
+///
+/// The nested leader is `Ctrl+Alt` rather than plain `Ctrl` because `Ctrl`
+/// alone is not weave's to take. `C-d`, `C-h`, `C-l`, `C-r`, `C-v` and `C-q`
+/// all mean something to the shell in the pane, and a nested session that ate
+/// them would cost the user their shell to save its own keys. Nothing sends
+/// `Ctrl+Alt` chords, so they are free, and the outer weave passes them
+/// through: its root table holds `Alt`, and a key event carrying `Ctrl` as
+/// well does not match it.
+///
+/// See [`crate::input::nesting`] for how the choice is made.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Leader {
+    Alt,
+    CtrlAlt,
+}
+
+impl Leader {
+    pub const fn modifier(self) -> KeyModifiers {
+        match self {
+            Self::Alt => KeyModifiers::ALT,
+            Self::CtrlAlt => KeyModifiers::CONTROL.union(KeyModifiers::ALT),
+        }
+    }
+
+    /// How the leader is written in a message to the user.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Alt => "Alt",
+            Self::CtrlAlt => "Ctrl+Alt",
+        }
+    }
+}
 
 /// A bound key: what it runs, and whether it can repeat without the prefix.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,6 +97,8 @@ pub struct Keymap {
     /// The keys that switch into the prefix table. Two, because tmux has
     /// `prefix` and `prefix2`.
     prefix: Vec<KeyEvent>,
+    /// The modifier the root table's chords currently hang off.
+    leader: Leader,
 }
 
 impl Keymap {
@@ -111,6 +155,55 @@ impl Keymap {
 
     pub fn prefix_keys(&self) -> &[KeyEvent] {
         &self.prefix
+    }
+
+    pub fn leader(&self) -> Leader {
+        self.leader
+    }
+
+    /// Move every root-table chord from the current leader onto `leader`.
+    ///
+    /// The rule is by modifier, not by binding: every root binding carrying
+    /// all of the old leader's modifiers moves, whoever bound it. That keeps a
+    /// user's own `bind -n M-s` working nested, as `C-M-s`. A binding on a
+    /// modifier the leader does not use — a hand-bound `C-t` — stays put in
+    /// both directions, since it carries no `Alt` either way. Bindings in the
+    /// prefix table are left alone; they are reached through the prefix key,
+    /// not the leader.
+    ///
+    /// Returns whether anything changed, so a caller can skip the work of
+    /// announcing a move that did not happen.
+    pub fn set_leader(&mut self, leader: Leader) -> bool {
+        if self.leader == leader {
+            return false;
+        }
+
+        let from = self.leader.modifier();
+        let to = leader.modifier();
+        self.leader = leader;
+
+        let Some(root) = self.tables.get_mut(ROOT_TABLE) else {
+            return true;
+        };
+
+        let mut moved: Vec<(KeyEvent, Binding)> = root
+            .iter()
+            .filter(|(key, _)| key.modifiers.contains(from))
+            .map(|(key, binding)| {
+                let mut key = *key;
+                key.modifiers = key.modifiers.difference(from).union(to);
+                (key, binding.clone())
+            })
+            .collect();
+        // Two chords can land on one key — `M-q` moving onto a `C-q` that was
+        // already bound. Sorting first makes which one wins the same on every
+        // run rather than a matter of hash order.
+        moved.sort_by_key(|(key, _)| format_key(key));
+
+        root.retain(|key, _| !key.modifiers.contains(from));
+        root.extend(moved);
+
+        true
     }
 
     /// Every binding, table by table, sorted for stable `list-keys` output.
@@ -282,6 +375,7 @@ impl Default for Keymap {
         let mut keymap = Self {
             tables: HashMap::new(),
             prefix: vec![ctrl('b')],
+            leader: Leader::Alt,
         };
 
         keymap.install_root_defaults();
@@ -438,7 +532,9 @@ pub fn format_key(key: &KeyEvent) -> String {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{focus, format_key, swap_toward, Binding, Keymap, PREFIX_TABLE, ROOT_TABLE};
+    use super::{
+        focus, format_key, swap_toward, Binding, Keymap, Leader, PREFIX_TABLE, ROOT_TABLE,
+    };
     use crate::command::Command;
     use crate::layout::geometry::Direction;
 
@@ -667,6 +763,162 @@ mod tests {
         assert!(keymap.unbind(ROOT_TABLE, key));
         assert_eq!(keymap.command_for(&key), None);
         assert!(!keymap.unbind(ROOT_TABLE, key), "already gone");
+    }
+
+    /// `C-M-x`, the nested leader.
+    fn ctrl_alt(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL | KeyModifiers::ALT)
+    }
+
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    /// The whole point of nesting: the chords move to Ctrl+Alt, where the weave
+    /// running outside this one will not have eaten them first.
+    #[test]
+    fn the_nested_leader_moves_every_root_chord_to_ctrl_alt() {
+        let mut keymap = Keymap::default();
+
+        assert!(keymap.set_leader(Leader::CtrlAlt));
+
+        assert_eq!(keymap.leader(), Leader::CtrlAlt);
+        assert_eq!(
+            keymap.command_for(&ctrl_alt(KeyCode::Char('v'))),
+            Some(command("split-v"))
+        );
+        assert_eq!(
+            keymap.command_for(&ctrl_alt(KeyCode::Char('h'))),
+            Some(command("focus-left"))
+        );
+        assert_eq!(
+            keymap.command_for(&ctrl_alt(KeyCode::Enter)),
+            Some(command("split-h"))
+        );
+        assert_eq!(
+            keymap.command_for(&ctrl_alt(KeyCode::Char('1'))),
+            Some(command("workspace-1"))
+        );
+        // And the Alt spellings are gone, so the outer weave's chords are not
+        // shadowed by an inner one that also answers to them.
+        assert_eq!(keymap.command_for(&alt(KeyCode::Char('v'))), None);
+        assert_eq!(keymap.command_for(&alt(KeyCode::Char('h'))), None);
+    }
+
+    /// The keys the shell in the pane needs are exactly the ones a plain-Ctrl
+    /// leader would have taken, so this is the assertion that says why the
+    /// nested leader is Ctrl+Alt and not Ctrl.
+    #[test]
+    fn the_nested_leader_leaves_the_shells_ctrl_keys_alone() {
+        let mut keymap = Keymap::default();
+
+        keymap.set_leader(Leader::CtrlAlt);
+
+        for ch in ['d', 'h', 'l', 'r', 'v', 'q', 'c'] {
+            assert_eq!(
+                keymap.command_for(&ctrl_key(KeyCode::Char(ch))),
+                None,
+                "C-{ch} belongs to the pane, not to weave"
+            );
+        }
+    }
+
+    /// Shift rides along: `M-S-h` becomes `C-M-S-h`, not `C-M-h`.
+    #[test]
+    fn the_nested_leader_keeps_the_other_modifiers() {
+        let mut keymap = Keymap::default();
+
+        keymap.set_leader(Leader::CtrlAlt);
+
+        assert_eq!(
+            keymap.command_for(&KeyEvent::new(
+                KeyCode::Char('h'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT
+            )),
+            Some(swap_toward(Direction::Left))
+        );
+        assert_eq!(
+            keymap.command_for(&ctrl_alt(KeyCode::Char('h'))),
+            Some(focus(Direction::Left)),
+            "the unshifted chord still focuses"
+        );
+    }
+
+    /// The prefix table is reached through the prefix key, not the leader, so
+    /// nesting must leave it exactly as it was.
+    #[test]
+    fn the_nested_leader_leaves_the_prefix_table_alone() {
+        let mut keymap = Keymap::default();
+
+        keymap.set_leader(Leader::CtrlAlt);
+
+        assert_eq!(
+            keymap
+                .lookup(PREFIX_TABLE, &plain('%'))
+                .map(|binding| &binding.command),
+            Some(&command("split-window -h"))
+        );
+        assert!(keymap
+            .lookup(PREFIX_TABLE, &KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL))
+            .is_some_and(|binding| binding.repeat));
+    }
+
+    /// Detaching the SSH client and reattaching locally puts the chords back.
+    #[test]
+    fn the_leader_moves_back_and_reports_when_it_did_not_move() {
+        let mut keymap = Keymap::default();
+
+        assert!(keymap.set_leader(Leader::CtrlAlt));
+        assert!(!keymap.set_leader(Leader::CtrlAlt), "already there");
+        assert!(keymap.set_leader(Leader::Alt));
+
+        assert_eq!(
+            keymap.command_for(&alt(KeyCode::Char('v'))),
+            Some(command("split-v"))
+        );
+        assert_eq!(keymap.command_for(&ctrl_alt(KeyCode::Char('v'))), None);
+    }
+
+    /// A binding the user added moves with the built-in ones — nesting must not
+    /// leave half of someone's config unreachable. One on a modifier the leader
+    /// does not use stays exactly where it was put, in both directions.
+    #[test]
+    fn a_user_bound_chord_moves_with_the_leader_and_a_ctrl_one_does_not() {
+        let mut keymap = Keymap::default();
+        keymap.bind(
+            ROOT_TABLE,
+            alt(KeyCode::Char('s')),
+            Binding::new(command("split-v")),
+        );
+        keymap.bind(
+            ROOT_TABLE,
+            ctrl_key(KeyCode::Char('t')),
+            Binding::new(command("split-h")),
+        );
+
+        keymap.set_leader(Leader::CtrlAlt);
+
+        assert_eq!(
+            keymap.command_for(&ctrl_alt(KeyCode::Char('s'))),
+            Some(command("split-v"))
+        );
+        assert_eq!(
+            keymap.command_for(&ctrl_key(KeyCode::Char('t'))),
+            Some(command("split-h")),
+            "C-t carries no Alt, so the leader has no claim on it"
+        );
+
+        keymap.set_leader(Leader::Alt);
+
+        assert_eq!(
+            keymap.command_for(&alt(KeyCode::Char('s'))),
+            Some(command("split-v"))
+        );
+        assert_eq!(
+            keymap.command_for(&ctrl_key(KeyCode::Char('t'))),
+            Some(command("split-h")),
+            "and moving back must not drag it onto M-t"
+        );
     }
 
     #[test]

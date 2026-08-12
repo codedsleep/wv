@@ -173,12 +173,13 @@ async fn serve_connection(
     }
 
     let handshake: Option<ClientToServer> = read_frame(&mut read_half).await?;
-    let (cols, rows, truecolor) = match handshake {
+    let (cols, rows, truecolor, nested) = match handshake {
         Some(ClientToServer::Attach {
             cols,
             rows,
             truecolor,
-        }) => (cols, rows, truecolor),
+            nested,
+        }) => (cols, rows, truecolor, nested),
         // `wv exec` is a one-shot: a single command, no rendering, no attach.
         // The reply goes back on this connection before it closes, so the
         // caller learns what the command produced and whether it worked.
@@ -233,6 +234,7 @@ async fn serve_connection(
             cols,
             rows,
             truecolor,
+            nested,
             frames: frames_tx,
         })
         .await
