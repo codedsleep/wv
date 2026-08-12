@@ -110,16 +110,33 @@ async fn attach_to(name: &str, path: &Path) -> anyhow::Result<()> {
                     // Told to the new server rather than carried in the
                     // handshake: it is an ordinary command, and one that must
                     // land before the first frame is composed.
-                    if let Err(error) = server::request(
+                    // Both halves of the answer matter. A window listed in the
+                    // picker can be gone by the time the jump lands, and the
+                    // new server reports that as an ordinary refusal rather
+                    // than a broken connection: taken as success it would
+                    // attach to whichever window happens to be current and
+                    // say nothing about having gone somewhere else.
+                    let selected = server::request(
                         &session.path,
                         Command::SelectWindow {
                             target: Target::window(*window),
                             create: false,
                         },
                     )
-                    .await
-                    {
-                        tracing::warn!("could not select window {window} in {wanted}: {error:#}");
+                    .await;
+                    match selected {
+                        Ok(CommandResult::Ok { .. }) => {}
+                        Ok(CommandResult::Error { message }) => {
+                            tracing::warn!(
+                                "{wanted} refused window {window}: {message}; \
+                                 attaching to its current window instead"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "could not select window {window} in {wanted}: {error:#}"
+                            );
+                        }
                     }
                 }
                 path = session.path;

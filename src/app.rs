@@ -66,9 +66,13 @@ const DEFAULT_WINDOW_FORMAT: &str =
 const DEFAULT_SESSION_FORMAT: &str = "#{session_name}: #{session_windows} windows";
 /// What the picker asks other sessions for.
 ///
-/// Tab-separated because it is parsed, not read: window names may contain
-/// anything a shell title can, and a tab is the one character they will not.
-const PICKER_WINDOW_FORMAT: &str = "#{window_index}\t#{window_name}\t#{window_panes}";
+/// Tab-separated because it is parsed, not read, and the name goes *last*
+/// because it is the only unrestricted field: `rename-window` takes any
+/// `String` and automatic names come straight from OSC titles, so a name can
+/// hold a tab as easily as a space. Last, it is simply the rest of the line,
+/// and a tab inside it can no longer shift the two numbers out from under the
+/// parser and drop the window off the list.
+const PICKER_WINDOW_FORMAT: &str = "#{window_index}\t#{window_panes}\t#{window_name}";
 const OUTPUT_CHANNEL_CAPACITY: usize = 256;
 const EVENT_CHANNEL_CAPACITY: usize = 64;
 
@@ -322,63 +326,48 @@ impl Prompt {
     }
 }
 
-/// Every *other* live session's rows, asked for over their sockets.
+/// One other session's rows, asked for over its socket.
 ///
-/// A free function rather than a method because it awaits: holding a `&App`
-/// across an await would make `App::run`'s future non-`Send`, and the session
-/// server spawns it. It needs nothing from `App` but the name to skip anyway.
+/// A free function rather than a method because it runs in its own task, off
+/// the app event loop — see [`App::open_picker`] for why that matters. It
+/// needs nothing from `App` anyway.
 ///
 /// A session that will not answer is still listed, as a bare session row: one
 /// wedged socket must not blank out the rest of the picker, and being able to
 /// *see* the stuck session is how you go and deal with it.
-async fn remote_picker_rows(own_session: Option<String>) -> Vec<PickerRow> {
-    let sessions = match crate::session::paths::list_sessions() {
-        Ok(sessions) => sessions,
+async fn peer_picker_rows(entry: &crate::session::paths::SessionEntry) -> Vec<PickerRow> {
+    let listing = crate::session::server::request(
+        &entry.path,
+        Command::List {
+            scope: ListScope::Windows {
+                target: Target::current(),
+            },
+            format: Some(PICKER_WINDOW_FORMAT.to_owned()),
+        },
+    )
+    .await;
+
+    let windows = match listing {
+        Ok(CommandResult::Ok { output }) => parse_picker_windows(&output),
+        Ok(CommandResult::Error { message }) => {
+            tracing::warn!("session {} refused to list windows: {message}", entry.name);
+            Vec::new()
+        }
         Err(error) => {
-            tracing::warn!("could not list sessions for the picker: {error:#}");
-            return Vec::new();
+            tracing::warn!("could not reach session {}: {error:#}", entry.name);
+            Vec::new()
         }
     };
 
-    let mut rows = Vec::new();
-    for entry in sessions {
-        if Some(&entry.name) == own_session.as_ref() {
-            continue;
-        }
-
-        let listing = crate::session::server::request(
-            &entry.path,
-            Command::List {
-                scope: ListScope::Windows {
-                    target: Target::current(),
-                },
-                format: Some(PICKER_WINDOW_FORMAT.to_owned()),
-            },
-        )
-        .await;
-
-        let windows = match listing {
-            Ok(CommandResult::Ok { output }) => parse_picker_windows(&output),
-            Ok(CommandResult::Error { message }) => {
-                tracing::warn!("session {} refused to list windows: {message}", entry.name);
-                Vec::new()
-            }
-            Err(error) => {
-                tracing::warn!("could not reach session {}: {error:#}", entry.name);
-                Vec::new()
-            }
-        };
-
-        rows.push(PickerRow::session(
-            entry.name.clone(),
-            windows.len(),
-            false,
-            false,
-        ));
-        rows.extend(windows.into_iter().map(|(index, name, panes)| {
-            PickerRow::window(entry.name.clone(), index, &name, panes, false, false)
-        }));
-    }
+    let mut rows = vec![PickerRow::session(
+        entry.name.clone(),
+        windows.len(),
+        false,
+        false,
+    )];
+    rows.extend(windows.into_iter().map(|(index, name, panes)| {
+        PickerRow::window(entry.name.clone(), index, &name, panes, false, false)
+    }));
 
     rows
 }
@@ -387,14 +376,21 @@ async fn remote_picker_rows(own_session: Option<String>) -> Vec<PickerRow> {
 ///
 /// A line the session did not format as expected is dropped rather than shown
 /// half-parsed: the picker would otherwise offer a row that jumps nowhere.
+///
+/// A name holding a newline still costs its own tail — the remainder arrives
+/// as a line with no index and is dropped — but the window itself is listed,
+/// under the part of the name that made it onto the first line, and no other
+/// window is disturbed.
 fn parse_picker_windows(listing: &str) -> Vec<(u32, String, usize)> {
     listing
         .lines()
         .filter_map(|line| {
             let mut fields = line.splitn(3, '\t');
             let index = fields.next()?.trim().parse().ok()?;
-            let name = fields.next()?.to_owned();
             let panes = fields.next()?.trim().parse().ok()?;
+            // Whatever is left, tabs and all: the name is the last field
+            // precisely so it does not have to be free of them.
+            let name = fields.next()?.to_owned();
             Some((index, name, panes))
         })
         .collect()
@@ -544,6 +540,19 @@ pub struct App {
     /// Session-global like `prompt`: every attached client sees the same
     /// picker and follows the same jump.
     picker: Option<Picker>,
+    /// Rows from other sessions, arriving after their picker already opened.
+    ///
+    /// Discovery is a socket round trip per peer and cannot be awaited here —
+    /// see [`App::open_picker`] — so it happens in tasks that report back
+    /// through this channel. The sender is kept so the receiver never closes
+    /// and the loop's branch on it stays live.
+    picker_rows_tx: mpsc::UnboundedSender<(u64, Vec<PickerRow>)>,
+    picker_rows_rx: mpsc::UnboundedReceiver<(u64, Vec<PickerRow>)>,
+    /// Which opening of the picker the rows in flight belong to.
+    ///
+    /// A picker closed and reopened before a slow peer answers must not be
+    /// filled with the last one's rows.
+    picker_epoch: u64,
     /// Callers parked on a `wait-for` channel, by channel name.
     ///
     /// A waiting request does not reply until someone signals it, so the reply
@@ -899,6 +908,7 @@ impl App {
         };
         let root = flat_horizontal_root(&initial_panes, root_rect);
         let focused = initial_panes.first().copied();
+        let (picker_rows_tx, picker_rows_rx) = mpsc::unbounded_channel();
 
         // Number the panes we start with in layout order, so `%1` is the first
         // pane on screen for a script that attaches immediately.
@@ -959,6 +969,9 @@ impl App {
             message: None,
             prompt: None,
             picker: None,
+            picker_rows_tx,
+            picker_rows_rx,
+            picker_epoch: 0,
             wait_channels: HashMap::new(),
             key_table: ROOT_TABLE.to_owned(),
             theme: config.theme,
@@ -1285,6 +1298,30 @@ impl App {
         self.agent_states = states;
 
         if finished {
+            self.ring_bell();
+        }
+    }
+
+    /// Ring for an agent whose pane died taking the session with it.
+    ///
+    /// `PaneDied` records the death and then, if that was the last pane,
+    /// stops the loop in the same breath — so `run` is already on its way out
+    /// before another tick can reach [`Self::tick_agent_bell`], and the
+    /// pending notification would be dropped unheard. An agent launched as
+    /// its pane's own command ends exactly that way, and it is the case the
+    /// bell is most for, so the way out drains it here instead.
+    ///
+    /// Judged like any other death — the run still has to have been long
+    /// enough to count — and rung before the clients are told the session is
+    /// over, so the bell is on the socket ahead of the goodbye.
+    fn flush_agent_bell(&mut self) {
+        let Some(pane) = self.agent_died_working.take() else {
+            return;
+        };
+        if !self.options.flag("agent-bell") {
+            return;
+        }
+        if self.ran_long_enough(pane, self.agent_minimum_run(), std::time::Instant::now()) {
             self.ring_bell();
         }
     }
@@ -1826,6 +1863,9 @@ impl App {
                 Some(event) = self.event_rx.recv() => {
                     self.handle_backend_event(event);
                 }
+                Some((epoch, rows)) = self.picker_rows_rx.recv() => {
+                    self.add_picker_rows(epoch, rows);
+                }
                 Some(event) = next_session_event(&mut self.session_rx) => {
                     self.handle_session_event(event).await?;
                 }
@@ -1852,6 +1892,11 @@ impl App {
                 }
             }
         }
+
+        // Before the goodbye below, and before the loop's last chance is gone:
+        // the pane whose agent stopped may be the one whose death ended the
+        // session — see [`Self::flush_agent_bell`].
+        self.flush_agent_bell();
 
         if session_mode {
             // A no-op when the client already got its goodbye; otherwise it
@@ -2108,7 +2153,7 @@ impl App {
             } => {
                 self.open_prompt(prompt, initial.as_deref(), template).await?;
             }
-            Command::ChooseTree => self.open_picker().await,
+            Command::ChooseTree => self.open_picker(),
             Command::SwitchClient { target } => {
                 let name = target
                     .session
@@ -3138,14 +3183,65 @@ impl App {
 
     /// Open the goto picker on every session and window we can see.
     ///
-    /// Rows are gathered once, here, rather than on every keystroke: this one
+    /// Rows are gathered once, on open, rather than on every keystroke: this
     /// is the only place that talks to other sessions, and it does so over
-    /// their sockets, which is a round trip per live session. Filtering
-    /// afterwards is pure local work.
-    async fn open_picker(&mut self) {
-        let mut rows = self.local_picker_rows();
-        rows.extend(remote_picker_rows(self.session_name.clone()).await);
-        self.picker = Some(Picker::new(rows));
+    /// their sockets, a round trip per live session. Filtering afterwards is
+    /// pure local work.
+    ///
+    /// The local rows go up immediately and the peers are asked in tasks of
+    /// their own, because awaiting them here would be a deadlock. A peer's
+    /// answer can only come from *its* app loop, and this one is that loop:
+    /// two sessions opening the picker at the same moment would each sit on
+    /// the other's reply until the request timed out, ten seconds later, with
+    /// input, pane output and rendering stopped for the whole of it. One
+    /// wedged peer did the same to everyone, serially. Off the loop, a peer
+    /// that will not answer costs its own row and nothing else — and asking
+    /// them in parallel means the slowest one sets the wait, not the sum.
+    fn open_picker(&mut self) {
+        self.picker = Some(Picker::new(self.local_picker_rows()));
+        self.picker_epoch = self.picker_epoch.wrapping_add(1);
+        self.dirty = true;
+
+        let sessions = match crate::session::paths::list_sessions() {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                tracing::warn!("could not list sessions for the picker: {error:#}");
+                return;
+            }
+        };
+
+        for entry in sessions {
+            if Some(&entry.name) == self.session_name.as_ref() {
+                continue;
+            }
+            let rows = self.picker_rows_tx.clone();
+            let epoch = self.picker_epoch;
+            tokio::spawn(async move {
+                // Dropped without complaint if the picker has already gone:
+                // the receiver outlives every task, so a failed send only
+                // means the app itself is on its way out.
+                let _ = rows.send((epoch, peer_picker_rows(&entry).await));
+            });
+        }
+    }
+
+    /// Take rows from a peer that answered after the picker went up.
+    ///
+    /// Rows for a picker that has since closed — or closed and reopened — are
+    /// dropped: the epoch is what tells the two apart.
+    fn add_picker_rows(&mut self, epoch: u64, rows: Vec<PickerRow>) {
+        if epoch != self.picker_epoch {
+            return;
+        }
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        // A picker already folding shut is on its way to being dropped, and
+        // growing the list under the animation would only flicker.
+        if picker.is_closing() {
+            return;
+        }
+        picker.extend(rows);
         self.dirty = true;
     }
 
@@ -4605,6 +4701,8 @@ impl App {
             h: height,
         };
 
+        let (picker_rows_tx, picker_rows_rx) = mpsc::unbounded_channel();
+
         let mut workspaces: Vec<Workspace> =
             (0..WORKSPACE_COUNT).map(|_| Workspace::default()).collect();
         workspaces[0] = Workspace {
@@ -4658,6 +4756,9 @@ impl App {
             message: None,
             prompt: None,
             picker: None,
+            picker_rows_tx,
+            picker_rows_rx,
+            picker_epoch: 0,
             wait_channels: HashMap::new(),
             key_table: ROOT_TABLE.to_owned(),
             theme: test_theme(),
@@ -5765,6 +5866,44 @@ mod tests {
         assert!(heard_a_bell(&mut rx), "the pane ended mid-run; say so");
 
         app.tick_agent_bell();
+        assert!(
+            !heard_a_bell(&mut rx),
+            "it ended once, so it is worth one bell"
+        );
+    }
+
+    /// The same death, but the pane was the session's only one — so it both
+    /// records the bell and ends the loop, and no tick ever runs again. The
+    /// way out has to ring instead, or an agent launched as its pane's own
+    /// command finishes in silence, which is the case the bell exists for.
+    #[tokio::test]
+    async fn the_last_pane_dying_mid_run_rings_on_the_way_out() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, false, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_output(pane, std::time::Instant::now());
+        app.tick_agent_bell();
+        worked_a_while(&mut app, pane);
+
+        app.handle_backend_event(crate::backend::BackendEvent::PaneDied(pane));
+        assert!(
+            app.exit == ExitState::Quit,
+            "the last pane going takes the session with it"
+        );
+        assert!(
+            !heard_a_bell(&mut rx),
+            "the death is only recorded here; the loop is already leaving"
+        );
+
+        app.flush_agent_bell();
+        assert!(heard_a_bell(&mut rx), "ring before the session is gone");
+
+        app.flush_agent_bell();
         assert!(
             !heard_a_bell(&mut rx),
             "it ended once, so it is worth one bell"
@@ -7190,7 +7329,7 @@ mod tests {
 
     #[test]
     fn a_remote_listing_becomes_rows_and_junk_is_dropped() {
-        let listing = "1\teditor\t2\n2\tdev-server\t1\nnonsense\n3\tno panes";
+        let listing = "1\t2\teditor\n2\t1\tdev-server\nnonsense\n3\tno panes";
 
         assert_eq!(
             parse_picker_windows(listing),
@@ -7199,6 +7338,67 @@ mod tests {
                 (2, "dev-server".to_owned(), 1),
             ],
             "a half-formatted line is dropped, not shown as a row that goes nowhere"
+        );
+    }
+
+    /// A window name is the one field nothing restricts: `rename-window`
+    /// takes any string and automatic names come from OSC titles. It goes
+    /// last so a tab inside it is just part of the name rather than something
+    /// that shifts the pane count out of the parser's reach and drops the
+    /// window off the picker entirely.
+    #[test]
+    fn a_tab_inside_a_window_name_does_not_lose_the_window() {
+        let listing = "1\t2\tedit\tor\n2\t1\tdev-server";
+
+        assert_eq!(
+            parse_picker_windows(listing),
+            vec![
+                (1, "edit\tor".to_owned(), 2),
+                (2, "dev-server".to_owned(), 1),
+            ],
+            "the name keeps its tabs and every window is still listed"
+        );
+    }
+
+    /// The picker goes up on local rows and the peers fill in behind, because
+    /// asking them cannot happen on this loop. A late answer has to find its
+    /// way in without disturbing what is already on screen.
+    #[tokio::test]
+    async fn rows_from_a_peer_join_the_open_picker() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        open_local_picker(&mut app);
+
+        let picker = app.picker.as_ref().expect("picker open");
+        let local = picker.match_count();
+        let selected = picker.selection().cloned();
+
+        let epoch = app.picker_epoch;
+        app.add_picker_rows(
+            epoch,
+            vec![
+                PickerRow::session("scratch".to_owned(), 1, false, false),
+                PickerRow::window("scratch".to_owned(), 1, "shell", 1, false, false),
+            ],
+        );
+
+        let picker = app.picker.as_ref().expect("picker still open");
+        assert_eq!(picker.match_count(), local + 2, "the peer's rows joined");
+        assert_eq!(
+            picker.selection().cloned(),
+            selected,
+            "a peer answering must not move what Enter would do"
+        );
+
+        // A picker closed and reopened is not the one those rows were for.
+        app.add_picker_rows(
+            epoch.wrapping_sub(1),
+            vec![PickerRow::session("stale".to_owned(), 0, false, false)],
+        );
+        assert_eq!(
+            app.picker.as_ref().expect("picker still open").match_count(),
+            local + 2,
+            "rows meant for a picker that has gone are dropped"
         );
     }
 

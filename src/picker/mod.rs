@@ -187,6 +187,31 @@ impl Picker {
         self.closing && self.open.elapsed >= self.open.duration
     }
 
+    /// Add rows that turned up after the picker was already on screen.
+    ///
+    /// Peers answer one at a time and at their own speed, so the list fills in
+    /// under the query rather than waiting for the slowest of them. Order is
+    /// not the caller's problem: [`Picker::refilter`] sorts by session and
+    /// window index anyway, so a late session lands in its natural place.
+    ///
+    /// Unlike typing, this is not something the user did, so the selection
+    /// stays on the row it was on — pressing Enter must not jump somewhere
+    /// else because a peer answered in the same instant.
+    pub fn extend(&mut self, rows: impl IntoIterator<Item = PickerRow>) {
+        let selected = self.selection().cloned();
+        self.rows.extend(rows);
+        self.refilter();
+        if let Some(row) = selected {
+            if let Some(at) = self
+                .filtered
+                .iter()
+                .position(|(index, _)| self.rows[*index] == row)
+            {
+                self.selected = at;
+            }
+        }
+    }
+
     pub fn insert(&mut self, ch: char) {
         self.query.insert(self.cursor.min(self.query.len()), ch);
         self.cursor += 1;
