@@ -38,6 +38,7 @@ pub enum AgentState {
 #[derive(Default)]
 pub struct AgentTracker {
     last_output: HashMap<PaneId, Instant>,
+    last_input: HashMap<PaneId, Instant>,
     foreground: HashMap<PaneId, String>,
 }
 
@@ -45,6 +46,31 @@ impl AgentTracker {
     /// Record that a pane's screen just changed.
     pub fn note_output(&mut self, pane: PaneId, at: Instant) {
         self.last_output.insert(pane, at);
+    }
+
+    /// Record that keys were sent to a pane.
+    pub fn note_input(&mut self, pane: PaneId, at: Instant) {
+        self.last_input.insert(pane, at);
+    }
+
+    /// Whether the last thing to move a pane's screen was your own typing.
+    ///
+    /// Keystrokes echo, so a message being typed to an agent reads exactly
+    /// like the agent working, and pausing reads like it finishing. The two
+    /// are told apart by what came last: an agent that actually did something
+    /// keeps painting long after the keystroke that set it off, so its final
+    /// screen change lands well beyond it. `grace` covers the gap between a
+    /// key and the poll that notices its echo, so a pane is only "yours" if
+    /// nothing but the echo has happened since.
+    pub fn ended_on_your_typing(&self, pane: PaneId, grace: Duration) -> bool {
+        let Some(typed) = self.last_input.get(&pane) else {
+            return false;
+        };
+
+        !self
+            .last_output
+            .get(&pane)
+            .is_some_and(|printed| *printed > *typed + grace)
     }
 
     /// Record the command a pane is currently running, as of the last poll.
@@ -63,6 +89,7 @@ impl AgentTracker {
     /// Drop a pane's history when it closes, so its id can be reused cleanly.
     pub fn forget(&mut self, pane: PaneId) {
         self.last_output.remove(&pane);
+        self.last_input.remove(&pane);
         self.foreground.remove(&pane);
     }
 

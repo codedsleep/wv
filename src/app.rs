@@ -1177,11 +1177,15 @@ impl App {
 
     /// Whether a pane that just stopped is worth telling you about.
     ///
-    /// Two things disqualify it. The pane you are typing into is one: your own
-    /// keystrokes move the screen exactly like output does, so a message typed
-    /// to an agent reads as the agent working and pressing send reads as it
-    /// finishing. You are already looking at that pane, so it is never news.
-    /// The other is a run too short to have been one — see
+    /// Three things disqualify it. The pane you are typing into is one: your
+    /// own keystrokes move the screen exactly like output does, so a message
+    /// typed to an agent reads as the agent working and pressing send reads as
+    /// it finishing. You are already looking at that pane, so it is never news.
+    /// That covers the pane under the cursor now, but not one you typed into
+    /// and then left — the keystrokes stay on its screen and it goes quiet a
+    /// moment later, out of focus and sounding exactly like a finish. So a run
+    /// whose last screen change was your own echo is dropped wherever it is,
+    /// focused or not. The third is a run too short to have been one — see
     /// [`Self::ran_long_enough`].
     fn worth_a_bell(
         &self,
@@ -1190,7 +1194,9 @@ impl App {
         least: Duration,
         now: std::time::Instant,
     ) -> bool {
-        focused != Some(pane) && self.ran_long_enough(pane, least, now)
+        focused != Some(pane)
+            && !self.agents.ended_on_your_typing(pane, AGENT_POLL_INTERVAL)
+            && self.ran_long_enough(pane, least, now)
     }
 
     /// Whether a pane's run of `Working` lasted long enough to count.
@@ -1215,7 +1221,14 @@ impl App {
     /// dying together is still one bell, and so it is dropped unheard when
     /// nobody is attached, like every other transition that happens while no
     /// one is watching.
+    ///
+    /// A pane whose last screen change was your own typing is not counted:
+    /// `Working` there is the echo of an `/exit` you just sent, and a pane you
+    /// closed yourself is not news.
     fn note_agent_pane_died(&mut self, pane: PaneId) {
+        if self.agents.ended_on_your_typing(pane, AGENT_POLL_INTERVAL) {
+            return;
+        }
         if self.is_watched() && self.agent_states.get(&pane) == Some(&agent::AgentState::Working) {
             self.agent_died_working = Some(pane);
         }
@@ -3439,6 +3452,10 @@ impl App {
             .write(pane, &bytes)
             .await
             .with_context(|| format!("failed to send keys to pane {pane:?}"))?;
+        // Sent keys echo like typed ones, so they are stamped the same way.
+        // An agent set off by one still rings: by the time it stops, its own
+        // output is long past the keystroke that started it.
+        self.agents.note_input(pane, std::time::Instant::now());
 
         Ok(())
     }
@@ -3747,6 +3764,9 @@ impl App {
             if let Err(error) = self.backend.write(focused, &bytes).await {
                 tracing::warn!("failed to write input to pane: {error:#}");
             }
+            // Stamped so the echo about to appear is not mistaken for the
+            // agent working — see [`Self::worth_a_bell`].
+            self.agents.note_input(focused, std::time::Instant::now());
         }
 
         Ok(())
@@ -5164,6 +5184,68 @@ mod tests {
         assert!(
             !heard_a_bell(&mut rx),
             "it stopped once, so it is worth one bell"
+        );
+    }
+
+    /// Typing is not an agent working, so pausing is not one finishing. The
+    /// focus check alone misses this: you type a message, move to another pane
+    /// to read while you think, and the pane you left goes quiet a moment
+    /// later with your own words on its screen, unfocused and sounding exactly
+    /// like a finish.
+    #[tokio::test]
+    async fn your_own_typing_going_quiet_does_not_ring() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        // A long message, typed and echoed: the screen has been moving for
+        // half a minute, which is a run by every other measure.
+        app.agents.note_output(pane, std::time::Instant::now());
+        app.tick_agent_bell();
+        worked_a_while(&mut app, pane);
+        app.agents.note_input(pane, std::time::Instant::now());
+        look_away_from(&mut app, pane).await;
+
+        go_quiet(&mut app, pane);
+        app.tick_agent_bell();
+        assert!(
+            !heard_a_bell(&mut rx),
+            "the screen stopped moving because you stopped typing"
+        );
+    }
+
+    /// The other side of it: once the agent answers, its own output is the
+    /// last thing on screen, and the pane is news again.
+    #[tokio::test]
+    async fn an_agent_answering_what_you_typed_still_rings() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        app.agents.note_input(
+            pane,
+            std::time::Instant::now()
+                .checked_sub(Duration::from_secs(60))
+                .expect("the clock has been up for a minute"),
+        );
+        app.agents.note_output(pane, std::time::Instant::now());
+        app.tick_agent_bell();
+        worked_a_while(&mut app, pane);
+        look_away_from(&mut app, pane).await;
+
+        go_quiet(&mut app, pane);
+        app.tick_agent_bell();
+        assert!(
+            heard_a_bell(&mut rx),
+            "the agent printed long after the message that set it off"
         );
     }
 

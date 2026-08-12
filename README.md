@@ -167,7 +167,11 @@ stopped when weave started watching.
 The bell is for the pane you cannot see, so the focused one never rings. Your
 own keystrokes move an agent's screen exactly like its output does, and without
 that rule typing a message read as a turn and sending it read as that turn
-ending. Nor does a screen that moves once and settles: an idle agent still
+ending. That holds after you move on, too: a run whose last screen change was
+your own echo never rings, so typing into a pane and then leaving it to think
+stays silent, while an agent that answers — printing long after the message
+that set it off — still gets through. Nor does a screen that moves once and
+settles: an idle agent still
 repaints its footer, and a clock ticking over would otherwise be a whole turn
 beginning and ending every minute. `agent-minimum-run` is how long a run has to
 have lasted before stopping is worth hearing about — lower it if a quick answer
