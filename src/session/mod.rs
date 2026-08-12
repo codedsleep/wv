@@ -37,8 +37,12 @@ pub enum SessionEvent {
         nested: bool,
         frames: UnboundedSender<ServerToClient>,
     },
-    /// A message from the attached client.
-    Message(ClientToServer),
+    /// A message from an attached client.
+    ///
+    /// Carries the id of the connection it came in on: a resize is one
+    /// terminal's news about itself, not the session's, and a reply belongs to
+    /// the client that asked.
+    Message { from: u64, message: ClientToServer },
     /// Run a command and answer on `reply`.
     ///
     /// The reply channel travels with the request rather than going to the

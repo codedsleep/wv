@@ -100,10 +100,21 @@ impl DiffRenderer {
 
         let mut current_style = None;
         let mut index = 0;
-        let len = front.cells.len().min(back.cells.len());
+        // A `front` of another shape is not a record of this screen: its cell
+        // at a given index sits at a different column and row, so a pair that
+        // compares equal is not a column already showing the right thing. The
+        // only safe reading of it is that nothing on screen is known, which
+        // means painting every cell.
+        let stale_dimensions = front.width != back.width || front.height != back.height;
+        let len = if stale_dimensions {
+            back.cells.len()
+        } else {
+            front.cells.len().min(back.cells.len())
+        };
+        let unchanged = |index: usize| !stale_dimensions && front.cells[index] == back.cells[index];
 
         while index < len {
-            if front.cells[index] == back.cells[index] {
+            if unchanged(index) {
                 index += 1;
                 continue;
             }
@@ -112,13 +123,13 @@ impl DiffRenderer {
             let y = u16::try_from(index / usize::from(back.width)).unwrap_or(u16::MAX);
             queue!(self.queue, MoveTo(x, y))?;
 
-            while index < len && front.cells[index] != back.cells[index] {
+            while index < len && !unchanged(index) {
                 let style = Style::from_cell(back.cells[index], self.color_mode);
                 emit_style(&mut self.queue, &mut current_style, style)?;
 
                 let mut run = String::new();
                 while index < len
-                    && front.cells[index] != back.cells[index]
+                    && !unchanged(index)
                     && Style::from_cell(back.cells[index], self.color_mode) == style
                 {
                     let cell = back.cells[index];
@@ -357,6 +368,48 @@ mod tests {
         let text = String::from_utf8(out).expect("output is utf-8");
         assert!(!text.contains('\0'), "a NUL reached the terminal: {text:?}");
         assert!(text.contains("a "), "stray column not painted: {text:?}");
+    }
+
+    /// After a resize the surfaces are new grids of a new shape. A `front` of
+    /// the old shape describes no column of this screen, so cells that compare
+    /// equal by index must not be taken for cells already showing the right
+    /// thing — every one of them gets painted.
+    #[test]
+    fn flush_repaints_everything_when_the_front_is_a_different_shape() {
+        let front = Surface::new(4, 2);
+        let mut back = Surface::new(2, 2);
+        let mut out = Vec::new();
+
+        for (index, ch) in "abcd".chars().enumerate() {
+            back.cells[index] = Cell::new(ch, Color::Reset, Color::Reset, CellAttrs::empty());
+        }
+        // Equal to the blank `front` holds at this index, and painted anyway.
+        back.cells[3] = Cell::default();
+
+        DiffRenderer::with_color_mode(ColorMode::Truecolor)
+            .flush(&front, &back, &mut out)
+            .expect("flush should succeed");
+
+        let text = String::from_utf8(out).expect("output is utf-8");
+        assert!(text.contains("abc "), "screen not painted in full: {text:?}");
+    }
+
+    /// The grown half of a resized screen is past the end of the old front, and
+    /// a diff that stops there leaves it holding whatever was there before.
+    #[test]
+    fn flush_paints_past_the_end_of_a_smaller_front() {
+        let front = Surface::new(2, 1);
+        let mut back = Surface::new(4, 1);
+        let mut out = Vec::new();
+
+        back.cells[3] = Cell::new('z', Color::Reset, Color::Reset, CellAttrs::empty());
+
+        DiffRenderer::with_color_mode(ColorMode::Truecolor)
+            .flush(&front, &back, &mut out)
+            .expect("flush should succeed");
+
+        let text = String::from_utf8(out).expect("output is utf-8");
+        assert!(text.contains('z'), "the new columns went unpainted: {text:?}");
     }
 
     #[test]
