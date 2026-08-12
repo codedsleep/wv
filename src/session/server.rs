@@ -213,7 +213,7 @@ async fn serve_connection(
         }
         Some(message @ ClientToServer::Quit) => {
             app_tx
-                .send(SessionEvent::Message(message))
+                .send(SessionEvent::Message { from: id, message })
                 .await
                 .context("session app stopped accepting events")?;
             return Ok(());
@@ -257,7 +257,8 @@ async fn serve_connection(
         // Detach and quit are the client's last words; forward them, then stop
         // reading so the writer can flush the server's reply and close.
         let final_message = matches!(message, ClientToServer::Detach | ClientToServer::Quit);
-        if app_tx.send(SessionEvent::Message(message)).await.is_err() {
+        let event = SessionEvent::Message { from: id, message };
+        if app_tx.send(event).await.is_err() {
             break;
         }
         if final_message {

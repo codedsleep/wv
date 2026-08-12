@@ -2457,6 +2457,26 @@ impl App {
         self.renegotiate_size().await;
     }
 
+    /// Record one client's new terminal size and re-measure the session.
+    ///
+    /// Resizing straight to what the client reported would hand the session
+    /// that terminal's size no matter who else is watching, and leave the
+    /// client's own record of itself at the size it used to be — so the next
+    /// attach or detach would measure everyone against a size that no longer
+    /// exists and put the session back to it.
+    async fn resize_client(&mut self, id: u64, cols: u16, rows: u16) {
+        let Some(client) = self.clients.iter_mut().find(|client| client.id == id) else {
+            // A local run has no clients to measure: the sole terminal is the
+            // session's size.
+            self.resize_to(cols, rows).await;
+            return;
+        };
+
+        client.cols = cols;
+        client.rows = rows;
+        self.renegotiate_size().await;
+    }
+
     /// Resize the session to the smallest attached terminal.
     ///
     /// A session can only be as big as the smallest window watching it —
@@ -2561,29 +2581,44 @@ impl App {
                 self.attach_client(id, cols, rows, truecolor, nested, frames)
                     .await;
             }
-            SessionEvent::Message(ClientToServer::Attach { .. }) => {
+            SessionEvent::Message {
+                message: ClientToServer::Attach { .. },
+                ..
+            } => {
                 tracing::warn!("ignoring a second attach on an established connection");
             }
-            SessionEvent::Message(ClientToServer::Hello { .. }) => {
+            SessionEvent::Message {
+                message: ClientToServer::Hello { .. },
+                ..
+            } => {
                 // The socket layer checks the version before forwarding
                 // anything, so a handshake reaching the app is redundant.
                 tracing::warn!("ignoring a repeated protocol handshake");
             }
-            SessionEvent::Message(ClientToServer::Input(event)) => {
+            SessionEvent::Message {
+                message: ClientToServer::Input(event),
+                ..
+            } => {
                 self.handle_input(Some(Ok(event))).await?;
             }
-            SessionEvent::Message(ClientToServer::Resize { cols, rows }) => {
-                self.resize_to(cols, rows).await;
+            // One terminal changed size, which is news about that terminal and
+            // not about the session: the session is as big as the smallest of
+            // them, so the new size is recorded against its own client and
+            // everyone watching is measured again.
+            SessionEvent::Message {
+                from,
+                message: ClientToServer::Resize { cols, rows },
+            } => {
+                self.resize_client(from, cols, rows).await;
             }
-            // A request from the attached client: it is watching frames, not
+            // A request from an attached client: it is watching frames, not
             // this socket, so the reply goes back through its frame sink.
-            SessionEvent::Message(ClientToServer::Request { id, command }) => {
+            SessionEvent::Message {
+                from,
+                message: ClientToServer::Request { id, command },
+            } => {
                 let result = self.execute_request(command).await?;
-                // Answering every client is wrong, but the socket layer does
-                // not yet tag input with its connection, so the request cannot
-                // be attributed. `wv exec` is the path that matters and it
-                // gets its reply on its own connection.
-                if let Some(client) = self.clients.first() {
+                if let Some(client) = self.clients.iter().find(|client| client.id == from) {
                     let _ = client.frames.send(ServerToClient::Reply { id, result });
                 }
             }
@@ -2614,12 +2649,18 @@ impl App {
                     tracing::debug!("command completed after its caller disconnected");
                 }
             }
-            SessionEvent::Message(ClientToServer::Detach) => {
+            SessionEvent::Message {
+                message: ClientToServer::Detach,
+                ..
+            } => {
                 // The socket layer knows which connection said this; it
                 // arrives tagged so only that client is detached.
                 self.detach_clients(None, ServerToClient::Detached).await;
             }
-            SessionEvent::Message(ClientToServer::Quit) => {
+            SessionEvent::Message {
+                message: ClientToServer::Quit,
+                ..
+            } => {
                 self.detach_clients(None, ServerToClient::Exit(ExitReason::Quit))
                     .await;
                 self.exit = ExitState::Quit;
@@ -4307,7 +4348,12 @@ impl App {
         }
         self.resize_mode = ResizeMode::Normal;
 
-        self.dirty = true;
+        // Both surfaces are new grids of a new shape, and so is every client's
+        // record of what its terminal is showing. Diffing across that compares
+        // cells by linear index — a different column and row on either side —
+        // and leaves every accidental match unpainted, so the old screen shows
+        // through the new one. The whole screen is redrawn instead.
+        self.force_full_repaint();
     }
 
     async fn tick(&mut self, dt: Duration) -> anyhow::Result<()> {
@@ -7190,6 +7236,54 @@ mod tests {
             .expect("refresh succeeds");
 
         assert!(app.clients[0].needs_full_repaint);
+    }
+
+    /// A resize reallocates the session's surfaces, so every client's idea of
+    /// what is on its screen is a grid of the old shape. Diffing the new frame
+    /// against it compares cells by linear index — different columns, different
+    /// rows — and every pair that happens to match is left unpainted, so the
+    /// old screen shows through the new one.
+    #[tokio::test]
+    async fn a_resize_repaints_every_client_in_full() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let (frames, _rx) = client_channel();
+        app.attach_client(1, 80, 24, true, false, frames).await;
+        app.tick(Duration::from_millis(16)).await.expect("a frame");
+
+        app.resize_to(40, 24).await;
+
+        assert!(app.clients[0].needs_full_repaint);
+        app.tick(Duration::from_millis(16)).await.expect("a frame");
+        assert_eq!(app.clients[0].front.width, 40);
+        assert_eq!(app.clients[0].front.height, 24);
+    }
+
+    /// A resize is one terminal's news about itself. Taken as the session's own
+    /// size it both ignores the smaller terminal also watching and leaves the
+    /// sender recorded at a size it no longer has, so the next attach or detach
+    /// measures everyone against it and puts the session back to it.
+    #[tokio::test]
+    async fn a_client_resize_is_recorded_against_that_client() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        let (wide, _wide_rx) = client_channel();
+        let (narrow, _narrow_rx) = client_channel();
+        app.attach_client(1, 120, 40, true, false, wide).await;
+        app.attach_client(2, 80, 24, true, false, narrow).await;
+
+        // The wide terminal is tiled down to half its width. The session is
+        // still bounded by the narrow one, which has not moved.
+        app.resize_client(1, 60, 40).await;
+
+        assert_eq!(app.clients[0].cols, 60);
+        assert_eq!((app.back.width, app.back.height), (60, 24));
+
+        // Dropping the narrow terminal leaves the wide one's real size, not
+        // the one it had when it attached.
+        app.drop_client(2, None);
+        app.renegotiate_size().await;
+        assert_eq!((app.back.width, app.back.height), (60, 40));
     }
 
     #[tokio::test]
