@@ -266,12 +266,21 @@ async fn splitting_and_switching_leaves_nothing_behind() {
         .expect("tweens settle");
     tick(&mut app).await;
 
-    app.execute(crate::command::Command::parse_str("select-window -t 2").expect("parses"))
+    // Window 2 has to exist before it can be switched to: `select-window` on an
+    // empty window is rejected, and `execute` swallows a rejection, so without
+    // this the switch below would quietly do nothing and the test would pass
+    // while exercising none of what it names.
+    app.execute_now_for_test(crate::command::Command::parse_str("new-window -d -t 2").expect("parses"))
+        .await
+        .expect("window 2 is created");
+    tick(&mut app).await;
+
+    app.execute_now_for_test(crate::command::Command::parse_str("select-window -t 2").expect("parses"))
         .await
         .expect("the switch runs");
     tick(&mut app).await;
 
-    app.execute(crate::command::Command::parse_str("select-window -t 1").expect("parses"))
+    app.execute_now_for_test(crate::command::Command::parse_str("select-window -t 1").expect("parses"))
         .await
         .expect("the switch back runs");
     app.snap_workspace_tweens(app.current_workspace)
