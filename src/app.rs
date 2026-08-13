@@ -498,6 +498,11 @@ pub struct App {
     /// pane is cheap but not free, and a job changes far more slowly than a
     /// frame is drawn.
     agents_polled: std::time::Instant,
+    /// When the last frame actually went out, over either path: the tick, or
+    /// the render-on-arrival at the bottom of the run loop. Idle ticks paint
+    /// nothing and so do not count, else the echo they would delay is the one
+    /// that render-on-arrival exists to hurry.
+    last_render: std::time::Instant,
     /// Which panes looked like they were asking a question as of the last poll.
     ///
     /// Deciding this means reading a pane's whole screen back as text, which is
@@ -983,6 +988,7 @@ impl App {
             resize_mode: ResizeMode::Normal,
             agents: AgentTracker::default(),
             agents_polled: std::time::Instant::now(),
+            last_render: std::time::Instant::now(),
             agents_asking: HashMap::new(),
             agents_busy: HashMap::new(),
             agent_screens: HashMap::new(),
@@ -1959,6 +1965,15 @@ impl App {
                 _ = sigwinch.recv(), if !session_mode => {
                     self.handle_resize().await;
                 }
+            }
+
+            // A keystroke's echo should not wait out the rest of a frame
+            // interval: paint it now unless a frame just went out. Under
+            // flooding output the elapsed check fails and the tick above keeps
+            // the frame rate a ceiling; animations still advance only on the
+            // tick, so a between-ticks frame just repeats their last pose.
+            if self.dirty && self.last_render.elapsed() >= self.tick_interval {
+                self.render()?;
             }
         }
 
@@ -4456,12 +4471,21 @@ impl App {
         self.advance_message(dt);
         self.advance_animations(dt).await?;
         self.tick_agents().await;
+        self.render()
+    }
 
+    /// Compose and flush a frame if anything changed since the last one.
+    ///
+    /// Rendering is separate from [`Self::tick`] so a keystroke's echo can be
+    /// painted the moment it arrives rather than waiting out the remainder of
+    /// a frame interval; the tick advances time, this paints the result.
+    fn render(&mut self) -> anyhow::Result<()> {
         // With nobody watching there is nothing to render for: keep pane state
         // and tweens current, but skip compositing entirely.
         if !self.dirty || !self.is_watched() {
             return Ok(());
         }
+        self.last_render = std::time::Instant::now();
 
         self.queue_buf.clear();
         let root = self.workspaces[self.current_workspace].root.as_ref();
@@ -4894,6 +4918,7 @@ impl App {
             resize_mode: ResizeMode::Normal,
             agents: AgentTracker::default(),
             agents_polled: std::time::Instant::now(),
+            last_render: std::time::Instant::now(),
             agents_asking: HashMap::new(),
             agents_busy: HashMap::new(),
             agent_screens: HashMap::new(),
