@@ -1968,16 +1968,19 @@ impl App {
             }
 
             // A keystroke's echo should not wait out the rest of a frame
-            // interval: paint it now unless a frame just went out. Under
-            // flooding output the elapsed check fails and the tick above keeps
-            // the frame rate a ceiling; animations still advance only on the
-            // tick, so a between-ticks frame just repeats their last pose.
+            // interval: paint it now unless a frame just went out. The guard
+            // means a full interval has passed, so this frame stands where the
+            // scheduled tick would have — and it must do the tick's whole job.
+            // `last_render` is stamped before composing while the timer resets
+            // after, so under flooding output the next event can land in that
+            // gap and repeat this path before the tick's deadline arrives; a
+            // bare render here would starve `ticks.tick()` indefinitely and
+            // freeze everything only the tick advances.
             if self.dirty && self.last_render.elapsed() >= self.tick_interval {
-                self.render()?;
-                // This frame took the scheduled one's place. A tick already
-                // due would fire right behind it and — output flooding in and
-                // marking the app dirty again — flush a second frame into the
-                // same interval, so the timer starts over from here instead.
+                let now = time::Instant::now();
+                let dt = now.duration_since(last_tick);
+                last_tick = now;
+                self.tick(dt).await?;
                 ticks.reset();
             }
         }
