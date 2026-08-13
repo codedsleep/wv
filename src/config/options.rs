@@ -270,6 +270,18 @@ pub const OPTIONS: &[OptionSpec] = &[
         status: OptionStatus::Live,
         default: "do you want,(y/n),(y/N),proceed?,continue?,esc to cancel",
     },
+    // Text that means an agent is still mid-turn, however still its screen is.
+    // A tool call that takes a minute prints nothing while it runs, which the
+    // activity window alone reads as the turn having ended — so the footer the
+    // agent shows while it can still be interrupted is believed over the
+    // silence. Matched case-insensitively against the bottom of the pane, like
+    // `agent-waiting-patterns`.
+    OptionSpec {
+        name: "agent-working-patterns",
+        kind: OptionKind::String,
+        status: OptionStatus::Live,
+        default: "to interrupt,esc to stop",
+    },
 ];
 
 pub fn spec(name: &str) -> Option<&'static OptionSpec> {

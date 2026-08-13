@@ -195,7 +195,7 @@ agent is not asked and needs no setup:
 
 | Colour | State   | Meaning                                                   |
 | ------ | ------- | --------------------------------------------------------- |
-| green  | working | printed something within `agent-activity-time`             |
+| green  | working | printed something within `agent-activity-time`, or the bottom of the pane matches a working pattern |
 | amber  | waiting | quiet, and the bottom of the pane matches a waiting pattern |
 | grey   | idle    | quiet, asking for nothing                                  |
 
@@ -204,6 +204,7 @@ set -g agent-status on
 set -g agent-commands 'claude,codex,opencode'
 set -g agent-activity-time 2000
 set -g agent-waiting-patterns 'do you want,(y/n),proceed?,continue?'
+set -g agent-working-patterns 'to interrupt,esc to stop'
 set -g agent-bell on
 set -g agent-minimum-run 3000
 ```
@@ -233,10 +234,25 @@ when its answer does, or an agent started as its pane's own command, which
 takes the pane with it. Closing a pane yourself does not ring, and neither does
 quitting an agent that had already stopped.
 
+A turn is not a stream of output. An agent that hands a long command to a tool
+prints nothing at all until it comes back, and a screen that has not moved for
+a couple of seconds is otherwise indistinguishable from one whose turn is over
+— so a single run rang once per tool call. `agent-working-patterns` is the way
+out: while the bottom of the pane still says the turn can be interrupted, the
+agent counts as working however still its screen is, and nothing rings until
+the footer goes. Set it empty to go back to the activity window alone.
+
 `agent-commands` is matched against the file name, so an agent started by
-absolute path still counts. `agent-waiting-patterns` is matched
-case-insensitively against the last few non-blank lines, so a question that has
-scrolled away no longer counts as one.
+absolute path still counts. `agent-waiting-patterns` and
+`agent-working-patterns` are matched case-insensitively against the last few
+non-blank lines, so a question that has scrolled away no longer counts as one.
+
+Weave itself only ever writes a `BEL`; it never raises, focuses, or otherwise
+takes over your terminal's window. Some terminals do that on your behalf — in
+kitty, `window_alert_on_bell yes` requests attention for the window, which a
+Wayland compositor may honour by pulling it to the front. If the bell should be
+heard and not seen, set `window_alert_on_bell no` and keep the sound
+(`enable_audio_bell yes`, or `command_on_bell`).
 
 ### tmux-syntax config
 
