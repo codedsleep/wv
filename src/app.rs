@@ -1974,6 +1974,11 @@ impl App {
             // tick, so a between-ticks frame just repeats their last pose.
             if self.dirty && self.last_render.elapsed() >= self.tick_interval {
                 self.render()?;
+                // This frame took the scheduled one's place. A tick already
+                // due would fire right behind it and — output flooding in and
+                // marking the app dirty again — flush a second frame into the
+                // same interval, so the timer starts over from here instead.
+                ticks.reset();
             }
         }
 

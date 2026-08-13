@@ -88,12 +88,17 @@ fn assert_same_screen(seen: &Replay, truth: &Replay, what: &str) {
     }
 }
 
-struct NoBackend;
+struct NoBackend {
+    // The app files panes by this ID: handing two spawns the same one makes
+    // the second pane unreachable, and every lookup lands on the first.
+    next_id: u64,
+}
 
 #[async_trait::async_trait]
 impl PaneBackend for NoBackend {
     async fn spawn(&mut self, _cmd: crate::backend::PaneCommand) -> anyhow::Result<PaneId> {
-        Ok(PaneId(99))
+        self.next_id += 1;
+        Ok(PaneId(self.next_id))
     }
 
     async fn write(&mut self, _id: PaneId, _data: &[u8]) -> anyhow::Result<()> {
@@ -111,7 +116,9 @@ impl PaneBackend for NoBackend {
 
 /// An app with one pane, rendering to clients only.
 fn app(cols: u16, rows: u16) -> App {
-    let mut app = App::with_backend_for_test(Box::new(NoBackend), cols, rows, PaneId(1));
+    // The first pane is registered directly as `PaneId(1)`; spawned panes
+    // count on from there.
+    let mut app = App::with_backend_for_test(Box::new(NoBackend { next_id: 1 }), cols, rows, PaneId(1));
     app.sink = OutputSink::Null;
     app
 }
