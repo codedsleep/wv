@@ -150,14 +150,18 @@ impl DiffRenderer {
             // Where the next thing printed must land. Set again whenever the
             // terminal's cursor may not be where this side thinks it is.
             let mut anchor = true;
+            // One column that must be painted even though the record says it is
+            // already right — see `spills_right`.
+            let mut force = false;
 
-            while index < len && !unchanged(index) {
+            while index < len && (!unchanged(index) || force) {
                 // Nothing is ever printed into the second column of a wide
                 // character, so step over it before anchoring rather than
                 // moving the cursor to a column nothing lands in.
                 if back.cells[index].is_continuation() && covered_by_wide(back, index) {
                     index += 1;
                     anchor = true;
+                    force = false;
                     continue;
                 }
 
@@ -173,10 +177,11 @@ impl DiffRenderer {
 
                 let mut run = String::new();
                 while index < len
-                    && !unchanged(index)
+                    && (!unchanged(index) || force)
                     && Style::from_cell(back.cells[index], self.color_mode) == style
                 {
                     let cell = back.cells[index];
+                    force = false;
                     if cell.is_continuation() {
                         // The right half of a wide character: printing the
                         // glyph in front of it already moved the terminal's
@@ -221,6 +226,7 @@ impl DiffRenderer {
                             index += 1;
                         }
                         anchor = true;
+                        force = spills_right(back, cell.ch, index);
                         break;
                     }
                 }
@@ -250,6 +256,31 @@ fn emitted_char(ch: char) -> char {
     } else {
         ch
     }
+}
+
+/// Whether the column at `index` has to be repainted because the glyph just
+/// printed in front of it may have landed on it.
+///
+/// Saying where the next column is keeps a width disagreement from walking the
+/// rest of the row sideways, but it cannot un-draw anything: a glyph this side
+/// counts as one column and the host draws across two has already covered the
+/// column beside it. When that column changed too it is painted anyway and the
+/// damage repairs itself, which is why a screen being filled in looks fine.
+/// When it did not change — a glyph appearing beside text that was already
+/// there, which is a status bar, a powerline separator, a Nerd Font icon in a
+/// nested weave's own bar — nothing repaints it, and the record of what the
+/// terminal is showing says that column is right. The corruption stays until
+/// something else happens to touch it.
+///
+/// So the neighbour of a glyph whose width is the host's to decide is painted
+/// on the strength of that, not on the diff. `ch` is the glyph that was
+/// printed and `index` the column after it; a glyph this side already knows to
+/// be two columns wide owns that column legitimately and is not in question.
+fn spills_right(back: &Surface, ch: char, index: usize) -> bool {
+    back.width != 0
+        && index < back.cells.len()
+        && index % usize::from(back.width) != 0
+        && surface::char_width(ch) == 1
 }
 
 /// Whether the cell at `index` is the second column of a wide character, as
@@ -510,6 +541,93 @@ mod tests {
         columns
     }
 
+    /// The same host, but starting from a screen that already shows something —
+    /// which is what a diff against a real `front` is. `seed` is what those
+    /// columns held before this frame was written.
+    fn columns_over(
+        seed: &str,
+        text: &str,
+        misjudged: char,
+        host_width: usize,
+    ) -> Vec<Option<char>> {
+        let mut columns: Vec<Option<char>> = seed.chars().map(Some).collect();
+        columns.resize(16, None);
+        let mut cursor = 0_usize;
+        let mut rest = text;
+
+        while !rest.is_empty() {
+            if let Some(tail) = rest.strip_prefix("\x1b[") {
+                let end = tail
+                    .find(|ch: char| ch.is_ascii_alphabetic())
+                    .expect("a finished escape sequence");
+                let (params, kind) = tail.split_at(end);
+                if kind.starts_with('H') {
+                    let col = params.split(';').nth(1).unwrap_or("1");
+                    cursor = col.parse::<usize>().expect("a column") - 1;
+                }
+                rest = &tail[end + 1..];
+                continue;
+            }
+
+            let ch = rest.chars().next().expect("a character");
+            rest = &rest[ch.len_utf8()..];
+            let width = if ch == misjudged {
+                host_width
+            } else {
+                usize::from(crate::term::surface::char_width(ch))
+            };
+            for step in 0..width {
+                if cursor + step < columns.len() {
+                    columns[cursor + step] = Some(if step == 0 { ch } else { ' ' });
+                }
+            }
+            cursor += width;
+        }
+
+        columns
+    }
+
+    /// Saying where the next column is cannot un-draw anything.
+    ///
+    /// A glyph this side counts as one column and the host draws across two has
+    /// already covered the column beside it. When that column changed too it
+    /// gets painted anyway and the damage repairs itself — which is why a
+    /// screen being filled in looks fine. When it did not change, nothing
+    /// repaints it and the record says it is already right, so it stays wrong:
+    /// a Nerd Font icon appearing in a nested weave's status bar beside text
+    /// that was already there.
+    #[test]
+    fn a_wider_glyph_does_not_clobber_a_column_the_frame_left_alone() {
+        let plain = |ch| Cell::new(ch, Color::Reset, Color::Reset, CellAttrs::empty());
+        let mut front = Surface::new(8, 1);
+        for (x, ch) in " cde".chars().enumerate() {
+            front.set(u16::try_from(x).expect("a small column"), 0, plain(ch));
+        }
+        let mut back = front.clone();
+        // `✔`: one column to weave's table, two to a host that gives it emoji
+        // presentation. Only column 0 changes.
+        back.set(0, 0, plain('\u{2714}'));
+        assert_eq!(
+            crate::term::surface::char_width('\u{2714}'),
+            1,
+            "this test needs a glyph weave counts as one column"
+        );
+
+        let mut out = Vec::new();
+        DiffRenderer::with_color_mode(ColorMode::Truecolor)
+            .flush(&front, &back, &mut out)
+            .expect("flush should succeed");
+        let text = String::from_utf8(out).expect("output is utf-8");
+
+        let columns = columns_over(" cde", &text, '\u{2714}', 2);
+        assert_eq!(columns[0], Some('\u{2714}'));
+        assert_eq!(
+            columns[1],
+            Some('c'),
+            "the glyph ate a column the diff called clean: {text:?}"
+        );
+    }
+
     /// The bug this is here for: one glyph the host measures differently used
     /// to take the whole rest of the row with it, and the record of what that
     /// terminal is showing said the row was fine — so it stayed wrong until
@@ -716,3 +834,4 @@ mod tests {
             .any(|window| window == needle)
     }
 }
+

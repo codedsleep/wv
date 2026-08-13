@@ -320,3 +320,13 @@ async fn a_real_editor_session_leaves_nothing_behind() {
 
 
 
+
+#[tokio::test]
+#[ignore = "prints the pane grid size; not a check"]
+async fn print_pane_size() {
+    let mut app = app(120, 32);
+    let (_c, frames) = Replay::new(120, 32);
+    app.attach_client(1, 120, 32, true, false, frames).await;
+    let (rows, cols) = app.pane(PaneId(1)).expect("pane").screen().size();
+    println!("PANE GRID: {cols}x{rows}");
+}
