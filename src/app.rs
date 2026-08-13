@@ -504,6 +504,13 @@ pub struct App {
     /// far too expensive to redo on every frame. A prompt appears at the speed
     /// a person reads, so the poll interval is resolution enough.
     agents_asking: HashMap<PaneId, bool>,
+    /// Which panes were showing an agent's mid-turn footer as of the last poll.
+    ///
+    /// Read from the same capture as `agents_asking`, and for the opposite
+    /// reason: it says the turn is not over however long the screen has been
+    /// still, which is what keeps a long tool call from ringing the bell in
+    /// the middle of a run.
+    agents_busy: HashMap<PaneId, bool>,
     /// A hash of what each agent pane's screen said at the last poll.
     ///
     /// This is the activity signal: an agent counts as working while its screen
@@ -977,6 +984,7 @@ impl App {
             agents: AgentTracker::default(),
             agents_polled: std::time::Instant::now(),
             agents_asking: HashMap::new(),
+            agents_busy: HashMap::new(),
             agent_screens: HashMap::new(),
             agent_indicators: Vec::new(),
             agent_states: HashMap::new(),
@@ -1428,7 +1436,8 @@ impl App {
             })
             .map(|pane| {
                 let asking = self.agents_asking.get(&pane).copied().unwrap_or(false);
-                (pane, self.agents.state(pane, now, window, asking))
+                let busy = self.agents_busy.get(&pane).copied().unwrap_or(false);
+                (pane, self.agents.state(pane, now, window, asking, busy))
             })
             .collect()
     }
@@ -1464,9 +1473,15 @@ impl App {
                 .get("agent-waiting-patterns")
                 .unwrap_or_default(),
         );
+        let working = agent::parse_list(
+            self.options
+                .get("agent-working-patterns")
+                .unwrap_or_default(),
+        );
         let now = std::time::Instant::now();
 
         self.agents_asking.clear();
+        self.agents_busy.clear();
 
         for pane in self.pane_ids() {
             // Only panes running an agent are ever asked about, so scanning
@@ -1484,6 +1499,8 @@ impl App {
             // off the bell.
             let asking = !patterns.is_empty() && agent::looks_like_a_question(&lines, &patterns);
             self.agents_asking.insert(pane, asking);
+            self.agents_busy
+                .insert(pane, agent::looks_busy(&lines, &working));
 
             let hash = hash_screen(&lines);
             // A pane first seen counts as having changed, so an agent that is
@@ -1571,7 +1588,8 @@ impl App {
                 };
 
                 let asking = self.agents_asking.get(&pane).copied().unwrap_or(false);
-                found.push((rank, self.agents.state(pane, now, window, asking)));
+                let busy = self.agents_busy.get(&pane).copied().unwrap_or(false);
+                found.push((rank, self.agents.state(pane, now, window, asking, busy)));
             }
         }
 
@@ -4780,6 +4798,7 @@ impl App {
         self.agents.forget(id);
         self.agent_states.remove(&id);
         self.agents_asking.remove(&id);
+        self.agents_busy.remove(&id);
         self.agent_screens.remove(&id);
         // Retire the `%N` with the pane. Numbers are never reused, so a stale
         // `%N` in a script fails loudly instead of hitting somebody else's pane.
@@ -4876,6 +4895,7 @@ impl App {
             agents: AgentTracker::default(),
             agents_polled: std::time::Instant::now(),
             agents_asking: HashMap::new(),
+            agents_busy: HashMap::new(),
             agent_screens: HashMap::new(),
             agent_indicators: Vec::new(),
             agent_states: HashMap::new(),
@@ -6170,6 +6190,55 @@ mod tests {
                 "a repaint is not a turn, however often it repeats"
             );
         }
+    }
+
+    /// A turn is not a stream of output. An agent that hands a long command to
+    /// a tool prints nothing until it comes back, and the screen sitting still
+    /// for a couple of seconds used to read as the turn having ended — so one
+    /// run rang the bell once per tool call, over and over, while the agent was
+    /// plainly still going. Its footer says so, and that is believed.
+    #[tokio::test]
+    async fn a_pause_inside_a_turn_does_not_ring() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, false, frames).await;
+
+        let pane = app.pane_ids()[0];
+        look_away_from(&mut app, pane).await;
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+
+        // A turn under way: output, and the footer offering to interrupt it.
+        if let Some(p) = app.pane_mut(pane) {
+            p.process(b"reading the tests\r\n\x1b[24;1HRunning bash (esc to interrupt)");
+        }
+        app.refresh_agent_screens();
+        app.tick_agent_bell();
+        worked_a_while(&mut app, pane);
+        let _ = heard_a_bell(&mut rx);
+
+        // Three tool calls' worth of silence, each longer than the activity
+        // window. The screen never moves; the footer never goes.
+        for _ in 0..3 {
+            go_quiet(&mut app, pane);
+            app.refresh_agent_screens();
+            app.tick_agent_bell();
+            assert!(
+                !heard_a_bell(&mut rx),
+                "it is still working; it says so at the bottom of its own screen"
+            );
+        }
+
+        // The turn ends: the footer goes with it.
+        if let Some(p) = app.pane_mut(pane) {
+            p.process(b"\x1b[2J\x1b[1;1Hall done\r\n");
+        }
+        app.refresh_agent_screens();
+        go_quiet(&mut app, pane);
+        app.refresh_agent_screens();
+        app.tick_agent_bell();
+        assert!(heard_a_bell(&mut rx), "that is the end of the turn");
     }
 
     /// The rule the two above must not cost: an agent that really did work,

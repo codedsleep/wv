@@ -103,15 +103,24 @@ impl AgentTracker {
     /// Resolve a pane's state.
     ///
     /// Output beats everything: an agent printing its way through a question
-    /// is working, not waiting. `asking` is the caller's read of the screen.
+    /// is working, not waiting. `asking` and `busy` are the caller's read of
+    /// the screen.
+    ///
+    /// `busy` is the agent's own word for it — the footer it shows while a
+    /// turn is running. A turn is not a stream of output: an agent that hands
+    /// a long command to a tool prints nothing until it comes back, and a
+    /// screen that has not moved for a couple of seconds is otherwise
+    /// indistinguishable from one whose turn is over. Believing the footer
+    /// keeps a pause inside a turn from reading as the end of one.
     pub fn state(
         &self,
         pane: PaneId,
         now: Instant,
         window: Duration,
         asking: bool,
+        busy: bool,
     ) -> AgentState {
-        if self.is_active(pane, now, window) {
+        if busy || self.is_active(pane, now, window) {
             AgentState::Working
         } else if asking {
             AgentState::Waiting
@@ -162,6 +171,22 @@ pub fn parse_list(value: &str) -> Vec<String> {
 /// full of questions it has already answered, and it is the bottom of the
 /// screen that says what it is waiting on now.
 pub fn looks_like_a_question(lines: &[String], patterns: &[String]) -> bool {
+    tail_matches(lines, patterns)
+}
+
+/// Whether a pane's visible text says the agent is still in the middle of a
+/// turn — `esc to interrupt` and its equivalents.
+///
+/// The same bottom-of-the-screen scan as [`looks_like_a_question`], because
+/// the footer that offers to interrupt sits in the same place as the prompt
+/// that asks a question, and only one of them is ever showing.
+pub fn looks_busy(lines: &[String], patterns: &[String]) -> bool {
+    tail_matches(lines, patterns)
+}
+
+/// Whether any of the last few non-blank lines contains any of `patterns`,
+/// case-insensitively.
+fn tail_matches(lines: &[String], patterns: &[String]) -> bool {
     const TAIL: usize = 6;
 
     if patterns.is_empty() {
@@ -184,7 +209,8 @@ pub fn looks_like_a_question(lines: &[String], patterns: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_rank, just_finished, looks_like_a_question, parse_list, AgentState, AgentTracker,
+        agent_rank, just_finished, looks_busy, looks_like_a_question, parse_list, AgentState,
+        AgentTracker,
     };
     use crate::backend::PaneId;
     use std::time::{Duration, Instant};
@@ -202,7 +228,7 @@ mod tests {
         tracker.note_output(PaneId(1), now);
 
         assert_eq!(
-            tracker.state(PaneId(1), now, WINDOW, false),
+            tracker.state(PaneId(1), now, WINDOW, false, false),
             AgentState::Working
         );
     }
@@ -216,7 +242,7 @@ mod tests {
         tracker.note_output(PaneId(1), now);
 
         assert_eq!(
-            tracker.state(PaneId(1), now, WINDOW, true),
+            tracker.state(PaneId(1), now, WINDOW, true, false),
             AgentState::Working
         );
     }
@@ -229,13 +255,49 @@ mod tests {
         let later = start + Duration::from_secs(5);
 
         assert_eq!(
-            tracker.state(PaneId(1), later, WINDOW, true),
+            tracker.state(PaneId(1), later, WINDOW, true, false),
             AgentState::Waiting
         );
         assert_eq!(
-            tracker.state(PaneId(1), later, WINDOW, false),
+            tracker.state(PaneId(1), later, WINDOW, false, false),
             AgentState::Idle
         );
+    }
+
+    /// The case the activity window alone gets wrong: a tool call long enough
+    /// to age the pane out of it, while the turn it belongs to is still going.
+    #[test]
+    fn a_pane_whose_footer_says_it_is_working_is_working() {
+        let mut tracker = AgentTracker::default();
+        let start = Instant::now();
+        tracker.note_output(PaneId(1), start);
+        let later = start + Duration::from_secs(60);
+
+        assert_eq!(
+            tracker.state(PaneId(1), later, WINDOW, false, true),
+            AgentState::Working
+        );
+        // And it outranks a question: an agent that printed one and carried on
+        // is not sitting at it.
+        assert_eq!(
+            tracker.state(PaneId(1), later, WINDOW, true, true),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn a_footer_offering_to_interrupt_reads_as_busy() {
+        let patterns = parse_list("to interrupt,esc to stop");
+        let busy = vec![
+            "· Running bash…".to_owned(),
+            "  (esc to interrupt · 42s)".to_owned(),
+        ];
+        let done = vec!["all done".to_owned(), "> ".to_owned()];
+
+        assert!(looks_busy(&busy, &patterns));
+        assert!(!looks_busy(&done, &patterns));
+        // No patterns configured is the old behaviour: nothing is ever busy.
+        assert!(!looks_busy(&busy, &[]));
     }
 
     #[test]
@@ -243,7 +305,7 @@ mod tests {
         let tracker = AgentTracker::default();
 
         assert_eq!(
-            tracker.state(PaneId(9), Instant::now(), WINDOW, false),
+            tracker.state(PaneId(9), Instant::now(), WINDOW, false, false),
             AgentState::Idle
         );
     }
@@ -259,7 +321,7 @@ mod tests {
 
         assert_eq!(tracker.foreground(PaneId(1)), None);
         assert_eq!(
-            tracker.state(PaneId(1), now, WINDOW, false),
+            tracker.state(PaneId(1), now, WINDOW, false, false),
             AgentState::Idle
         );
     }
