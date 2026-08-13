@@ -433,7 +433,14 @@ fn emit_style(
         return Ok(());
     }
 
-    let reset_attrs = current_style.is_some_and(|style| style.attrs != next_style.attrs);
+    // No record of the terminal's live style is not a clean slate: the last
+    // run of the previous frame left its SGR state set, and it stays set
+    // across flushes. Colours are re-stated below either way, but attributes
+    // are only ever *added* — `SetAttributes` with nothing in it writes
+    // nothing — so an underline left on at the end of one frame would carry
+    // into the plain cells at the start of the next. Those are painted in
+    // index order, top-left first: thin white lines in the corner.
+    let reset_attrs = current_style.map_or(true, |style| style.attrs != next_style.attrs);
     if reset_attrs {
         queue!(queue_buf, SetAttribute(Attribute::Reset))?;
     }
@@ -897,6 +904,43 @@ mod tests {
             .expect("repaint should succeed");
         let text = String::from_utf8(out).expect("output is utf-8");
         assert!(text.contains("xyz"), "the row went unpainted: {text:?}");
+    }
+
+    /// The terminal's SGR state survives between flushes; the renderer's
+    /// record of it does not. A frame that ends on an underlined run leaves
+    /// underline live on the wire, and the next frame paints its cells in
+    /// index order — top-left first. A plain cell's attributes are empty, and
+    /// empty attributes write nothing, so without an explicit reset the
+    /// corner of the screen comes out underlined: thin white lines over
+    /// whatever the frame meant to show.
+    #[test]
+    fn a_new_frame_does_not_inherit_the_attributes_the_last_one_left_set() {
+        let mut renderer = DiffRenderer::with_color_mode(ColorMode::Truecolor);
+        let plain = |ch| Cell::new(ch, Color::Reset, Color::Reset, CellAttrs::empty());
+
+        // Frame one ends on an underlined run, leaving underline set.
+        let front = Surface::new(4, 1);
+        let mut back = Surface::new(4, 1);
+        back.set(3, 0, Cell::new('u', Color::Reset, Color::Reset, CellAttrs::UNDERLINE));
+        let mut out = Vec::new();
+        renderer
+            .flush(&front, &back, &mut out)
+            .expect("flush should succeed");
+
+        // Frame two paints a plain cell at the top-left corner.
+        let front = back.clone();
+        back.set(0, 0, plain('a'));
+        let mut out = Vec::new();
+        renderer
+            .flush(&front, &back, &mut out)
+            .expect("flush should succeed");
+
+        let text = String::from_utf8(out).expect("output is utf-8");
+        let painted = text.find('a').expect("the plain cell was painted");
+        assert!(
+            text[..painted].contains("\x1b[0m"),
+            "the corner keeps the underline the last frame left set: {text:?}"
+        );
     }
 
     #[test]
