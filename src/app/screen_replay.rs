@@ -292,3 +292,31 @@ async fn splitting_and_switching_leaves_nothing_behind() {
     let truth = truth_of(&mut app, 2, 80, 24).await;
     assert_same_screen(&client, &truth, "after splitting and switching windows");
 }
+
+/// A real editor's output, replayed the way a PTY delivers it.
+///
+/// Recorded from Neovim editing a shell script in a 100x30 terminal: colours,
+/// a status line of powerline separators and Nerd Font glyphs, and the cursor
+/// moving around. Split into small chunks on the way in, because a PTY read
+/// ends wherever it ends — over ssh especially — and an escape sequence cut in
+/// half is exactly the case a screen has to survive.
+const NVIM_SESSION: &[u8] = include_bytes!("../../tests/fixtures/nvim_session.raw");
+
+#[tokio::test]
+async fn a_real_editor_session_leaves_nothing_behind() {
+    let mut app = app(100, 30);
+    let (mut client, frames) = Replay::new(100, 30);
+    app.attach_client(1, 100, 30, true, false, frames).await;
+
+    for chunk in NVIM_SESSION.chunks(137) {
+        feed(&mut app, PaneId(1), chunk);
+        tick(&mut app).await;
+    }
+    client.drain();
+
+    let truth = truth_of(&mut app, 2, 100, 30).await;
+    assert_same_screen(&client, &truth, "after a real editor session");
+}
+
+
+

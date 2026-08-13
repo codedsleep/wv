@@ -147,11 +147,27 @@ impl DiffRenderer {
                 continue;
             }
 
-            let x = u16::try_from(index % usize::from(back.width)).unwrap_or(u16::MAX);
-            let y = u16::try_from(index / usize::from(back.width)).unwrap_or(u16::MAX);
-            queue!(self.queue, MoveTo(x, y))?;
+            // Where the next thing printed must land. Set again whenever the
+            // terminal's cursor may not be where this side thinks it is.
+            let mut anchor = true;
 
             while index < len && !unchanged(index) {
+                // Nothing is ever printed into the second column of a wide
+                // character, so step over it before anchoring rather than
+                // moving the cursor to a column nothing lands in.
+                if back.cells[index].is_continuation() && covered_by_wide(back, index) {
+                    index += 1;
+                    anchor = true;
+                    continue;
+                }
+
+                if anchor {
+                    let x = u16::try_from(index % usize::from(back.width)).unwrap_or(u16::MAX);
+                    let y = u16::try_from(index / usize::from(back.width)).unwrap_or(u16::MAX);
+                    queue!(self.queue, MoveTo(x, y))?;
+                    anchor = false;
+                }
+
                 let style = Style::from_cell(back.cells[index], self.color_mode);
                 emit_style(&mut self.queue, &mut current_style, style)?;
 
@@ -170,22 +186,69 @@ impl DiffRenderer {
                         // continuation with no glyph in front of it — which
                         // the surface tries not to keep — still needs the
                         // column painted, so it gets a blank.
-                        if !covered_by_wide(back, index) {
-                            run.push(' ');
+                        if covered_by_wide(back, index) {
+                            index += 1;
+                            anchor = true;
+                            break;
                         }
+                        run.push(' ');
                         index += 1;
                         continue;
                     }
 
-                    run.push(cell.ch);
+                    run.push(emitted_char(cell.ch));
                     index += 1;
+
+                    // Anything but ASCII is a guess about how far the cursor
+                    // just moved, and the terminal on the other end is the one
+                    // who decides: its width table is its own, built from its
+                    // own version of Unicode. Rather than carry the guess into
+                    // the rest of the row, say where the next column is.
+                    //
+                    // More of the same character first, though. A disagreement
+                    // over a glyph repeated fifty times is a border drawn to
+                    // the wrong length and no worse — where it ends is stated
+                    // outright either way — and a border is most of what is
+                    // ever painted in one character. So the anchor goes after
+                    // the run, not after every glyph in it.
+                    if !cell.ch.is_ascii() {
+                        while index < len
+                            && !unchanged(index)
+                            && back.cells[index].ch == cell.ch
+                            && Style::from_cell(back.cells[index], self.color_mode) == style
+                        {
+                            run.push(emitted_char(cell.ch));
+                            index += 1;
+                        }
+                        anchor = true;
+                        break;
+                    }
                 }
 
-                queue!(self.queue, Print(run))?;
+                if !run.is_empty() {
+                    queue!(self.queue, Print(run))?;
+                }
             }
         }
 
         out.write_all(&self.queue)
+    }
+}
+
+/// What actually goes on the wire for a cell's character.
+///
+/// A cell is one column, and a zero-width character is not one: a terminal
+/// hangs it on the glyph *before* it and moves the cursor nowhere. Printed as
+/// though it were a column of its own it would change a neighbour this frame
+/// never meant to touch and leave every column after it on the row one to the
+/// left. It reaches a cell of its own only when it arrived with no glyph to
+/// join — a combining mark at the start of a line, a stray variation selector
+/// — so a blank is both what it means and what the surface says is there.
+fn emitted_char(ch: char) -> char {
+    if surface::char_is_zero_width(ch) {
+        ' '
+    } else {
+        ch
     }
 }
 
@@ -352,7 +415,9 @@ mod tests {
     /// The terminal draws a wide glyph across two columns and leaves its cursor
     /// past both. Printing anything for the second column — a blank, or the NUL
     /// the continuation cell holds — puts the rest of the row one column right
-    /// of where the surface says it is.
+    /// of where the surface says it is. Nothing is printed there, and what
+    /// comes after says its own column rather than trusting the glyph to have
+    /// moved the cursor exactly two.
     #[test]
     fn flush_prints_nothing_for_the_second_column_of_a_wide_character() {
         let front = Surface::new(5, 1);
@@ -370,7 +435,10 @@ mod tests {
 
         let text = String::from_utf8(out).expect("output is utf-8");
         assert!(!text.contains('\0'), "a NUL reached the terminal: {text:?}");
-        assert!(text.contains("\u{754c}ok"), "wide run not printed once: {text:?}");
+        assert!(
+            text.contains("\u{754c}\x1b[1;3Hok"),
+            "the columns after a wide glyph must be placed, not assumed: {text:?}"
+        );
     }
 
     /// A continuation with no glyph in front of it should not exist, but if one
@@ -396,6 +464,114 @@ mod tests {
         let text = String::from_utf8(out).expect("output is utf-8");
         assert!(!text.contains('\0'), "a NUL reached the terminal: {text:?}");
         assert!(text.contains("a "), "stray column not painted: {text:?}");
+    }
+
+    /// A terminal that measures a glyph differently than weave does.
+    ///
+    /// Every terminal carries its own width table, built from its own version
+    /// of Unicode: kitty draws `☰` across two columns where the emulator behind
+    /// a pane calls it one, and hangs a combining mark on the glyph before it
+    /// where weave gives it a column. Both are real, both are current, and
+    /// neither side can be talked out of it — so what is written has to survive
+    /// the disagreement.
+    fn columns_after(text: &str, misjudged: char, host_width: usize) -> Vec<Option<char>> {
+        let mut columns: Vec<Option<char>> = vec![None; 16];
+        let mut cursor = 0_usize;
+        let mut rest = text;
+
+        while !rest.is_empty() {
+            if let Some(tail) = rest.strip_prefix("\x1b[") {
+                let end = tail
+                    .find(|ch: char| ch.is_ascii_alphabetic())
+                    .expect("a finished escape sequence");
+                let (params, kind) = tail.split_at(end);
+                if kind.starts_with('H') {
+                    // `CSI row;col H`, one-based, and only ever one row here.
+                    let col = params.split(';').nth(1).unwrap_or("1");
+                    cursor = col.parse::<usize>().expect("a column") - 1;
+                }
+                rest = &tail[end + 1..];
+                continue;
+            }
+
+            let ch = rest.chars().next().expect("a character");
+            rest = &rest[ch.len_utf8()..];
+            let width = if ch == misjudged {
+                host_width
+            } else {
+                usize::from(crate::term::surface::char_width(ch))
+            };
+            if width > 0 && cursor < columns.len() {
+                columns[cursor] = Some(ch);
+            }
+            cursor += width;
+        }
+
+        columns
+    }
+
+    /// The bug this is here for: one glyph the host measures differently used
+    /// to take the whole rest of the row with it, and the record of what that
+    /// terminal is showing said the row was fine — so it stayed wrong until
+    /// something else happened to repaint those columns.
+    #[test]
+    fn a_glyph_the_terminal_measures_differently_only_costs_its_own_column() {
+        let front = Surface::new(8, 1);
+        let mut back = Surface::new(8, 1);
+        let plain = |ch| Cell::new(ch, Color::Reset, Color::Reset, CellAttrs::empty());
+
+        // `☰`: one column to the emulator behind the pane, two to kitty.
+        for (x, ch) in "ab\u{2630}cde".chars().enumerate() {
+            back.set(u16::try_from(x).expect("a small column"), 0, plain(ch));
+        }
+
+        let mut out = Vec::new();
+        DiffRenderer::with_color_mode(ColorMode::Truecolor)
+            .flush(&front, &back, &mut out)
+            .expect("flush should succeed");
+        let text = String::from_utf8(out).expect("output is utf-8");
+
+        let columns = columns_after(&text, '\u{2630}', 2);
+        assert_eq!(columns[0], Some('a'));
+        assert_eq!(columns[1], Some('b'));
+        assert_eq!(columns[2], Some('\u{2630}'));
+        // Column 3 is the one the glyph spilled into on this terminal. Every
+        // column after it still lands where the surface says it does.
+        assert_eq!(columns[3], Some('c'), "the row walked sideways");
+        assert_eq!(columns[4], Some('d'), "the row walked sideways");
+        assert_eq!(columns[5], Some('e'), "the row walked sideways");
+    }
+
+    /// The same disagreement in the other direction: a mark the terminal hangs
+    /// on the glyph before it, moving the cursor nowhere at all.
+    #[test]
+    fn a_zero_width_character_is_not_sent_as_a_column() {
+        let front = Surface::new(8, 1);
+        let mut back = Surface::new(8, 1);
+        let plain = |ch| Cell::new(ch, Color::Reset, Color::Reset, CellAttrs::empty());
+
+        // A combining acute with nothing in front of it to join.
+        for (x, ch) in "ab\u{0301}cd".chars().enumerate() {
+            back.set(u16::try_from(x).expect("a small column"), 0, plain(ch));
+        }
+
+        let mut out = Vec::new();
+        DiffRenderer::with_color_mode(ColorMode::Truecolor)
+            .flush(&front, &back, &mut out)
+            .expect("flush should succeed");
+        let text = String::from_utf8(out).expect("output is utf-8");
+
+        assert!(
+            !text.contains('\u{0301}'),
+            "a mark with no glyph to join went out as a column: {text:?}"
+        );
+
+        let columns = columns_after(&text, '\u{0301}', 0);
+        assert_eq!(columns[0], Some('a'));
+        assert_eq!(columns[1], Some('b'));
+        assert_eq!(columns[2], Some(' '), "the column it had is left blank");
+        assert_eq!(columns[3], Some('c'), "the row walked sideways");
+        assert_eq!(columns[4], Some('d'), "the row walked sideways");
     }
 
     /// After a resize the surfaces are new grids of a new shape. A `front` of

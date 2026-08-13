@@ -17,6 +17,18 @@ pub fn char_width(ch: char) -> u16 {
     u16::try_from(UnicodeWidthChar::width(ch).unwrap_or(1).max(1)).unwrap_or(1)
 }
 
+/// Whether a character takes no columns of its own — a combining mark, a
+/// variation selector, a zero-width joiner.
+///
+/// [`char_width`] deliberately answers one for these, because a surface cell
+/// holds one character and a mark that failed to join its neighbour still has
+/// to live somewhere. What it must not do is go out on the wire as a column:
+/// the terminal would hang it on the previous glyph and leave the cursor
+/// where it was, so everything printed after it lands a column early.
+pub fn char_is_zero_width(ch: char) -> bool {
+    !ch.is_ascii() && UnicodeWidthChar::width(ch) == Some(0)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Surface {
     pub width: u16,
