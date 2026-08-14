@@ -1473,6 +1473,13 @@ impl App {
     /// is far too expensive per frame, so they share one capture at the poll
     /// interval. A prompt appears at the speed a person reads and so does the
     /// output above it, making 500ms resolution enough for either.
+    ///
+    /// A pane showing an agent's own viewer — a transcript being scrolled —
+    /// is skipped whole: its screen is history, where old questions read as
+    /// live ones and scrolling reads as output. The reading it had before the
+    /// viewer opened stands until the live screen is back, and so does its
+    /// screen hash, so closing the viewer on an unchanged screen is not a
+    /// change either.
     fn refresh_agent_screens(&mut self) {
         let patterns = agent::parse_list(
             self.options
@@ -1484,21 +1491,35 @@ impl App {
                 .get("agent-working-patterns")
                 .unwrap_or_default(),
         );
+        let viewer = agent::parse_list(
+            self.options
+                .get("agent-viewer-patterns")
+                .unwrap_or_default(),
+        );
         let now = std::time::Instant::now();
-
-        self.agents_asking.clear();
-        self.agents_busy.clear();
 
         for pane in self.pane_ids() {
             // Only panes running an agent are ever asked about, so scanning
             // the rest would be work nothing reads.
             if self.agents.foreground(pane).is_none() {
+                self.agents_asking.remove(&pane);
+                self.agents_busy.remove(&pane);
                 self.agent_screens.remove(&pane);
                 continue;
             }
-            let Some(lines) = self.pane(pane).map(Pane::capture_lines) else {
+            let Some(pane_ref) = self.pane(pane) else {
                 continue;
             };
+            let lines = pane_ref.capture_lines();
+            // The title spinner is the agent's other word for "mid-turn",
+            // and the sturdier one: it holds when the footer is scrolled off
+            // or covered by a dialog, and it is a glyph rather than a
+            // sentence, so it cannot be reworded out from under the patterns.
+            let title_working = pane_ref.title().is_some_and(agent::title_says_working);
+
+            if agent::looks_like_a_viewer(&lines, &viewer) {
+                continue;
+            }
 
             // No patterns means nothing is ever waiting, but the screen still
             // has to be hashed: turning the question off must not also turn
@@ -1506,7 +1527,7 @@ impl App {
             let asking = !patterns.is_empty() && agent::looks_like_a_question(&lines, &patterns);
             self.agents_asking.insert(pane, asking);
             self.agents_busy
-                .insert(pane, agent::looks_busy(&lines, &working));
+                .insert(pane, title_working || agent::looks_busy(&lines, &working));
 
             let hash = hash_screen(&lines);
             // A pane first seen counts as having changed, so an agent that is
@@ -5964,6 +5985,86 @@ mod tests {
         assert!(
             heard_a_bell(&mut rx),
             "the screen stopped changing, so the agent stopped"
+        );
+    }
+
+    /// The spinner an agent puts in its window title while a turn runs is
+    /// believed over a still screen, exactly like the footer patterns — and
+    /// unlike them it survives the footer being covered or reworded. The turn
+    /// ends when the spinner goes, and that is when the bell rings.
+    #[tokio::test]
+    async fn a_spinning_title_keeps_a_quiet_agent_working() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, false, frames).await;
+
+        let pane = app.pane_ids()[0];
+        look_away_from(&mut app, pane).await;
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        if let Some(p) = app.pane_mut(pane) {
+            p.process(b"\x1b]2;\xe2\xa0\x8b Fixing the tests\x07thinking...\r\n");
+        }
+        app.refresh_agent_screens();
+        app.tick_agent_bell();
+        let _ = heard_a_bell(&mut rx);
+        worked_a_while(&mut app, pane);
+
+        // The screen has been still for ages, but the title still spins: a
+        // long tool call, not a finished turn.
+        go_quiet(&mut app, pane);
+        app.refresh_agent_screens();
+        app.tick_agent_bell();
+        assert!(
+            !heard_a_bell(&mut rx),
+            "the title still spins; the turn is not over"
+        );
+
+        // The spinner goes, the screen settles — now it has finished.
+        if let Some(p) = app.pane_mut(pane) {
+            p.process(b"\x1b]2;claude\x07");
+        }
+        go_quiet(&mut app, pane);
+        app.refresh_agent_screens();
+        app.tick_agent_bell();
+        assert!(heard_a_bell(&mut rx), "the spinner stopped; say so");
+    }
+
+    /// An open transcript viewer is history, not the live prompt: the old
+    /// questions in it are not being asked now, and scrolling through it is
+    /// not the agent printing. The reading from before it opened stands.
+    #[tokio::test]
+    async fn a_transcript_viewer_freezes_the_last_reading() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, _rx) = client_channel();
+        app.attach_client(1, 80, 24, true, false, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        if let Some(p) = app.pane_mut(pane) {
+            p.process(b"all done\r\n");
+        }
+        app.refresh_agent_screens();
+        go_quiet(&mut app, pane);
+        assert_eq!(
+            app.agent_pane_states().get(&pane),
+            Some(&crate::agent::AgentState::Idle),
+            "quiet at nothing: idle"
+        );
+
+        // The transcript opens: an answered question above the viewer's own
+        // footer, and a screen change to draw it all.
+        if let Some(p) = app.pane_mut(pane) {
+            p.process(b"Do you want to proceed?\r\nShowing detailed transcript (ctrl+o to toggle)\r\n");
+        }
+        app.refresh_agent_screens();
+        assert_eq!(
+            app.agent_pane_states().get(&pane),
+            Some(&crate::agent::AgentState::Idle),
+            "history is not a question being asked, and drawing it is not output"
         );
     }
 

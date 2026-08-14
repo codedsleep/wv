@@ -184,6 +184,41 @@ pub fn looks_busy(lines: &[String], patterns: &[String]) -> bool {
     tail_matches(lines, patterns)
 }
 
+/// Whether a pane's window title says its agent is mid-turn.
+///
+/// Claude Code and Codex both put a spinner glyph in the OSC title while a
+/// turn is running — braille frames, or half-circle quarters in newer Claude
+/// — and take it out when the turn ends. That makes the title a working
+/// signal that survives everything the screen scan is fragile to: a footer
+/// scrolled away or covered by a dialog, and the wording of "esc to
+/// interrupt" changing out from under the patterns.
+///
+/// A spinner is a lone glyph from those ranges standing as its own word.
+/// Titles are otherwise ordinary text — paths, prompts, model names — which
+/// never puts a bare braille cell or half-circle between spaces.
+pub fn title_says_working(title: &str) -> bool {
+    title.split_whitespace().any(|word| {
+        let mut chars = word.chars();
+        matches!(
+            (chars.next(), chars.next()),
+            (Some('\u{2800}'..='\u{28FF}' | '\u{25D0}'..='\u{25D3}'), None)
+        )
+    })
+}
+
+/// Whether a pane is showing an agent-owned viewer instead of its live state
+/// — Claude Code's ctrl+o transcript, Codex's scrollable transcript overlay.
+///
+/// A viewer shows history, and history lies to both of the other scans: it is
+/// full of questions that were answered long ago, and scrolling through it
+/// moves the screen exactly like output does. The same bottom-of-the-screen
+/// scan as [`looks_like_a_question`] finds the viewer's own footer, and while
+/// it is showing the caller keeps its last live reading instead of taking a
+/// new one.
+pub fn looks_like_a_viewer(lines: &[String], patterns: &[String]) -> bool {
+    tail_matches(lines, patterns)
+}
+
 /// Whether any of the last few non-blank lines contains any of `patterns`,
 /// case-insensitively.
 fn tail_matches(lines: &[String], patterns: &[String]) -> bool {
@@ -209,8 +244,8 @@ fn tail_matches(lines: &[String], patterns: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_rank, just_finished, looks_busy, looks_like_a_question, parse_list, AgentState,
-        AgentTracker,
+        agent_rank, just_finished, looks_busy, looks_like_a_question, looks_like_a_viewer,
+        parse_list, title_says_working, AgentState, AgentTracker,
     };
     use crate::backend::PaneId;
     use std::time::{Duration, Instant};
@@ -409,6 +444,44 @@ mod tests {
         assert!(!just_finished(Some(AgentState::Idle), AgentState::Waiting));
         assert!(!just_finished(None, AgentState::Idle));
         assert!(!just_finished(None, AgentState::Working));
+    }
+
+    /// The title spinner is a lone glyph standing as its own word: Claude
+    /// Code leads with it, Codex drops it mid-title, and both braille frames
+    /// and the newer half-circle quarters count.
+    #[test]
+    fn a_spinner_in_the_title_reads_as_working() {
+        assert!(title_says_working("⠋ Fixing the tests"));
+        assert!(title_says_working("◐ Thinking…"));
+        assert!(title_says_working("codex ⠙ working"));
+    }
+
+    /// Ordinary titles — including ones that merely contain braille or
+    /// half-circle glyphs inside a word — are not spinners.
+    #[test]
+    fn a_title_without_a_lone_spinner_glyph_is_not_working() {
+        assert!(!title_says_working(""));
+        assert!(!title_says_working("~/projects/weave"));
+        assert!(!title_says_working("claude"));
+        // Attached to other characters it is text, not a spinner.
+        assert!(!title_says_working("⠋⠙ two frames stuck together"));
+        assert!(!title_says_working("word⠋"));
+    }
+
+    /// The viewer scan is the same tail scan as the question scan, so a
+    /// footer at the bottom counts and one scrolled away does not.
+    #[test]
+    fn a_viewer_footer_at_the_bottom_counts() {
+        let patterns = parse_list("showing detailed transcript,home/end to jump");
+        let viewer = vec![
+            "Do you want to proceed?".to_owned(),
+            "Showing detailed transcript (ctrl+o to toggle)".to_owned(),
+        ];
+        let live = vec!["all done".to_owned(), "> ".to_owned()];
+
+        assert!(looks_like_a_viewer(&viewer, &patterns));
+        assert!(!looks_like_a_viewer(&live, &patterns));
+        assert!(!looks_like_a_viewer(&viewer, &[]));
     }
 
     #[test]

@@ -282,6 +282,18 @@ pub const OPTIONS: &[OptionSpec] = &[
         status: OptionStatus::Live,
         default: "to interrupt,esc to stop",
     },
+    // Text that means the pane is showing an agent's own viewer — a transcript
+    // being scrolled through — rather than its live state. History is full of
+    // questions that were answered long ago, and scrolling moves the screen
+    // exactly like output does, so both signals lie there; while the bottom of
+    // the pane matches, the last live reading stands instead of a new one.
+    // The defaults cover Claude Code's ctrl+o transcript and Codex's overlay.
+    OptionSpec {
+        name: "agent-viewer-patterns",
+        kind: OptionKind::String,
+        status: OptionStatus::Live,
+        default: "showing detailed transcript,home/end to jump",
+    },
 ];
 
 pub fn spec(name: &str) -> Option<&'static OptionSpec> {
