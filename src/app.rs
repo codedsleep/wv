@@ -535,7 +535,8 @@ pub struct App {
     /// the working signal — so a split opening, a pane moved, or the host
     /// resizing marked every idle agent Working and rang the bell when the
     /// repaint settled. A poll that finds the size changed therefore refreshes
-    /// the hash without crediting the agent with output.
+    /// the hash without crediting the agent with output — unless the pane was
+    /// already working, whose real output a long drag must not starve.
     agent_screen_sizes: HashMap<PaneId, (u16, u16)>,
     /// The indicators the status bar was last drawn with, so a frame is only
     /// forced when one of them actually changes.
@@ -1558,14 +1559,21 @@ impl App {
             // layout's, not the agent's — see [`Self::agent_screen_sizes`].
             // The hash still advances, so the next change is judged against
             // the settled screen rather than the pre-resize one.
+            //
+            // Only a quiet pane is discounted, though: an agent already
+            // inside its activity window is producing real output, and a
+            // sustained resize — a border dragged for seconds — must not
+            // starve its clock until mid-run reads as idle. What the resize
+            // is not allowed to do is wake a pane that was not working.
             let resized = self
                 .agent_screen_sizes
                 .insert(pane, size)
                 .is_some_and(|previous| previous != size);
+            let quiet = !self.agents.is_active(pane, now, window);
             // A pane first seen counts as having changed, so an agent that is
             // already mid-run when weave starts watching reads as working
             // rather than having to change twice before it registers.
-            if self.agent_screens.insert(pane, hash) != Some(hash) && !resized {
+            if self.agent_screens.insert(pane, hash) != Some(hash) && !(resized && quiet) {
                 self.agents.note_output(pane, now);
             }
         }
@@ -6066,6 +6074,49 @@ mod tests {
         assert!(
             !heard_a_bell(&mut rx),
             "the pane was idle before the resize and is idle after it"
+        );
+    }
+
+    /// A resize only discounts a quiet pane. An agent already mid-run keeps
+    /// printing through a border being dragged, and every one of those polls
+    /// sees a new size — starving its activity clock on each would age it
+    /// into Idle mid-turn and ring a bell for a finish that never happened.
+    #[tokio::test]
+    async fn a_sustained_resize_does_not_idle_an_agent_mid_run() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, false, frames).await;
+
+        let pane = app.pane_ids()[0];
+        look_away_from(&mut app, pane).await;
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        if let Some(p) = app.pane_mut(pane) {
+            p.process(b"working on it\r\n");
+        }
+        app.refresh_agent_screens();
+        app.tick_agent_bell();
+
+        // The drag: every poll finds a new size, and real output keeps
+        // arriving all the way through it.
+        for (cols, rows) in [(70, 22), (60, 20), (50, 18)] {
+            if let Some(p) = app.pane_mut(pane) {
+                p.resize(cols, rows);
+                p.process(b"still printing\r\n");
+            }
+            app.refresh_agent_screens();
+            app.tick_agent_bell();
+        }
+
+        assert_eq!(
+            app.agent_pane_states().get(&pane),
+            Some(&crate::agent::AgentState::Working),
+            "output through a drag is still the agent working"
+        );
+        assert!(
+            !heard_a_bell(&mut rx),
+            "the run never ended, so nothing rings"
         );
     }
 
