@@ -527,6 +527,16 @@ pub struct App {
     /// rang. A blinking cursor moves no cells, so the hash holds still through
     /// it and moves for output anyone could actually read.
     agent_screens: HashMap<PaneId, u64>,
+    /// The grid size each agent pane had at the last poll.
+    ///
+    /// A resize moves every cell without the agent having said a word: the
+    /// grid reflows on the spot, and the program repaints itself for the new
+    /// size in the same breath. Both read as the screen changing, which is
+    /// the working signal — so a split opening, a pane moved, or the host
+    /// resizing marked every idle agent Working and rang the bell when the
+    /// repaint settled. A poll that finds the size changed therefore refreshes
+    /// the hash without crediting the agent with output.
+    agent_screen_sizes: HashMap<PaneId, (u16, u16)>,
     /// The indicators the status bar was last drawn with, so a frame is only
     /// forced when one of them actually changes.
     agent_indicators: Vec<chrome::AgentIndicator>,
@@ -992,6 +1002,7 @@ impl App {
             agents_asking: HashMap::new(),
             agents_busy: HashMap::new(),
             agent_screens: HashMap::new(),
+            agent_screen_sizes: HashMap::new(),
             agent_indicators: Vec::new(),
             agent_states: HashMap::new(),
             agent_working_since: HashMap::new(),
@@ -1506,12 +1517,14 @@ impl App {
                 self.agents_asking.remove(&pane);
                 self.agents_busy.remove(&pane);
                 self.agent_screens.remove(&pane);
+                self.agent_screen_sizes.remove(&pane);
                 continue;
             }
             let Some(pane_ref) = self.pane(pane) else {
                 continue;
             };
             let lines = pane_ref.capture_lines();
+            let size = pane_ref.size();
             // The title spinner is the agent's other word for "mid-turn",
             // and the sturdier one: it holds when the footer is scrolled off
             // or covered by a dialog, and it is a glyph rather than a
@@ -1541,10 +1554,18 @@ impl App {
                 .insert(pane, title_working || agent::looks_busy(&lines, &working));
 
             let hash = hash_screen(&lines);
+            // A change on a poll that also finds the size changed is the
+            // layout's, not the agent's — see [`Self::agent_screen_sizes`].
+            // The hash still advances, so the next change is judged against
+            // the settled screen rather than the pre-resize one.
+            let resized = self
+                .agent_screen_sizes
+                .insert(pane, size)
+                .is_some_and(|previous| previous != size);
             // A pane first seen counts as having changed, so an agent that is
             // already mid-run when weave starts watching reads as working
             // rather than having to change twice before it registers.
-            if self.agent_screens.insert(pane, hash) != Some(hash) {
+            if self.agent_screens.insert(pane, hash) != Some(hash) && !resized {
                 self.agents.note_output(pane, now);
             }
         }
@@ -4864,6 +4885,7 @@ impl App {
         self.agents_asking.remove(&id);
         self.agents_busy.remove(&id);
         self.agent_screens.remove(&id);
+        self.agent_screen_sizes.remove(&id);
         // Retire the `%N` with the pane. Numbers are never reused, so a stale
         // `%N` in a script fails loudly instead of hitting somebody else's pane.
         self.pane_numbers.remove(&id);
@@ -4962,6 +4984,7 @@ impl App {
             agents_asking: HashMap::new(),
             agents_busy: HashMap::new(),
             agent_screens: HashMap::new(),
+            agent_screen_sizes: HashMap::new(),
             agent_indicators: Vec::new(),
             agent_states: HashMap::new(),
             agent_working_since: HashMap::new(),
@@ -5997,6 +6020,91 @@ mod tests {
             heard_a_bell(&mut rx),
             "the screen stopped changing, so the agent stopped"
         );
+    }
+
+    /// Spawning a split or moving a pane resizes its neighbours: the grid
+    /// reflows on the spot and the program repaints itself for the new size.
+    /// Neither is the agent doing anything, so an agent that was idle through
+    /// it stays idle and the settling screen is not a finish.
+    #[tokio::test]
+    async fn a_repaint_after_a_resize_is_not_an_agent_working() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, false, frames).await;
+
+        let pane = app.pane_ids()[0];
+        look_away_from(&mut app, pane).await;
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        if let Some(p) = app.pane_mut(pane) {
+            p.process(b"all done\r\n");
+        }
+        app.refresh_agent_screens();
+        go_quiet(&mut app, pane);
+        app.tick_agent_bell();
+        assert!(!heard_a_bell(&mut rx), "an idle agent is not news");
+
+        // The layout moves the pane, and the program answers the resize by
+        // painting the same content into the new shape.
+        if let Some(p) = app.pane_mut(pane) {
+            p.resize(60, 20);
+            p.process(b"\x1b[2J\x1b[Hall done\r\n");
+        }
+        app.refresh_agent_screens();
+        assert_eq!(
+            app.agent_pane_states().get(&pane),
+            Some(&crate::agent::AgentState::Idle),
+            "a resize repaint is the layout's doing, not the agent's"
+        );
+
+        // Even granted a long run and a settled screen, nothing finished.
+        app.tick_agent_bell();
+        worked_a_while(&mut app, pane);
+        go_quiet(&mut app, pane);
+        app.tick_agent_bell();
+        assert!(
+            !heard_a_bell(&mut rx),
+            "the pane was idle before the resize and is idle after it"
+        );
+    }
+
+    /// The other side of it: with the size settled, output is the agent's
+    /// again, so a rearranged layout does not swallow the bell of an agent
+    /// that truly ran and finished afterwards.
+    #[tokio::test]
+    async fn a_run_at_a_settled_size_still_rings() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, mut rx) = client_channel();
+        app.attach_client(1, 80, 24, true, false, frames).await;
+
+        let pane = app.pane_ids()[0];
+        look_away_from(&mut app, pane).await;
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        // The resize lands and its repaint with it; that poll is discounted.
+        if let Some(p) = app.pane_mut(pane) {
+            p.process(b"a prompt\r\n");
+        }
+        app.refresh_agent_screens();
+        if let Some(p) = app.pane_mut(pane) {
+            p.resize(60, 20);
+            p.process(b"\x1b[2J\x1b[Ha prompt\r\n");
+        }
+        app.refresh_agent_screens();
+
+        // The next output arrives at the settled size, so it is a real run.
+        if let Some(p) = app.pane_mut(pane) {
+            p.process(b"working on it\r\n");
+        }
+        app.refresh_agent_screens();
+        app.tick_agent_bell();
+
+        worked_a_while(&mut app, pane);
+        go_quiet(&mut app, pane);
+        app.tick_agent_bell();
+        assert!(heard_a_bell(&mut rx), "the agent stopped; say so");
     }
 
     /// The spinner an agent puts in its window title while a turn runs is
