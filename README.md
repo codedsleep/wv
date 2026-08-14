@@ -254,7 +254,9 @@ history, where every question was answered long ago and scrolling moves the
 screen exactly like output. While the bottom of the pane matches
 `agent-viewer-patterns`, weave keeps the reading it had before the viewer
 opened instead of taking a new one, so browsing a transcript neither marks the
-agent working nor rings the bell when you stop. Set it empty to scan every
+agent working nor rings the bell when you stop. An agent that was working when
+the viewer opened stays working however long the look, because the activity
+window cannot be read through the viewer either. Set it empty to scan every
 screen as live.
 
 `agent-commands` is matched against the file name, so an agent started by

@@ -1497,6 +1497,7 @@ impl App {
                 .unwrap_or_default(),
         );
         let now = std::time::Instant::now();
+        let window = self.agent_activity_window();
 
         for pane in self.pane_ids() {
             // Only panes running an agent are ever asked about, so scanning
@@ -1518,6 +1519,16 @@ impl App {
             let title_working = pane_ref.title().is_some_and(agent::title_says_working);
 
             if agent::looks_like_a_viewer(&lines, &viewer) {
+                // The activity clock cannot be read through the viewer any
+                // more than the rest of the screen can: the live output it
+                // times is hidden behind it. A pane inside the window when
+                // the viewer opened is kept inside it, so a long look at a
+                // transcript does not age a working agent into Idle — and
+                // one that was already quiet stays quiet, because there is
+                // nothing left to extend.
+                if self.agents.is_active(pane, now, window) {
+                    self.agents.note_output(pane, now);
+                }
                 continue;
             }
 
@@ -6065,6 +6076,57 @@ mod tests {
             app.agent_pane_states().get(&pane),
             Some(&crate::agent::AgentState::Idle),
             "history is not a question being asked, and drawing it is not output"
+        );
+    }
+
+    /// The activity clock cannot be read through an open viewer, so it must
+    /// not run out under one: a pane working when the transcript opened would
+    /// otherwise age into Idle mid-look and ring for a turn that never ended.
+    /// Each poll keeps a still-active pane inside the window; a pane that was
+    /// already quiet has nothing to extend and stays quiet.
+    #[tokio::test]
+    async fn a_viewer_holds_a_working_agent_inside_the_activity_window() {
+        let (backend, _handle) = mock_backend(PaneId(2));
+        let mut app = App::with_backend_for_test(backend, 80, 24, PaneId(1));
+        app.sink = OutputSink::Null;
+        let (frames, _rx) = client_channel();
+        app.attach_client(1, 80, 24, true, false, frames).await;
+
+        let pane = app.pane_ids()[0];
+        app.agents.set_foreground(pane, Some("claude".to_owned()));
+        if let Some(p) = app.pane_mut(pane) {
+            p.process(b"thinking...\r\nShowing detailed transcript (ctrl+o to toggle)\r\n");
+        }
+
+        // The tail of a long look: the last real output has nearly aged out
+        // of the window by the time this poll comes around.
+        let window = app.agent_activity_window();
+        let almost_the_window = window
+            .checked_sub(Duration::from_millis(100))
+            .expect("the window is longer than 100ms");
+        let nearly_out = std::time::Instant::now()
+            .checked_sub(almost_the_window)
+            .expect("the clock has been up longer than the window");
+        app.agents.note_output(pane, nearly_out);
+        app.refresh_agent_screens();
+
+        // Un-held it would have expired by then; held, the poll renewed it.
+        let after_another_look = std::time::Instant::now() + almost_the_window;
+        assert_eq!(
+            app.agents
+                .state(pane, after_another_look, window, false, false),
+            crate::agent::AgentState::Working,
+            "the viewer kept the working pane inside the window"
+        );
+
+        // A pane that had already gone quiet before the viewer opened is not
+        // revived by it.
+        go_quiet(&mut app, pane);
+        app.refresh_agent_screens();
+        assert_eq!(
+            app.agent_pane_states().get(&pane),
+            Some(&crate::agent::AgentState::Idle),
+            "there was nothing to extend"
         );
     }
 
