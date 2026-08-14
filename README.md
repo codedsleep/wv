@@ -195,7 +195,7 @@ agent is not asked and needs no setup:
 
 | Colour | State   | Meaning                                                   |
 | ------ | ------- | --------------------------------------------------------- |
-| green  | working | printed something within `agent-activity-time`, or the bottom of the pane matches a working pattern |
+| green  | working | printed something within `agent-activity-time`, the bottom of the pane matches a working pattern, or the pane's title carries the agent's spinner |
 | amber  | waiting | quiet, and the bottom of the pane matches a waiting pattern |
 | grey   | idle    | quiet, asking for nothing                                  |
 
@@ -205,6 +205,7 @@ set -g agent-commands 'claude,codex,opencode'
 set -g agent-activity-time 2000
 set -g agent-waiting-patterns 'do you want,(y/n),proceed?,continue?'
 set -g agent-working-patterns 'to interrupt,esc to stop'
+set -g agent-viewer-patterns 'showing detailed transcript,home/end to jump'
 set -g agent-bell on
 set -g agent-minimum-run 3000
 ```
@@ -241,6 +242,22 @@ a couple of seconds is otherwise indistinguishable from one whose turn is over
 out: while the bottom of the pane still says the turn can be interrupted, the
 agent counts as working however still its screen is, and nothing rings until
 the footer goes. Set it empty to go back to the activity window alone.
+
+The window title is believed the same way. Claude Code and Codex both spin a
+glyph in their OSC title while a turn runs and take it out when it ends, and
+weave reads that spinner as "working" alongside the footer — it holds when the
+footer is scrolled off or covered by a dialog, and being a glyph rather than a
+sentence, it cannot be reworded out from under the patterns.
+
+An agent's transcript viewer — Claude Code's `ctrl+o`, Codex's overlay — shows
+history, where every question was answered long ago and scrolling moves the
+screen exactly like output. While the bottom of the pane matches
+`agent-viewer-patterns`, weave keeps the reading it had before the viewer
+opened instead of taking a new one, so browsing a transcript neither marks the
+agent working nor rings the bell when you stop. An agent that was working when
+the viewer opened stays working however long the look, because the activity
+window cannot be read through the viewer either. Set it empty to scan every
+screen as live.
 
 `agent-commands` is matched against the file name, so an agent started by
 absolute path still counts. `agent-waiting-patterns` and
