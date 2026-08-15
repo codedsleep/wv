@@ -286,5 +286,6 @@ cargo clippy -- -D warnings    # pedantic-clean
 
 - [Hyprland](https://hypr.land) — motion-feel reference for the animation curves.
 - [Zellij](https://zellij.dev) — client/server session architecture reference.
+- [nord-tmux](https://github.com/nordtheme/tmux) — status bar design for the Nord theme.
 - [vt100](https://crates.io/crates/vt100) — VT escape sequence parser.
 - [portable-pty](https://crates.io/crates/portable-pty) — PTY abstraction.
