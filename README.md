@@ -4,8 +4,6 @@ An animated tiling terminal multiplexer in Rust.
 
 `wv` is a terminal-native tiling window manager + multiplexer with sub-cell-accurate motion at 60–160 FPS, recursive BSP splits, and its own client/server session layer for detach/reattach. No external multiplexer, no dependencies beyond the binary. Linux only.
 
-**Status:** v0.1.0 — Phase 5 polish (themes, truecolor + 256-color fallback, rotating log file), plus tmux parity for scripting and configuration.
-
 ## Features
 
 - **Smooth animated layout.** Topology changes are interpolated frame-by-frame with sub-cell precision. PTYs are resized only at tween completion, so children never see per-frame `SIGWINCH` storms.
@@ -41,30 +39,30 @@ cargo build --release
 
 Every command uses an `Alt` chord; unbound keys pass through to the focused pane.
 
-| Key                       | Action                       |
-|---------------------------|------------------------------|
-| `Alt+Enter`               | Split horizontal             |
-| `Alt+V`                   | Split vertical               |
-| `Alt+H` / `J` / `K` / `L` | Focus left / down / up / right |
-| `Alt+Shift+H` / `J` / `K` / `L` | Move the focused pane |
-| `Alt+;`                   | Goto picker (all sessions and windows, fuzzy-filtered) |
-| `Alt+R` / `Alt+Shift+R`   | Rename window / session      |
-| `Alt+Q`                   | Close focused pane           |
-| `Alt+D`                   | Detach, leaving the session running |
-| `Alt+Shift+Q`             | Quit                         |
+| Key                             | Action                                                 |
+| ------------------------------- | ------------------------------------------------------ |
+| `Alt+Enter`                     | Split horizontal                                       |
+| `Alt+V`                         | Split vertical                                         |
+| `Alt+H` / `J` / `K` / `L`       | Focus left / down / up / right                         |
+| `Alt+Shift+H` / `J` / `K` / `L` | Move the focused pane                                  |
+| `Alt+;`                         | Goto picker (all sessions and windows, fuzzy-filtered) |
+| `Alt+R` / `Alt+Shift+R`         | Rename window / session                                |
+| `Alt+Q`                         | Close focused pane                                     |
+| `Alt+D`                         | Detach, leaving the session running                    |
+| `Alt+Shift+Q`                   | Quit                                                   |
 
 ### Nested weave
 
 Two weaves in one key stream cannot both own `Alt`. A weave that detects it is the inner one moves its leader from `Alt` to `Ctrl+Alt`, and its prefix from `C-b` to `C-a`, keeping every chord's letter. `Ctrl+Alt` rather than `Ctrl` because `C-d`, `C-h`, `C-l`, `C-r`, `C-v` and `C-q` belong to the shell; nothing sends `Ctrl+Alt`, and the outer weave (whose root table holds bare `Alt`) passes it through.
 
-| Local            | Nested                 |
-|------------------|------------------------|
-| `Alt+Enter`      | `Ctrl+Alt+Enter`       |
-| `Alt+V`          | `Ctrl+Alt+V`           |
-| `Alt+H`/`J`/`K`/`L` | `Ctrl+Alt+H`/`J`/`K`/`L` |
-| `Alt+1` … `Alt+9`| `Ctrl+Alt+1` … `Ctrl+Alt+9` |
-| `Alt+;`          | `Ctrl+Alt+;`           |
-| `C-b` (prefix)   | `C-a` (`nested-prefix`)|
+| Local               | Nested                      |
+| ------------------- | --------------------------- |
+| `Alt+Enter`         | `Ctrl+Alt+Enter`            |
+| `Alt+V`             | `Ctrl+Alt+V`                |
+| `Alt+H`/`J`/`K`/`L` | `Ctrl+Alt+H`/`J`/`K`/`L`    |
+| `Alt+1` … `Alt+9`   | `Ctrl+Alt+1` … `Ctrl+Alt+9` |
+| `Alt+;`             | `Ctrl+Alt+;`                |
+| `C-b` (prefix)      | `C-a` (`nested-prefix`)     |
 
 Detection is per-terminal and dynamic: the client reports whether its terminal is across an SSH connection, so `ssh box` then `wv` is nested and reattaching locally puts `Alt` back. One remote client among several attached terminals is enough to nest the session.
 
@@ -77,7 +75,7 @@ set -g nested-prefix C-a  # empty keeps `prefix`
 
 Bindings you added move too — the rule is by modifier, so `bind -n M-s` answers to `C-M-s` while nested; a bare `C-t` stays put.
 
-Your outermost terminal must be able to *send* `Ctrl+Alt` chords. Letters survive any terminal, but `Ctrl+Alt+1` and `Ctrl+Alt+Enter` need the kitty keyboard protocol (kitty, foot, ghostty, WezTerm, recent Alacritty). weave negotiates it for the inner hop itself.
+Your outermost terminal must be able to _send_ `Ctrl+Alt` chords. Letters survive any terminal, but `Ctrl+Alt+1` and `Ctrl+Alt+Enter` need the kitty keyboard protocol (kitty, foot, ghostty, WezTerm, recent Alacritty). weave negotiates it for the inner hop itself.
 
 ## Animation
 
@@ -143,11 +141,11 @@ Each pane's foreground job is read from `/proc`. Agent panes are listed on the r
 
 Kinds appear in `agent-commands` order, not pane-creation order, so the layout holds still and only colour moves. State comes from the pane's own output — the agent is not asked and needs no setup:
 
-| Colour | State   | Meaning                                                   |
-| ------ | ------- | --------------------------------------------------------- |
+| Colour | State   | Meaning                                                                                                                       |
+| ------ | ------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | green  | working | printed within `agent-activity-time`, bottom of pane matches a working pattern, or the pane title carries the agent's spinner |
-| amber  | waiting | quiet, and the bottom of the pane matches a waiting pattern |
-| grey   | idle    | quiet, asking for nothing                                  |
+| amber  | waiting | quiet, and the bottom of the pane matches a waiting pattern                                                                   |
+| grey   | idle    | quiet, asking for nothing                                                                                                     |
 
 ```sh
 set -g agent-status on
@@ -197,12 +195,6 @@ Lines that can't be honoured are logged with file and line number rather than ab
 
 The client owns your terminal — raw mode, alternate screen, input events — and nothing else. Everything that survives a detach lives in the session server: PTYs, per-pane terminal state, layout tree, animation timeline and the renderer. The server ships rendered frames down a unix socket.
 
-```
-wv (client)                          wv --server --session NAME (daemon)
-  stdin  ── input / resize ────────►   keymap → command → layout → tween
-  stdout ◄── rendered frames ───────   owns every PTY, never dies with the client
-```
-
 ```sh
 wv                     # start a session (auto-named weave-<uid>) and attach
 wv --session main      # start or attach to a session by name
@@ -213,7 +205,7 @@ wv has-session [name]  # exit 0 if live, 1 if not
 wv kill-server         # end every session
 ```
 
-The status bar shows session name, windows, then date, clock and host in powerline blocks: ` dev  1 ❯ editor   2 ❯ build *      2026-05-11 ❮ 14:23  localhost `. Set `status-powerline off` if your font is not patched.
+The status bar shows session name, windows, then date, clock and host in powerline blocks: `dev  1 ❯ editor   2 ❯ build *      2026-05-11 ❮ 14:23  localhost`. Set `status-powerline off` if your font is not patched.
 
 Sockets live in `$XDG_RUNTIME_DIR/weave/<name>.sock` (falling back to a private directory under `/tmp`); a socket whose server has gone is unlinked automatically. Several terminals can watch one session, each with its own diff stream; the session renders at the size of the smallest attached terminal. The server ignores `SIGINT` and `SIGHUP`; `SIGTERM` shuts it down cleanly.
 
@@ -294,8 +286,6 @@ wv exec --session main capture-pane -t build.1 -p
 wv exec --session main display-message -p '#{window_name}'
 ```
 
-**Coming from tmux?** [`docs/TMUX_PARITY.md`](docs/TMUX_PARITY.md) is the full support matrix, including the one trap worth knowing: `split-window -h` and weave's `split-h` mean opposite things, and both keep their original meaning.
-
 ## Logs
 
 `~/.local/state/weave/weave.log`, rotating at 10 MB with 3 archives (`weave.log.1`–`.3`). Set `WEAVE_LOG=debug` (or `trace` / `warn` / `error`).
@@ -307,22 +297,6 @@ cargo test                     # unit + integration + insta snapshots
 cargo bench                    # criterion benches for the diff and compose hot paths
 cargo clippy -- -D warnings    # pedantic-clean
 ```
-
-## Non-goals
-
-Not on the roadmap: graphical WM, plugin system, floating windows, GPU rendering, Windows or macOS in v1, scrollback in v1.
-
-## FAQ
-
-**Why not a tmux fork?** tmux is a process supervisor with a rendering layer bolted on. weave starts from the rendering layer (animated, sub-cell-accurate compositor) and treats process supervision as a backend behind the `PaneBackend` trait.
-
-**Why Linux only?** It's what the author runs and tests. The OS-specific surface is small (PTY spawning, signal handlers), so a port is plausible — just not on the v1 critical path.
-
-**Why animate at all?** Instantaneous layout changes are jarring past two panes; your eye can't track which pane went where.
-
-**Why no GPU?** The animation budget is dominated by terminal output bandwidth, not interpolation math. A GPU buys nothing when the bottleneck is `write(stdout)`.
-
-**Does this work over SSH?** Yes — run `wv` on the remote host and a dropped connection is just a detach. Latency shows up as input lag and less smooth animation.
 
 ## Acknowledgements
 
