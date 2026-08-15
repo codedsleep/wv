@@ -4,11 +4,9 @@
   <img src="wv-logo.png" alt="wv" width="180" />
 </p>
 
-An animated tiling terminal multiplexer in Rust.
+Elevator pitch: An animated tiling terminal multiplexer in Rust.
 
-`wv` is short for **weave**, the name the project goes by in its config paths (`~/.config/weave/`), its log file and its session sockets. The command you type is always `wv`.
-
-It is a terminal-native tiling window manager + multiplexer with sub-cell-accurate motion at 60–160 FPS, recursive BSP splits, and its own client/server session layer for detach/reattach. No external multiplexer, no dependencies beyond the binary. Linux only.
+Currently wv is a bit rough round the edges in terms of animations (as shown in the video below), but is otherwise quite stable. I'm currently daily driving it, and enjoy the fast tiling window manager style workflow compared to Tmux.
 
 <p align="center">
   <img src="demo.gif" alt="wv demo" width="900" />
@@ -207,10 +205,6 @@ wv ls                  # list live sessions
 wv has-session [name]  # exit 0 if live, 1 if not
 wv kill-server         # end every session
 ```
-
-The status bar shows session name, windows, then date, clock and host in powerline blocks: `dev  1 ❯ editor   2 ❯ build *      2026-05-11 ❮ 14:23  localhost`. Set `status-powerline off` if your font is not patched.
-
-Sockets live in `$XDG_RUNTIME_DIR/weave/<name>.sock` (falling back to a private directory under `/tmp`); a socket whose server has gone is unlinked automatically. Several terminals can watch one session, each with its own diff stream; the session renders at the size of the smallest attached terminal. The server ignores `SIGINT` and `SIGHUP`; `SIGTERM` shuts it down cleanly.
 
 ### The goto picker
 
