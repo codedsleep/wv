@@ -21,7 +21,7 @@ It is a terminal-native tiling window manager + multiplexer with sub-cell-accura
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/codedsleep/animated-term-tiling-rust/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/codedsleep/wv/main/install.sh | sh
 ```
 
 Downloads the latest release binary, verifies its checksum and installs it to `/usr/local/bin` (asking for sudo) or `~/.local/bin` if root isn't available. The binaries are statically linked against musl, so no Rust toolchain and no runtime dependencies — x86_64 and aarch64.
@@ -32,14 +32,14 @@ Downloads the latest release binary, verifies its checksum and installs it to `/
 ... | sh -s -- --uninstall          # remove it again
 ```
 
-Prebuilt archives and `SHA256SUMS` are on the [releases page](https://github.com/codedsleep/animated-term-tiling-rust/releases).
+Prebuilt archives and `SHA256SUMS` are on the [releases page](https://github.com/codedsleep/wv/releases).
 
 ### From source
 
 Requires Rust 1.75+.
 
 ```sh
-cargo install --git https://github.com/codedsleep/animated-term-tiling-rust --locked
+cargo install --git https://github.com/codedsleep/wv --locked
 ```
 
 ## Quickstart

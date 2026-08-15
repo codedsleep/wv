@@ -1,7 +1,7 @@
 #!/bin/sh
 # weave installer — downloads a prebuilt wv binary and puts it on your PATH.
 #
-#   curl -fsSL https://raw.githubusercontent.com/codedsleep/animated-term-tiling-rust/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/codedsleep/wv/main/install.sh | sh
 #
 # Options (pass after `-s --` when piping: `... | sh -s -- --dir ~/.local/bin`):
 #   --dir DIR        install into DIR instead of the default
@@ -15,7 +15,7 @@
 
 set -eu
 
-OWNER_REPO="codedsleep/animated-term-tiling-rust"
+OWNER_REPO="codedsleep/wv"
 BIN_NAME="wv"
 VERSION="latest"
 INSTALL_DIR=""
