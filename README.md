@@ -1,7 +1,7 @@
 # wv
 
 <p align="center">
-  <img src="wv-logo.png" alt="wv" width="180" />
+  <img src="assets/wv-logo.png" alt="wv" width="180" />
 </p>
 
 **Elevator pitch:** An animated tiling terminal multiplexer in Rust, with modern refinements such as agent status at a glance and a fuzzy-filtered picker to quickly navigate panes, windows and sessions.
@@ -9,7 +9,7 @@
 Currently wv is a bit rough round the edges in terms of animations (as shown in the video below), but is otherwise quite stable. I'm currently daily driving it, and enjoy the fast tiling window manager style workflow compared to Tmux.
 
 <p align="center">
-  <img src="demo.gif" alt="wv demo" width="900" />
+  <img src="assets/demo.gif" alt="wv demo" width="900" />
 </p>
 
 ## Features
