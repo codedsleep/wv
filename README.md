@@ -4,6 +4,14 @@
   <img src="wv-logo.png" alt="wv" width="180" />
 </p>
 
+<p align="center">
+  <video src="https://github.com/codedsleep/wv/raw/main/demo.mp4" width="900" controls muted loop playsinline></video>
+</p>
+
+<p align="center">
+  <sub><a href="demo.mp4">Watch the demo</a> if the player above doesn't load.</sub>
+</p>
+
 An animated tiling terminal multiplexer in Rust.
 
 `wv` is short for **weave**, the name the project goes by in its config paths (`~/.config/weave/`), its log file and its session sockets. The command you type is always `wv`.
