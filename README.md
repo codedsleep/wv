@@ -135,10 +135,6 @@ The TOML parser accepts a single modifier (`Ctrl+` or `Alt+`). Multi-modifier ch
 
 Each pane's foreground job is read from `/proc`. Agent panes are listed on the right of the status bar, grouped by kind and numbered within it:
 
-```
-[weave-2e5478c7] 1:main 2:api     ● 1:claude  ● 2:claude  ● 1:codex  02:34:44
-```
-
 Kinds appear in `agent-commands` order, not pane-creation order, so the layout holds still and only colour moves. State comes from the pane's own output — the agent is not asked and needs no setup:
 
 | Colour | State   | Meaning                                                                                                                       |
@@ -157,18 +153,6 @@ set -g agent-viewer-patterns 'showing detailed transcript,home/end to jump'
 set -g agent-bell on
 set -g agent-minimum-run 3000
 ```
-
-**Bell.** When an agent leaves the working state, weave writes a single `BEL` — never raising or focusing the terminal itself. Turn it off with `set -g agent-bell off`. Agents finishing together ring once; agents already stopped when weave started never ring. The focused pane never rings, and a run whose last screen change was your own keystroke echo never rings, so typing into a pane and leaving it stays silent. `agent-minimum-run` is how long a run must have lasted to be worth hearing about — it filters idle footers and ticking clocks. An agent that ends by exiting rings the same way; closing a pane yourself does not.
-
-**Working patterns.** A turn is not a stream of output — an agent waiting on a long tool call prints nothing, which is indistinguishable from a finished turn, so a single run rang once per tool call. While the bottom of the pane matches `agent-working-patterns`, the agent counts as working however still its screen is. Set it empty to use the activity window alone.
-
-**Title spinner.** Claude Code and Codex spin a glyph in their OSC title during a turn; weave reads it as "working" alongside the footer, which holds when the footer is scrolled off or covered by a dialog.
-
-**Transcript viewers.** While the bottom of the pane matches `agent-viewer-patterns` (Claude Code's `ctrl+o`, Codex's overlay), weave keeps its prior reading rather than taking a new one, so scrolling history neither marks the agent working nor rings the bell. An agent working when the viewer opened stays working. Set it empty to scan every screen as live.
-
-`agent-commands` matches the file name, so an agent started by absolute path counts. Waiting/working patterns are matched case-insensitively against the last few non-blank lines.
-
-If your terminal raises its window on bell (kitty's `window_alert_on_bell yes`), set it to `no` and keep the sound (`enable_audio_bell yes`, or `command_on_bell`).
 
 ### tmux-syntax config
 
