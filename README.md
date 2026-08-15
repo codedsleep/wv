@@ -4,7 +4,7 @@
   <img src="wv-logo.png" alt="wv" width="180" />
 </p>
 
-Elevator pitch: An animated tiling terminal multiplexer in Rust.
+**Elevator pitch:** An animated tiling terminal multiplexer in Rust.
 
 Currently wv is a bit rough round the edges in terms of animations (as shown in the video below), but is otherwise quite stable. I'm currently daily driving it, and enjoy the fast tiling window manager style workflow compared to Tmux.
 
