@@ -5,11 +5,11 @@
 </p>
 
 <p align="center">
-  <video src="https://github.com/codedsleep/wv/raw/main/demo.mp4" width="900" controls muted loop playsinline></video>
+  <a href="demo.mp4"><img src="demo.gif" alt="wv demo" width="900" /></a>
 </p>
 
 <p align="center">
-  <sub><a href="demo.mp4">Watch the demo</a> if the player above doesn't load.</sub>
+  <sub>Click through for the full-resolution <a href="demo.mp4">MP4</a>.</sub>
 </p>
 
 An animated tiling terminal multiplexer in Rust.
