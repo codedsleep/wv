@@ -142,7 +142,7 @@ preset = "nord"   # or "tokyonight"
 # agent_idle       = "#4c566a"
 ```
 
-The TOML parser accepts a single modifier (`Ctrl+` or `Alt+`). Multi-modifier chords need the tmux-syntax file below, which takes `M-C-x`.
+The TOML parser accepts a single modifier (`Ctrl+` or `Alt+`).
 
 ### Agent status
 

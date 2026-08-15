@@ -8,8 +8,7 @@
 //! # tmux names and weave aliases
 //!
 //! Each command has a tmux name plus the short weave name it had before, kept
-//! as an alias so existing scripts and keybindings keep working. See
-//! `docs/TMUX_PARITY.md` for the full matrix.
+//! as an alias so existing scripts and keybindings keep working.
 
 pub mod target;
 
