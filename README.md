@@ -185,18 +185,6 @@ wv kill-server         # end every session
 
 `Alt+;` (also `C-b s` / `C-b w`) opens a single fuzzy-filtered list of every window in every live session.
 
-```
-┌─┤ goto ├─────────────────────────────────────────────────┐
-│ > dev                                                    │
-├──────────────────────────────────────────────────────────┤
-│* main                                         2 windows  │
-│▸ main:1 editor                                  2 panes  │
-│  main:2 dev-server                               1 pane  │
-│  scratch                                       1 window  │
-│  scratch:1 shell                                 1 pane  │
-└──────────────────────────────────────────────────────────┘
-```
-
 `↑`/`↓` (or `C-p`/`C-n`, or `Tab`) move; `C-u` clears the filter; `Esc`, `C-c` or `C-g` closes. The list is gathered once when the picker opens.
 
 Picking a window in the current session is an ordinary animated window change. Picking one in another session hands the client over — it detaches and reattaches without giving the terminal back, so there is no flash of shell. That is also what `switch-client -t other[:2]` does, and what tmux's `choose-tree`/`choose-session`/`choose-window` map onto. A session that won't answer over its socket is still listed as a bare row.
