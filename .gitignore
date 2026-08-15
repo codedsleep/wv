@@ -9,3 +9,7 @@ target/
 /target
 
 .planning/
+
+# Raw screen recordings; demo.mp4 is the trimmed version that ships
+*.mp4
+!demo.mp4
