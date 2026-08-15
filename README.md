@@ -1,5 +1,9 @@
 # wv
 
+<p align="center">
+  <img src="wv-logo.png" alt="wv" width="180" />
+</p>
+
 An animated tiling terminal multiplexer in Rust.
 
 `wv` is short for **weave**, the name the project goes by in its config paths (`~/.config/weave/`), its log file and its session sockets. The command you type is always `wv`.
