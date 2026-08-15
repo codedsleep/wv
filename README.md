@@ -1,8 +1,10 @@
-# weave
+# wv
 
 An animated tiling terminal multiplexer in Rust.
 
-`wv` is a terminal-native tiling window manager + multiplexer with sub-cell-accurate motion at 60–160 FPS, recursive BSP splits, and its own client/server session layer for detach/reattach. No external multiplexer, no dependencies beyond the binary. Linux only.
+`wv` is short for **weave**, the name the project goes by in its config paths (`~/.config/weave/`), its log file and its session sockets. The command you type is always `wv`.
+
+It is a terminal-native tiling window manager + multiplexer with sub-cell-accurate motion at 60–160 FPS, recursive BSP splits, and its own client/server session layer for detach/reattach. No external multiplexer, no dependencies beyond the binary. Linux only.
 
 ## Features
 
