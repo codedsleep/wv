@@ -18,17 +18,26 @@ An animated tiling terminal multiplexer in Rust.
 
 ## Install
 
-No prebuilt binaries — builds are from source. Requires Rust 1.75+.
-
 ```sh
-cargo install --git https://github.com/<owner>/weave --locked
+curl -fsSL https://raw.githubusercontent.com/codedsleep/animated-term-tiling-rust/main/install.sh | sh
 ```
 
+Downloads the latest release binary, verifies its checksum and installs it to `/usr/local/bin` (asking for sudo) or `~/.local/bin` if root isn't available. The binaries are statically linked against musl, so no Rust toolchain and no runtime dependencies — x86_64 and aarch64.
+
 ```sh
-git clone https://github.com/<owner>/weave
-cd weave
-cargo build --release
-./target/release/wv
+... | sh -s -- --dir ~/.local/bin   # install somewhere else
+... | sh -s -- --version v0.1.0     # pin a release
+... | sh -s -- --uninstall          # remove it again
+```
+
+Prebuilt archives and `SHA256SUMS` are on the [releases page](https://github.com/codedsleep/animated-term-tiling-rust/releases).
+
+### From source
+
+Requires Rust 1.75+.
+
+```sh
+cargo install --git https://github.com/codedsleep/animated-term-tiling-rust --locked
 ```
 
 ## Quickstart
