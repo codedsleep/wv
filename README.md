@@ -10,14 +10,6 @@ An animated tiling terminal multiplexer in Rust.
 
 It is a terminal-native tiling window manager + multiplexer with sub-cell-accurate motion at 60–160 FPS, recursive BSP splits, and its own client/server session layer for detach/reattach. No external multiplexer, no dependencies beyond the binary. Linux only.
 
-<p align="center">
-  <img src="demo/demo.gif" alt="wv splitting, moving and closing panes, then detaching and reattaching a session" width="900" />
-</p>
-
-<p align="center">
-  <sub>The GIF is capped at 256 colours, which bands the sub-cell blending. <a href="demo/demo.mp4">demo.mp4</a> keeps it.</sub>
-</p>
-
 ## Features
 
 - **Smooth animated layout.** Topology changes are interpolated frame-by-frame with sub-cell precision. PTYs are resized only at tween completion, so children never see per-frame `SIGWINCH` storms.
