@@ -90,10 +90,6 @@ set -g nested-keys off    # never
 set -g nested-prefix C-a  # empty keeps `prefix`
 ```
 
-Bindings you added move too — the rule is by modifier, so `bind -n M-s` answers to `C-M-s` while nested; a bare `C-t` stays put.
-
-Your outermost terminal must be able to _send_ `Ctrl+Alt` chords. Letters survive any terminal, but `Ctrl+Alt+1` and `Ctrl+Alt+Enter` need the kitty keyboard protocol (kitty, foot, ghostty, WezTerm, recent Alacritty). weave negotiates it for the inner hop itself.
-
 ## Animation
 
 Interpolated at `[ui] target_fps` (160 Hz default):
@@ -170,27 +166,6 @@ set -g agent-viewer-patterns 'showing detailed transcript,home/end to jump'
 set -g agent-bell on
 set -g agent-minimum-run 3000
 ```
-
-### tmux-syntax config
-
-`wv` also reads `$XDG_CONFIG_HOME/weave/weave.conf` (or `~/.config/weave/weave.conf`), applied after the TOML so it wins:
-
-```sh
-set -g prefix C-a
-unbind C-b
-bind C-a send-keys C-a
-
-bind -n M-Left  select-pane -L
-bind '|' split-window -h
-bind '-' split-window -v
-bind -r H resize-pane -L 5
-
-source-file extra.conf
-```
-
-Lines that can't be honoured are logged with file and line number rather than aborting the file. Options weave accepts but doesn't act on say so explicitly — `history-limit` warns that there's no scrollback. See [`docs/TMUX_PARITY.md`](docs/TMUX_PARITY.md).
-
-`C-b` is the prefix, with tmux's default bindings behind it (`c`, `%`, `"`, `x`, `z`, `&`, `d`, `n`/`p`/`l`, digits, arrows). The `Alt` chords still work with no prefix.
 
 ## Sessions
 
