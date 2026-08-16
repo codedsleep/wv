@@ -6,7 +6,7 @@
 
 **Elevator pitch:** An animated tiling terminal multiplexer in Rust, with modern refinements such as agent status at a glance and a fuzzy-filtered picker to quickly navigate panes, windows and sessions.
 
-Currently `wv` is brand new, so expect issues, but so far it's been quite stable. I'm currently daily driving it, and enjoy the fast tiling window manager style workflow compared to tmux.
+`wv` is brand new, so expect issues, but so far it's been relatively stable. I'm currently daily driving it, and enjoy the fast tiling window manager style workflow compared to tmux.
 
 https://github.com/user-attachments/assets/2ef50d88-3c2b-4500-9476-76b673094fce
 
