@@ -10,6 +10,7 @@ use crate::config::ThemeConfig;
 use crate::layout::geometry::Rect;
 use crate::layout::tree::Node;
 use crate::picker::{Filtered, Picker};
+use crate::render::compositor::frect_to_screen_rect;
 use crate::term::cell::{Cell, CellAttrs};
 use crate::term::pane::Pane;
 use crate::term::surface::{self, Surface};
@@ -92,21 +93,33 @@ pub fn draw_borders(
 ) {
     match tree {
         Node::Leaf {
-            pane, rect_target, ..
+            pane, rect_current, ..
         } => {
+            // The border belongs to where the pane is drawn this frame, not
+            // where it will end up. Framing the target while the content is
+            // still tweening towards it leaves the frame standing on its own
+            // for the length of the animation, with the content sliding in
+            // behind it. This is the rectangle `compose_node` blits into.
+            let rect = frect_to_screen_rect(*rect_current);
+            // A pane collapsing shut passes through widths where there is no
+            // room for two border columns; a lone `│` or `┌` there reads as
+            // debris rather than as a border.
+            if rect.w < 2 || rect.h < 2 {
+                return;
+            }
             let color = timeline.pane_border_color(
                 *pane,
                 focused,
                 theme.border_focused,
                 theme.border_unfocused,
             );
-            draw_rect_border(surface, *rect_target, color);
+            draw_rect_border(surface, rect, color);
             if pane_titles {
                 let title = panes
                     .iter()
                     .find(|candidate| candidate.id() == *pane)
                     .and_then(Pane::title);
-                draw_pane_title(surface, *rect_target, title, color);
+                draw_pane_title(surface, rect, title, color);
             }
         }
         Node::Internal { a, b, .. } => {
