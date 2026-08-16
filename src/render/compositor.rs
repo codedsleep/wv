@@ -1,11 +1,9 @@
 //! Compose panes into back surface.
 
-use crossterm::style::Color;
-
 use crate::anim::timeline::Timeline;
 use crate::config::ThemeConfig;
 use crate::layout::tree::Node;
-use crate::render::{chrome, subcell};
+use crate::render::chrome;
 use crate::term::pane::Pane;
 use crate::term::surface::Surface;
 use crate::{
@@ -93,7 +91,7 @@ pub fn focused_cursor(
 
     // The same rectangle `compose_node` blits the pane into, so the cursor
     // tracks the pane through a resize tween instead of jumping at the end.
-    let content = frect_to_covering_rect(*rect_current).content();
+    let content = frect_to_screen_rect(*rect_current).content();
     let (row, col) = pane.screen().cursor_position();
 
     // A pane whose emulator grid is still the old size can have its cursor
@@ -118,9 +116,11 @@ fn compose_node(node: &Node, panes: &[Pane], back: &mut Surface) {
                 return;
             };
 
-            let content_rect = frect_to_covering_rect(*rect_current).content();
+            // The border is drawn over the outermost cells of this same rect
+            // by `chrome::draw_borders`, so the two move together through a
+            // tween instead of the frame snapping ahead of the content.
+            let content_rect = frect_to_screen_rect(*rect_current).content();
             pane.blit_into(back, content_rect);
-            subcell::draw_edges(back, *rect_current, Color::Reset, Color::Reset);
         }
         Node::Internal { a, b, .. } => {
             compose_node(a, panes, back);
@@ -129,11 +129,23 @@ fn compose_node(node: &Node, panes: &[Pane], back: &mut Surface) {
     }
 }
 
-fn frect_to_covering_rect(rect: FRect) -> Rect {
-    let left = floor_to_u16(rect.x);
-    let top = floor_to_u16(rect.y);
-    let right = ceil_to_u16(rect.x + rect.w);
-    let bottom = ceil_to_u16(rect.y + rect.h);
+/// The cells a tweened rect occupies this frame.
+///
+/// Each edge is rounded to the nearest cell boundary on its own, rather than
+/// rounding the origin and the size separately. Two panes that share an edge
+/// in continuous space then share it on the grid too: `a.x + a.w == b.x` gives
+/// `round(a.x + a.w) == round(b.x)`, so they never overlap by a cell or leave a
+/// gap between them part-way through an animation.
+///
+/// Rounding rather than covering (`floor` of the near edge, `ceil` of the far)
+/// matters for the same reason: a covering rect would claim a partially
+/// entered cell for both neighbours at once, and whoever draws second wins
+/// that column for a frame.
+pub(crate) fn frect_to_screen_rect(rect: FRect) -> Rect {
+    let left = round_to_u16(rect.x);
+    let top = round_to_u16(rect.y);
+    let right = round_to_u16(rect.x + rect.w);
+    let bottom = round_to_u16(rect.y + rect.h);
 
     Rect {
         x: left,
@@ -144,7 +156,7 @@ fn frect_to_covering_rect(rect: FRect) -> Rect {
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn floor_to_u16(value: f32) -> u16 {
+fn round_to_u16(value: f32) -> u16 {
     if !value.is_finite() || value <= 0.0 {
         return 0;
     }
@@ -153,20 +165,7 @@ fn floor_to_u16(value: f32) -> u16 {
         return u16::MAX;
     }
 
-    value.floor() as u16
-}
-
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn ceil_to_u16(value: f32) -> u16 {
-    if !value.is_finite() || value <= 0.0 {
-        return 0;
-    }
-
-    if value >= f32::from(u16::MAX) {
-        return u16::MAX;
-    }
-
-    value.ceil() as u16
+    value.round() as u16
 }
 
 #[cfg(test)]
@@ -362,6 +361,143 @@ mod tests {
         assert_eq!(surface.get(0, 0).expect("cell exists").ch, '┌');
         assert_eq!(surface.get(1, 1).expect("cell exists").ch, 'A');
         assert_eq!(surface.get(1, 13).expect("cell exists").ch, 'B');
+    }
+
+    /// A leaf whose `rect_current` is part-way from one rect to another,
+    /// as it is on every frame of a resize tween.
+    fn tweening_leaf(pane: PaneId, current: FRect, target: Rect) -> Node {
+        Node::Leaf {
+            pane,
+            rect_current: current,
+            rect_target: target,
+        }
+    }
+
+    fn compose_one(root: &Node, pane: Pane, surface: &mut Surface) {
+        compose(
+            Some(root),
+            &[pane],
+            Some(PaneId(1)),
+            TEST_THEME,
+            &Timeline::new(),
+            surface,
+            ComposeOptions { pane_titles: false, zoomed: None },
+        );
+    }
+
+    /// The border is part of the pane: it has to move with the content
+    /// through a tween rather than standing at the destination while the
+    /// content slides in behind it.
+    #[test]
+    fn borders_follow_the_tweened_rect_not_the_target() {
+        let mut surface = Surface::new(40, 10);
+        let pane = Pane::new(PaneId(1), 18, 8);
+        // Half-way through sliding from x=0 to x=20.
+        let root = tweening_leaf(
+            PaneId(1),
+            FRect { x: 10.0, y: 0.0, w: 20.0, h: 10.0 },
+            Rect { x: 20, y: 0, w: 20, h: 10 },
+        );
+
+        compose_one(&root, pane, &mut surface);
+
+        assert_eq!(surface.get(10, 0).expect("cell exists").ch, '┌');
+        assert_eq!(surface.get(29, 0).expect("cell exists").ch, '┐');
+        assert_eq!(surface.get(10, 9).expect("cell exists").ch, '└');
+        assert_eq!(surface.get(29, 9).expect("cell exists").ch, '┘');
+        // Nothing of a frame at the destination yet.
+        assert_eq!(surface.get(39, 0).expect("cell exists").ch, ' ');
+        assert_eq!(surface.get(0, 0).expect("cell exists").ch, ' ');
+    }
+
+    /// The black bars: a pane edge that fell between two cells used to be
+    /// painted as a half-block glyph whose colour was `Reset` blended with
+    /// `Reset`, which comes out as opaque black on any terminal that is not
+    /// black itself. An edge between cells is now simply the border, on
+    /// whichever cell is nearer.
+    #[test]
+    fn fractional_edges_are_borders_not_black_half_blocks() {
+        let mut surface = Surface::new(40, 10);
+        let pane = Pane::new(PaneId(1), 18, 8);
+        let root = tweening_leaf(
+            PaneId(1),
+            FRect { x: 10.4, y: 0.6, w: 20.0, h: 9.0 },
+            Rect { x: 20, y: 0, w: 20, h: 10 },
+        );
+
+        compose_one(&root, pane, &mut surface);
+
+        let black = crossterm::style::Color::Rgb { r: 0, g: 0, b: 0 };
+        for cell in &surface.cells {
+            assert!(
+                !matches!(cell.ch, '▐' | '▌' | '▄' | '▀' | '▗' | '▖' | '▝' | '▘'),
+                "half-block glyph {:?} left in the frame",
+                cell.ch
+            );
+            assert_ne!(cell.fg, black, "an opaque black cell left in the frame");
+        }
+        // 10.4 rounds down, 0.6 rounds up: the frame sits at (10, 1).
+        assert_eq!(surface.get(10, 1).expect("cell exists").ch, '┌');
+    }
+
+    /// Two panes meeting on a fractional edge share that boundary on the grid:
+    /// no cell is claimed by both, and none is left to neither.
+    #[test]
+    fn neighbours_on_a_fractional_edge_neither_overlap_nor_gap() {
+        let mut surface = Surface::new(40, 10);
+        let left = Pane::new(PaneId(1), 18, 8);
+        let right = Pane::new(PaneId(2), 18, 8);
+        let boundary = 20.6;
+        let root = Node::Internal {
+            split: Split::Vertical,
+            ratio: 0.5,
+            ratio_target: 0.5,
+            a: Box::new(tweening_leaf(
+                PaneId(1),
+                FRect { x: 0.0, y: 0.0, w: boundary, h: 10.0 },
+                Rect { x: 0, y: 0, w: 20, h: 10 },
+            )),
+            b: Box::new(tweening_leaf(
+                PaneId(2),
+                FRect { x: boundary, y: 0.0, w: 40.0 - boundary, h: 10.0 },
+                Rect { x: 20, y: 0, w: 20, h: 10 },
+            )),
+            rect: Rect { x: 0, y: 0, w: 40, h: 10 },
+        };
+
+        compose(
+            Some(&root),
+            &[left, right],
+            Some(PaneId(1)),
+            TEST_THEME,
+            &Timeline::new(),
+            &mut surface,
+            ComposeOptions { pane_titles: false, zoomed: None },
+        );
+
+        // 20.6 rounds to 21: the left pane's right border is column 20 and
+        // the right pane's left border is column 21.
+        assert_eq!(surface.get(20, 0).expect("cell exists").ch, '┐');
+        assert_eq!(surface.get(21, 0).expect("cell exists").ch, '┌');
+        assert_eq!(surface.get(20, 5).expect("cell exists").ch, '│');
+        assert_eq!(surface.get(21, 5).expect("cell exists").ch, '│');
+    }
+
+    /// A pane collapsing shut is not framed once there is no room for both
+    /// sides of the frame: one column of `│` on its own is debris.
+    #[test]
+    fn a_pane_too_narrow_for_a_frame_draws_none() {
+        let mut surface = Surface::new(40, 10);
+        let pane = Pane::new(PaneId(1), 18, 8);
+        let root = tweening_leaf(
+            PaneId(1),
+            FRect { x: 20.0, y: 0.0, w: 1.2, h: 10.0 },
+            Rect { x: 20, y: 0, w: 0, h: 10 },
+        );
+
+        compose_one(&root, pane, &mut surface);
+
+        assert!(surface.cells.iter().all(|cell| cell.ch == ' '));
     }
 
     #[test]

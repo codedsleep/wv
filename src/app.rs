@@ -4948,11 +4948,15 @@ impl App {
     ) -> Self {
         let (_output_tx, output_rx) = mpsc::channel(1);
         let (_event_tx, event_rx) = mpsc::channel(1);
+        // The status bar is on below, so the layout stops a row short of the
+        // terminal, the same as `App::new` lays it out. A leaf that starts at
+        // the full height sits a row lower than its target with no tween to
+        // bring it up, and is drawn there until something snaps it.
         let root_rect = Rect {
             x: 0,
             y: 0,
             w: width,
-            h: height,
+            h: height.saturating_sub(1),
         };
 
         let (picker_rows_tx, picker_rows_rx) = mpsc::unbounded_channel();
@@ -8752,7 +8756,7 @@ mod tests {
                 assert!((rect_current.x - f32::from(new_target.x)).abs() < f32::EPSILON);
                 assert!(rect_current.y.abs() < f32::EPSILON);
                 assert!(rect_current.w.abs() < f32::EPSILON);
-                assert!((rect_current.h - 24.0).abs() < f32::EPSILON);
+                assert!((rect_current.h - 23.0).abs() < f32::EPSILON);
             }
             Node::Internal { .. } => panic!("expected new leaf"),
         }
