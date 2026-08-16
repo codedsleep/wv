@@ -9,7 +9,9 @@
 Currently `wv` is a bit rough round the edges in terms of animations (as shown in the video below), but is otherwise quite stable. I'm currently daily driving it, and enjoy the fast tiling window manager style workflow compared to tmux.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="wv demo" width="900" />
+  <video src="https://raw.githubusercontent.com/codedsleep/wv/main/assets/demo.mp4" width="900" controls muted loop playsinline></video>
+  <br />
+  <sub><a href="assets/demo.mp4">Watch the demo (MP4)</a> if the player above doesn't load.</sub>
 </p>
 
 ## Features
