@@ -6,13 +6,9 @@
 
 **Elevator pitch:** An animated tiling terminal multiplexer in Rust, with modern refinements such as agent status at a glance and a fuzzy-filtered picker to quickly navigate panes, windows and sessions.
 
-Currently `wv` is a bit rough round the edges in terms of animations (as shown in the video below), but is otherwise quite stable. I'm currently daily driving it, and enjoy the fast tiling window manager style workflow compared to tmux.
+Currently `wv` is brand new, so expect issues, but so far it's been quite stable. I'm currently daily driving it, and enjoy the fast tiling window manager style workflow compared to tmux.
 
-<p align="center">
-  <video src="https://raw.githubusercontent.com/codedsleep/wv/main/assets/demo.mp4" width="900" controls muted loop playsinline></video>
-  <br />
-  <sub><a href="assets/demo.mp4">Watch the demo (MP4)</a> if the player above doesn't load.</sub>
-</p>
+https://github.com/user-attachments/assets/2ef50d88-3c2b-4500-9476-76b673094fce
 
 ## Features
 
